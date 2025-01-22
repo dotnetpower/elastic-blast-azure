@@ -44,6 +44,7 @@ from .constants import AWS_MAX_JOBNAME_LENGTH, CSP, ELB_GCS_PREFIX
 from .constants import ELB_DFLT_LOGLEVEL, ELB_DFLT_LOGFILE
 from .constants import INPUT_ERROR, UNKNOWN_ERROR
 from .constants import ELB_S3_PREFIX
+from .constants import ELB_AZURE_PREFIX
 from .base import DBSource
 
 RESOURCES = [
@@ -260,7 +261,7 @@ def safe_exec(cmd: list[str] | str, env: dict[str, str] | None = None) -> subpro
     return p
 
 
-def get_blastdb_info(blastdb: str, gcp_prj: str | None = None):
+def get_blastdb_info(blastdb: str, gcp_prj: str | None = None, sas_token: Optional[str] = None):
     """Get BLAST database short name, path (if applicable), and label
     for Kubernetes. Gets user provided database from configuration.
     For custom database finds short name from full path, and provides
@@ -290,10 +291,31 @@ def get_blastdb_info(blastdb: str, gcp_prj: str | None = None):
         else:
             db_path = db + '.*'
         db = os.path.basename(db)
+    elif db.startswith(ELB_AZURE_PREFIX):
+        try:
+            
+            proc = safe_exec(f'azcopy list {os.path.dirname(db)}?{sas_token}')
+        except SafeExecError:
+            raise ValueError(f'Error requesting for {db}.*')
+        output = handle_error(proc.stdout)
+        if not output:
+            raise ValueError(f'There are no files at the bucket {db}.*')
+        # fnames: List[str] = output.split('\n')
+        fnames = list(
+            map(lambda line: line.split(";")[0].strip(),
+            filter(lambda line: os.path.basename(db) in line, output.splitlines()))
+        )
+        
+        res = reduce(lambda x, y: x or y.endswith('tar.gz'), fnames, False)
+        if res:
+            db_path = db + '.tar.gz'
+        else:
+            db_path = db + '.*'
+        db = os.path.basename(db)
     return db, db_path, sanitize_for_k8s(db)
 
 
-def check_user_provided_blastdb_exists(db: str, mol_type: MolType, db_source: DBSource, gcp_prj: str | None = None) -> None:
+def check_user_provided_blastdb_exists(db: str, mol_type: MolType, db_source: DBSource, gcp_prj: str | None = None, sas_token: Optional[str] = None) -> None:
     """Request blast database size from cloud service provider object storage
     If applied to custom db, just check the presence
     Returns the size in GB, if not found raises ValueError exception
@@ -307,6 +329,9 @@ def check_user_provided_blastdb_exists(db: str, mol_type: MolType, db_source: DB
             safe_exec(f'gsutil {prj} stat {db}.*')
         elif db.startswith(ELB_S3_PREFIX):
             cmd = f'aws s3 ls {db}'
+            safe_exec(cmd)
+        elif db.startswith(ELB_AZURE_PREFIX):
+            cmd = f'azcopy list {db}?{sas_token}'
             safe_exec(cmd)
     except SafeExecError:
         raise ValueError(f'BLAST database {db} was not found')
@@ -590,6 +615,8 @@ def get_resubmission_error_msg(results: str, cloud: CSP) -> str:
         retval += f'aws s3 rm --recursive --only-show-errors {results}'
     elif cloud == CSP.GCP:
         retval += f'gsutil -qm rm -r {results}'
+    elif cloud == CSP.AZURE:
+        retval += f'azcopy rm {results} --recursive'
     else:
         # TODO: add Azure
         raise NotImplementedError(f'Cloud provider {cloud} is not implemented')
