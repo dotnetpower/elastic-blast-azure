@@ -42,6 +42,7 @@ from contextlib import contextmanager
 from tenacity import retry, stop_after_attempt, wait_exponential
 from typing import Dict, IO, Tuple, TextIO, List, Optional
 from collections.abc import Iterable, Generator
+from tempfile import NamedTemporaryFile
 
 import boto3  # type: ignore
 from botocore.exceptions import ClientError  # type: ignore
@@ -101,11 +102,20 @@ def upload_file_to_gcs(filename: str, gcs_location: str, dry_run: bool = False) 
     else:
         safe_exec(cmd)
 
+@retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))    # type: ignore
+def upload_file_to_azure(filename: str, azure_location: str, dry_run: bool = False, sas_token: Optional[str] = None) -> None:
+    """ Function to copy the filename provided to GCS """
+    cmd = f'azcopy cp {filename} {azure_location}?{sas_token}'
+    if dry_run:
+        logging.info(cmd)
+    else:
+        safe_exec(cmd)
+
 # Write GS files to temp directory, then gsutil -mq cp temp_dir/* gs://chunks_path
 # mapping from gs bucket place to temp dir created by open_for_write
 bucket_temp_dirs: dict[str, str] = {}
 
-def copy_to_bucket(dry_run: bool = False):
+def copy_to_bucket(dry_run: bool = False, sas_token: Optional[str] = None):
     """ Copy files open in temp local dirs to corresponding places in gs.
         Works in concert with open_for_write.
         Parameters:
@@ -121,7 +131,14 @@ def copy_to_bucket(dry_run: bool = False):
         tempdir = bucket_temp_dirs[bucket_key]
         query_bytes += sum(os.path.getsize(os.path.join(tempdir,f)) for f in os.listdir(tempdir) if os.path.isfile(os.path.join(tempdir,f)))
         # gsutil -mq cp tempdir/* bucket_key/
-        if bucket_key.startswith(ELB_GCS_PREFIX):
+        if bucket_key.startswith(ELB_AZURE_PREFIX):
+            bucket_dir = bucket_key + ('/' if bucket_key[-1] != '/' else '')
+            cmd = f'azcopy cp {tempdir}/* {bucket_dir}?{sas_token} --recursive=true'
+            if dry_run:
+                logging.info(cmd)
+            else:
+                safe_exec(cmd)
+        elif bucket_key.startswith(ELB_GCS_PREFIX):
             bucket_dir = bucket_key + ('/' if bucket_key[-1] != '/' else '')
             cmd = ['gsutil', '-mq', 'cp', '-r', "%s/*" % tempdir, bucket_dir]
             if dry_run:
@@ -244,14 +261,20 @@ def check_dir_for_write(dirname: str, dry_run=False) -> None:
 
 
 @contextmanager
-def open_for_write_immediate(fname):
+def open_for_write_immediate(fname, sas_token: Optional[str] = None):
     """ Open a file in a cloud bucket for write in text mode. """
+    
+    temp_file = None
+    
     # TODO: need to test this function
     if fname.startswith(ELB_AZURE_PREFIX):
-        proc = subprocess.Popen(['azcopy', 'cp', '-', fname],
-                                stdin=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                universal_newlines=True)
-        f = proc.stdin
+        temp_file = NamedTemporaryFile(delete=False, mode='w', encoding='utf-8')
+        
+        # proc = subprocess.Popen(['azcopy', 'cp', temp_file.name, f'{fname}?{sas_token}'],
+        #                         stdin=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        #                         universal_newlines=True)
+        # f = proc.stdin
+        f = io.TextIOWrapper(buffer=io.BytesIO(), encoding='utf-8')
     elif fname.startswith(ELB_GCS_PREFIX):
         proc = subprocess.Popen(['gsutil', 'cp', '-', fname],
                                 stdin=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -272,6 +295,7 @@ def open_for_write_immediate(fname):
         if fname.startswith(ELB_S3_PREFIX):
             f.close()
             raise
+    
     else:
         if fname.startswith(ELB_S3_PREFIX):
             f.flush()
@@ -287,6 +311,23 @@ def open_for_write_immediate(fname):
             buffer.close()
             end = timer()
             logging.debug(f'Uploaded {fname} in {end - start:.2f} seconds')
+        if fname.startswith(ELB_AZURE_PREFIX):
+            # with open(temp_file.name, 'w') as f:
+            f.flush()
+            buffer = f.detach()
+            buffer.seek(0)
+            bufsize = buffer.getbuffer().nbytes
+            temp_file.write(buffer.read().decode('utf-8'))
+            temp_file.flush()
+            buffer.close()
+            logging.debug(f'Attempting to stream {bufsize} bytes to {fname}')
+
+            proc = subprocess.Popen(['azcopy', 'cp', temp_file.name, f'{fname}?{sas_token}'],
+                stdin=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                universal_newlines=True)
+            proc.communicate()
+            temp_file.close()
+            os.unlink(temp_file.name)
 
 
 def open_for_write(fname):
@@ -297,7 +338,7 @@ def open_for_write(fname):
     global bucket_temp_dirs
     if fname.startswith(ELB_S3_PREFIX):
         return open_for_write_immediate(fname)
-    if fname.startswith(ELB_GCS_PREFIX):
+    if fname.startswith(ELB_GCS_PREFIX) or fname.startswith(ELB_AZURE_PREFIX):
         # for the same gs path open files in temp dir and put it into
         # bucket_temp_dirs dictionary, copy through to bucket in copy_to_bucket later
         last_slash = fname.rfind('/')
@@ -311,7 +352,7 @@ def open_for_write(fname):
             tempdir = tempfile.mkdtemp()
             logging.debug(f'Create tempdir {tempdir} for bucket {bucket_dir}')
             bucket_temp_dirs[bucket_dir] = tempdir
-        return open(os.path.join(tempdir, filename), 'w')
+        return open(os.path.join(tempdir, filename), 'wt')
     # file on a regular filesystem
     last_sep = fname.rfind('/')
     if last_sep > 0:

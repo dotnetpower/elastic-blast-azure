@@ -223,7 +223,7 @@ class SafeExecError(ElasticBlastBaseException):
     pass
 
 
-def safe_exec(cmd: list[str] | str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+def safe_exec(cmd: list[str] | str, env: dict[str, str] | None = None, timeout: Optional[float] = 60) -> subprocess.CompletedProcess:
     """Wrapper around subprocess.run that raises SafeExecError on errors from
     command line with error messages assembled from all available information
 
@@ -245,7 +245,7 @@ def safe_exec(cmd: list[str] | str, env: dict[str, str] | None = None) -> subpro
         logging.debug(' '.join(cmd))
         if env:
             logging.debug(env)
-        p = subprocess.run(cmd, check=True, capture_output=True, env=run_env)
+        p = subprocess.run(cmd, check=True, capture_output=True, env=run_env, timeout=timeout)
     except subprocess.CalledProcessError as e:
         msg = f'The command "{" ".join(e.cmd)}" returned with exit code {e.returncode}\n{handle_error(e.stderr)}\n{handle_error(e.stdout)}'
         if e.output is not None:
@@ -258,6 +258,8 @@ def safe_exec(cmd: list[str] | str, env: dict[str, str] | None = None) -> subpro
     except FileNotFoundError as e:
         error_code = UNKNOWN_ERROR if e.errno is None else e.errno
         raise SafeExecError(error_code, str(e))
+    except subprocess.TimeoutExpired as e:
+        raise SafeExecError(e.timeout, f'Timeout expired for command "{" ".join(e.cmd)}"')
     return p
 
 
@@ -331,8 +333,17 @@ def check_user_provided_blastdb_exists(db: str, mol_type: MolType, db_source: DB
             cmd = f'aws s3 ls {db}'
             safe_exec(cmd)
         elif db.startswith(ELB_AZURE_PREFIX):
-            cmd = f'azcopy list {db}?{sas_token}'
-            safe_exec(cmd)
+            cmd = f'azcopy list {os.path.dirname(db)}?{sas_token}'
+            proc = safe_exec(cmd)
+            output = handle_error(proc.stdout)
+            fnames = list(
+                map(lambda line: line.split(";")[0].strip(),
+                filter(lambda line: os.path.basename(db) in line, output.splitlines()))
+            )
+            if len(fnames) > 0:
+                return proc
+            
+            raise ValueError(f'BLAST database {db} was not found')
     except SafeExecError:
         raise ValueError(f'BLAST database {db} was not found')
 
