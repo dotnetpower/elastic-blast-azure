@@ -51,6 +51,7 @@ RESOURCES = [
     'job-cloud-split-local-ssd.yaml.template',
     'job-init-local-ssd.yaml.template',
     'storage-gcp-ssd.yaml',
+    'storage-aks-ssd.yaml',
     'pvc-rwo.yaml.template',
     'pvc-rom.yaml.template',
     'job-init-pv.yaml.template',
@@ -295,7 +296,7 @@ def get_blastdb_info(blastdb: str, gcp_prj: str | None = None, sas_token: Option
         db = os.path.basename(db)
     elif db.startswith(ELB_AZURE_PREFIX):
         try:
-            
+            db = db[:-2] if '.*' in db else db # remove .* if present
             proc = safe_exec(f'azcopy list {os.path.dirname(db)}?{sas_token}')
         except SafeExecError:
             raise ValueError(f'Error requesting for {db}.*')
