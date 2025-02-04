@@ -313,7 +313,9 @@ def get_blastdb_info(blastdb: str, gcp_prj: str | None = None, sas_token: Option
         if res:
             db_path = db + '.tar.gz'
         else:
-            db_path = db + '.*'
+            # db_path = db + '.*'
+            db_path = f'{os.path.dirname(db)}/*?{sas_token}'
+            
         db = os.path.basename(db)
     return db, db_path, sanitize_for_k8s(db)
 
