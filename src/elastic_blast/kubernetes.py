@@ -743,6 +743,10 @@ def initialize_persistent_disk(cfg: ElasticBlastConfig, query_files: List[str] =
         subs['ELB_IMAGE_QS'] = cfg.azure.qs_docker_image
         subs['ELB_DOCKER_IMAGE'] = cfg.azure.elb_docker_image
         subs['ELB_SC_NAME'] = 'managed-csi' #'azure-disk-ssd'
+        subs['RESOURCE_GROUP'] = cfg.azure.resourcegroup
+        subs['STORAGE_ACCOUNT'] = cfg.azure.storage_account
+        subs['STORAGE_ACCOUNT_CONTAINER'] = cfg.azure.storage_account_container
+        subs['STORAGE_ACCOUNT_CONTAINER_RESULTS'] = 'results'
         logging.debug(f"Initializing persistent volume: {cfg.azure.elb_docker_image} {cfg.azure.qs_docker_image}")
         
 
@@ -751,17 +755,20 @@ def initialize_persistent_disk(cfg: ElasticBlastConfig, query_files: List[str] =
         
         ref = files('elastic_blast') / 'templates/storage-gcp-ssd.yaml'
         
-        if cfg.cloud_provider.cloud != CSP.AZURE:
-            # ref = files('elastic_blast') / 'templates/storage-aks-ssd.yaml'
-                
-            with as_file(ref) as storage_yaml:
-                cmd = f"kubectl --context={k8s_ctx} apply -f {storage_yaml}"
-                if dry_run:
-                    logging.info(cmd)
-                else:
-                    safe_exec(cmd)
+        if cfg.cloud_provider.cloud == CSP.AZURE:
+            ref = files('elastic_blast') / 'templates/storage-aks.yaml'
+            
+        sc_yaml = os.path.join(d, 'storage-class.yaml')
+        with open(sc_yaml, 'wt') as f:
+            f.write(substitute_params(ref.read_text(), subs))
+            
+        cmd = f"kubectl --context={k8s_ctx} apply -f {sc_yaml}"
+        if dry_run:
+            logging.info(cmd)
+        else:
+            safe_exec(cmd)
 
-        pvc_yaml = os.path.join(d, 'pvc-rwo.yaml')
+        pvc_yaml = os.path.join(d, 'pvc.yaml')
         with open(pvc_yaml, 'wt') as f:
             ref = files('elastic_blast').joinpath('templates/pvc-rwo.yaml.template')
             if cfg.cloud_provider.cloud == CSP.AZURE:

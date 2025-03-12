@@ -212,9 +212,11 @@ fi
 while true; do
     st=$(${KUBECTL} get -f pvc-rwm-aks.yaml -o jsonpath='{.status.phase}')
     [ $? -ne 0 ] && echo "ERROR: Getting PVC bind state" && exit 1
-    [ $st == Bound ] && break
-    echo "PVC status: $st"
-    sleep 30
+    if [[ "$st" == *"Bound"* ]]; then
+        echo "PVC status: $st"        
+        break
+    fi  
+    sleep 5 
 done
 
 # label the new persistent disk

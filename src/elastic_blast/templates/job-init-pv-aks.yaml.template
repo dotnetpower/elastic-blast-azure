@@ -14,8 +14,12 @@ spec:
       volumes:
       - name: blastdb
         persistentVolumeClaim:
-            claimName: blast-dbs-pvc-rwm
-            readOnly: false
+          claimName: blast-dbs-pvc-rwm
+          readOnly: false
+      - name: shared-data
+        persistentVolumeClaim:
+          claimName: blast-dbs-pvc-rwm-shared
+          readOnly: false   
       containers:
       - name: ${K8S_JOB_GET_BLASTDB}
         image: ${ELB_DOCKER_IMAGE}
@@ -23,6 +27,9 @@ spec:
         volumeMounts:
         - name: blastdb
           mountPath: /blast/blastdb
+          readOnly: false
+        - name: shared-data
+          mountPath: /blast/results
           readOnly: false
         env:
         - name: BLAST_USAGE_REPORT
@@ -60,7 +67,7 @@ spec:
           exit_code=$?;
           [ $exit_code -eq 0 ] || exit $exit_code;
           if [ ! -z "${ELB_TAXIDLIST}" ] ; then
-              azcopy cp '${ELB_TAXIDLIST}' /blast/blastdb;
+              azcopy cp '${ELB_TAXIDLIST}' /blast/results;
               exit_code=$?;
           fi;
           exit $exit_code;
@@ -68,8 +75,8 @@ spec:
         image: ${ELB_IMAGE_QS}
         workingDir: /blast/queries
         volumeMounts:
-        - name: blastdb
-          mountPath: /blast/queries
+        - name: shared-data
+          mountPath: /blast/results
           readOnly: false
         command: ["run.sh", "-i", "${INPUT_QUERY}", "-o", "${ELB_RESULTS}", "-b", "${BATCH_LEN}", "-c", "${COPY_ONLY}", "-q", "/blast/queries/"]
       restartPolicy: Never

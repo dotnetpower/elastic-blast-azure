@@ -943,7 +943,35 @@ def set_role_assignment(cfg: ElasticBlastConfig):
         logging.info(cmd)
     else:
         safe_exec(cmd)
+        
+    # get AKS Principal ID
+    cmd: List[str] = 'az aks show'.split()
+    cmd.append('--name')
+    cmd.append(cfg.cluster.name)
+    cmd.append('--resource-group')
+    cmd.append(cfg.azure.resourcegroup)
+    cmd.append('--query')
+    cmd.append('identity.principalId')
+    cmd.append('-o')
+    cmd.append('tsv')
+    if cfg.cluster.dry_run:
+        logging.info(cmd)
+    else:
+        p = safe_exec(cmd)
+        aks_pid = handle_error(p.stdout).strip()
     
+    cmd: List[str] = 'az role assignment create'.split()
+    cmd.append('--role')
+    cmd.append('Storage Blob Data Contributor')
+    cmd.append('--assignee')
+    cmd.append(aks_pid)
+    cmd.append('--scope')
+    cmd.append(sa_id)
+    if cfg.cluster.dry_run:
+        logging.info(cmd)
+    else:
+        safe_exec(cmd)
+        
     # get acr id
     cmd: List[str] = 'az acr show'.split()
     cmd.append('--name')
@@ -973,21 +1001,7 @@ def set_role_assignment(cfg: ElasticBlastConfig):
     else:
         safe_exec(cmd)
         
-    # get nodeResourceGroup
-    cmd: List[str] = 'az aks show'.split()
-    cmd.append('--name')
-    cmd.append(cfg.cluster.name)
-    cmd.append('--resource-group')
-    cmd.append(cfg.azure.resourcegroup)
-    cmd.append('--query')
-    cmd.append('nodeResourceGroup')
-    cmd.append('-o')
-    cmd.append('tsv')
-    if cfg.cluster.dry_run:
-        logging.info(cmd)
-    else:
-        p = safe_exec(cmd)
-        node_resourcegroup = handle_error(p.stdout).strip()
+    
         
     # get subscription id
     cmd: List[str] = 'az account show'.split()

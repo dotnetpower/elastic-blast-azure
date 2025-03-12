@@ -5,7 +5,19 @@ metadata:
 spec:
   accessModes:
     - ReadWriteMany
-  storageClassName: azureblob-nfs-premium
+  storageClassName: azure-blob-nfs 
+  resources:
+    requests:
+      storage: ${ELB_PD_SIZE}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: blast-dbs-pvc-rwm-shared
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: azure-blob-nfs-shared
   resources:
     requests:
       storage: ${ELB_PD_SIZE}
