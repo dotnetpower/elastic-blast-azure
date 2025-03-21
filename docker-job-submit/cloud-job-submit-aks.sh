@@ -135,7 +135,13 @@ done
 if ! $ELB_USE_LOCAL_SSD ; then
     # Create ReadOnlyMany PVC
     echo Create ReadWriteMany PVC
-    envsubst '${ELB_PD_SIZE}' </templates/pvc-rwm-aks.yaml.template >pvc-rwm-aks.yaml
+
+    if $ELB_USE_NFS ; then
+        envsubst '${ELB_PD_SIZE}' </templates/pvc-rwm-aks-nfs.yaml.template >pvc-rwm-aks.yaml
+    else
+        envsubst '${ELB_PD_SIZE}' </templates/pvc-rwm-aks.yaml.template >pvc-rwm-aks.yaml
+    fi
+    
     ${KUBECTL} apply -f pvc-rwm-aks.yaml
 fi
 

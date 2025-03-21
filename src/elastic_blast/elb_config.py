@@ -64,7 +64,7 @@ from .constants import CFG_CP_AZURE_ACR_RESOURCE_GROUP, CFG_CP_AZURE_ACR_NAME
 from .constants import CFG_CP_AZURE_RESOURCE_GROUP, CFG_CP_AZURE_REGION
 from .constants import CFG_CP_AZURE_STORAGE_ACCOUNT, CFG_CP_AZURE_STORAGE_ACCOUNT_CONTAINER, CFG_CP_AZURE_STORAGE_ACCOUNT_KEY
 from .constants import CFG_CP_AZURE_VNET, CFG_CP_AZURE_SUBNET
-from .constants import CFG_CP_AZURE_K8S_VERSION
+from .constants import CFG_CP_AZURE_K8S_VERSION, CFG_CP_AZURE_USE_NFS
 from .constants import ELB_PRIVATE_AZURE_BLASTDB_ENDPOINT
 from .constants import CFG_CP_GCP_K8S_VERSION
 from .constants import CFG_CP_AWS_REGION, CFG_CP_AWS_VPC, CFG_CP_AWS_SUBNET
@@ -302,6 +302,7 @@ class AZUREConfig(CloudProviderBaseConfig, ConfigParserToDataclassMapper):
     janitor_docker_image: str = ELB_JANITOR_DOCKER_IMAGE_AZURE
     qs_docker_image: str = ELB_QS_DOCKER_IMAGE_AZURE
     elb_job_id: str = 'job-' + uuid.uuid4().hex
+    use_nfs: bool = False
 
     # mapping to class attributes to ConfigParser parameters so that objects
     # can be initialized from ConfigParser objects
@@ -312,6 +313,7 @@ class AZUREConfig(CloudProviderBaseConfig, ConfigParserToDataclassMapper):
                'storage_account': ParamInfo(CFG_CLOUD_PROVIDER, CFG_CP_AZURE_STORAGE_ACCOUNT),
                'storage_account_container': ParamInfo(CFG_CLOUD_PROVIDER, CFG_CP_AZURE_STORAGE_ACCOUNT_CONTAINER),
                'storage_account_key': ParamInfo(CFG_CLOUD_PROVIDER, CFG_CP_AZURE_STORAGE_ACCOUNT_KEY),
+               'use_nfs': ParamInfo(CFG_CLOUD_PROVIDER, CFG_CP_AZURE_USE_NFS),
                'network': ParamInfo(CFG_CLOUD_PROVIDER, CFG_CP_AZURE_VNET),
                'subnet': ParamInfo(CFG_CLOUD_PROVIDER, CFG_CP_AZURE_SUBNET),
                'aks_version': ParamInfo(CFG_CLOUD_PROVIDER, CFG_CP_AZURE_K8S_VERSION),

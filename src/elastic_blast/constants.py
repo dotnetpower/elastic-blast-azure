@@ -313,6 +313,7 @@ CFG_CP_AZURE_STORAGE_ACCOUNT_KEY = 'azure-storage-account-key'
 CFG_CP_AZURE_VNET = 'azure-vnet'
 CFG_CP_AZURE_SUBNET = 'azure-subnet'
 CFG_CP_AZURE_K8S_VERSION = 'aks-version'
+CFG_CP_AZURE_USE_NFS = 'azure-use-nfs'
 
 # TODO: add Azure configuration
 

@@ -1,0 +1,17 @@
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: azure-blob-nfs
+provisioner: blob.csi.azure.com 
+parameters:
+  resourceGroup: ${RESOURCE_GROUP} 
+  storageAccount: ${STORAGE_ACCOUNT}  
+  containerName: ${STORAGE_ACCOUNT_CONTAINER}  
+  protocol: nfs
+allowVolumeExpansion: true 
+volumeBindingMode: Immediate 
+reclaimPolicy: Retain
+mountOptions:
+- nconnect=4
+

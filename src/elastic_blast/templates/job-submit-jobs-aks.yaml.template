@@ -31,6 +31,8 @@ spec:
           value: "${ELB_LABELS}"
         - name: ELB_USE_LOCAL_SSD
           value: "${ELB_USE_LOCAL_SSD}"
+        - name: ELB_USE_NFS
+          value: "${ELB_USE_NFS}"
         - name: ELB_AZURE_RESOURCE_GROUP
           value: "${ELB_AZURE_RESOURCE_GROUP}"
         - name: ELB_METADATA_DIR

@@ -74,6 +74,7 @@ def test_submit():
     cfg.cluster.name = cfg.cluster.name + f'-{os.environ["USER"]}' + '-36'
     cfg.cluster.reuse = True
     cfg.cluster.use_local_ssd = False
+    cfg.azure.use_nfs = True
     
     submit(args, cfg, [])
 

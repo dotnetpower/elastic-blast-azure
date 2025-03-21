@@ -665,8 +665,9 @@ def initialize_persistent_disk(cfg: ElasticBlastConfig, query_files: List[str] =
     pd_size = str(cfg.cluster.pd_size)
     program = cfg.blast.program
     job_init_pv_template = 'job-init-pv.yaml.template'
-    if cfg.cloud_provider.cloud == CSP.AZURE:
-        job_init_pv_template = 'job-init-pv-aks.yaml.template'
+    if cfg.cloud_provider.cloud == CSP.AZURE:        
+        job_init_pv_template = 'job-init-pv-aks-nfs.yaml.template' if cfg.azure.use_nfs else 'job-init-pv-aks.yaml.template'
+        
         
     taxdb_path = ''
     if db_path:
@@ -719,7 +720,7 @@ def initialize_persistent_disk(cfg: ElasticBlastConfig, query_files: List[str] =
         'ELB_PD_SIZE': pd_size,
         'ELB_CLUSTER_NAME': cluster_name,
         'ELB_DB': db,
-        'ELB_DB_PATH': db_path,
+        'ELB_DB_PATH': db_path if not cfg.azure.use_nfs else ''.join(db_path.split('/')[4:]).split('*?')[0],
         'ELB_TAX_DB_PATH': taxdb_path,
         'ELB_DB_MOL_TYPE': str(ElbSupportedPrograms().get_db_mol_type(program)),
         'ELB_BLASTDB_SRC': cfg.cluster.db_source.name,
@@ -742,7 +743,10 @@ def initialize_persistent_disk(cfg: ElasticBlastConfig, query_files: List[str] =
     elif cfg.cloud_provider.cloud == CSP.AZURE:
         subs['ELB_IMAGE_QS'] = cfg.azure.qs_docker_image
         subs['ELB_DOCKER_IMAGE'] = cfg.azure.elb_docker_image
-        subs['ELB_SC_NAME'] = 'managed-csi' #'azure-disk-ssd'
+        subs['ELB_SC_NAME'] = 'managed-csi' #'azure-disk-ssd' #TODO: will be removed
+        subs['RESOURCE_GROUP'] = cfg.azure.resourcegroup
+        subs['STORAGE_ACCOUNT'] = cfg.azure.storage_account
+        subs['STORAGE_ACCOUNT_CONTAINER'] = cfg.azure.storage_account_container
         logging.debug(f"Initializing persistent volume: {cfg.azure.elb_docker_image} {cfg.azure.qs_docker_image}")
         
 
@@ -751,21 +755,31 @@ def initialize_persistent_disk(cfg: ElasticBlastConfig, query_files: List[str] =
         
         ref = files('elastic_blast') / 'templates/storage-gcp-ssd.yaml'
         
-        if cfg.cloud_provider.cloud != CSP.AZURE:
-            # ref = files('elastic_blast') / 'templates/storage-aks-ssd.yaml'
+        # if cfg.cloud_provider.cloud != CSP.AZURE:
+        # ref = files('elastic_blast') / 'templates/storage-aks-ssd.yaml'
+        if cfg.cloud_provider.cloud == CSP.AZURE:
+            ref = files('elastic_blast') / 'templates/storage-aks-nfs.yaml'
+        
+        if cfg.azure.use_nfs or cfg.cloud_provider.cloud != CSP.AZURE:
+            sc_yaml = os.path.join(d, 'storage-class.yaml')
+            with open(sc_yaml, 'wt') as f:
+                f.write(substitute_params(ref.read_text(), subs))
                 
-            with as_file(ref) as storage_yaml:
-                cmd = f"kubectl --context={k8s_ctx} apply -f {storage_yaml}"
-                if dry_run:
-                    logging.info(cmd)
-                else:
-                    safe_exec(cmd)
+            cmd = f"kubectl --context={k8s_ctx} apply -f {sc_yaml}"
+        
+            if dry_run:
+                logging.info(cmd)
+            else:
+                safe_exec(cmd)
 
         pvc_yaml = os.path.join(d, 'pvc-rwo.yaml')
         with open(pvc_yaml, 'wt') as f:
             ref = files('elastic_blast').joinpath('templates/pvc-rwo.yaml.template')
             if cfg.cloud_provider.cloud == CSP.AZURE:
-                ref = files('elastic_blast').joinpath('templates/pvc-rwm-aks.yaml.template')
+                if cfg.azure.use_nfs:
+                    ref = files('elastic_blast').joinpath('templates/pvc-rwm-aks-nfs.yaml.template')
+                else:
+                    ref = files('elastic_blast').joinpath('templates/pvc-rwm-aks.yaml.template')
                 
             f.write(substitute_params(ref.read_text(), subs))
         cmd = f"kubectl --context={k8s_ctx} apply -f {pvc_yaml}"
@@ -1053,7 +1067,8 @@ def submit_job_submission_job(cfg: ElasticBlastConfig):
         'ELB_LABELS'           : cfg.cluster.labels,
         # For autoscaling
         'ELB_NUM_NODES' : str(cfg.cluster.num_nodes),
-        'ELB_USE_LOCAL_SSD': str(cfg.cluster.use_local_ssd).lower()
+        'ELB_USE_LOCAL_SSD': str(cfg.cluster.use_local_ssd).lower(),
+        'ELB_USE_NFS': str(cfg.azure.use_nfs).lower()
     }
     
     if cfg.cloud_provider.cloud == CSP.GCP:
