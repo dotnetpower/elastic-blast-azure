@@ -1,1 +1,1 @@
-git+https://github.com/dotnetpower/elastic-blast-azure.git
+git+https://github.com/dotnetpower/elastic-blast-azure.git@azure-blob-nfs
