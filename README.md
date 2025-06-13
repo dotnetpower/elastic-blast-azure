@@ -1,5 +1,5 @@
 # Warning! This repository is still a work in progress, DO NOT USE IT.
-
+![alt text](./docs/architecture.png)
 # [Read Me](./docs/azure-prereq.md)
 
 ElasticBLAST
