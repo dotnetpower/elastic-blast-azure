@@ -530,6 +530,165 @@ spec:
             logging.info('Submitted import-queries job for warm cluster reuse')
 
 
+def initialize_storage_partitioned(cfg: ElasticBlastConfig, query_files: list[str] = [],
+                                    wait=ElbExecutionMode.WAIT) -> None:
+    """Initialize storage for a partitioned DB search.
+    Downloads each DB partition to its own subdirectory on the PVC,
+    then imports query batches as usual.
+    
+    Partition layout on PVC:
+        /blast/blastdb/part_00/<db files>
+        /blast/blastdb/part_01/<db files>
+        ...
+        /blast/blastdb/batch_*.fa  (query files at root)
+    """
+    num_partitions = cfg.blast.db_partitions
+    partition_prefix = cfg.blast.db_partition_prefix
+    dry_run = cfg.cluster.dry_run
+    k8s_ctx = cfg.appstate.k8s_ctx
+
+    if not k8s_ctx:
+        raise RuntimeError('kubernetes context is missing for initialize_storage_partitioned')
+    if num_partitions <= 0:
+        raise ValueError(f'db_partitions must be > 0, got {num_partitions}')
+
+    results_bucket = cfg.cluster.results
+    if cfg.cloud_provider.cloud == CSP.AZURE:
+        results_bucket = os.path.join(results_bucket, cfg.azure.elb_job_id)
+
+    # Determine query import parameters
+    if query_files:
+        input_query = query_files[0]
+        copy_only = '0'
+    else:
+        input_query = 'None'
+        copy_only = '1'
+
+    batch_len = str(cfg.blast.batch_len)
+    qs_image = cfg.azure.qs_docker_image if cfg.cloud_provider.cloud == CSP.AZURE else ELB_QS_DOCKER_IMAGE_GCP
+    elb_image = cfg.azure.elb_docker_image if cfg.cloud_provider.cloud == CSP.AZURE else ELB_DOCKER_IMAGE_GCP
+    init_timeout = cfg.timeouts.init_pv * 60
+
+    # Build partition download commands
+    download_commands = []
+    for i in range(num_partitions):
+        part_url = f'{partition_prefix}{i:02d}/*'
+        part_dir = f'part_{i:02d}'
+        download_commands.append(
+            f'echo "Downloading partition {i} from {part_url}";'
+            f'mkdir -p /blast/blastdb/{part_dir};'
+            f'azcopy cp \'{part_url}\' /blast/blastdb/{part_dir}/ --recursive;'
+            f'exit_code=$?;'
+            f'[ $exit_code -eq 0 ] || exit $exit_code;'
+        )
+    download_script = '\n          '.join(download_commands)
+
+    # Create PVC first (reuse existing PVC template)
+    pd_size = str(cfg.cluster.pd_size)
+    with TemporaryDirectory() as d:
+        ref = files('elastic_blast').joinpath('templates/pvc-rwm-aks.yaml.template')
+        pvc_yaml = os.path.join(d, 'pvc-rwm.yaml')
+        pvc_subs = {'ELB_PD_SIZE': pd_size}
+        with open(pvc_yaml, 'w') as f:
+            f.write(substitute_params(ref.read_text(), pvc_subs))
+        cmd = f'kubectl --context={k8s_ctx} apply -f {pvc_yaml}'
+        if dry_run:
+            logging.info(cmd)
+        else:
+            safe_exec(cmd)
+
+    # Create init job that downloads all partitions + imports queries
+    job_yaml = f"""apiVersion: batch/v1
+kind: Job
+metadata:
+  name: init-pv-partitioned
+  labels:
+    app: setup
+spec:
+  template:
+    metadata:
+      labels:
+        app: setup
+    spec:
+      volumes:
+      - name: blast-dbs
+        persistentVolumeClaim:
+          claimName: blast-dbs-pvc-rwm
+          readOnly: false
+      initContainers:
+      - name: {K8S_JOB_GET_BLASTDB}
+        image: {elb_image}
+        workingDir: /blast/blastdb
+        volumeMounts:
+        - name: blast-dbs
+          mountPath: /blast/blastdb
+          readOnly: false
+        command: ["/bin/bash", "-c"]
+        args:
+        - echo "Downloading {num_partitions} DB partitions";
+          azcopy login --identity;
+          start=`date +%s`;
+          {download_script}
+          end=`date +%s`;
+          echo "RUNTIME download-partitions $(($end-$start)) seconds";
+      containers:
+      - name: {K8S_JOB_IMPORT_QUERY_BATCHES}
+        image: {qs_image}
+        workingDir: /blast/queries
+        volumeMounts:
+        - name: blast-dbs
+          mountPath: /blast/queries
+          readOnly: false
+        command: ["run.sh", "-i", "{input_query}", "-o", "{results_bucket}", "-b", "{batch_len}", "-c", "{copy_only}", "-q", "/blast/queries/"]
+      restartPolicy: Never
+  backoffLimit: 3
+  activeDeadlineSeconds: {init_timeout}
+"""
+
+    with TemporaryDirectory() as d:
+        job_file = os.path.join(d, 'job-init-pv-partitioned.yaml')
+        with open(job_file, 'w') as f:
+            f.write(job_yaml)
+        cmd = f'kubectl --context={k8s_ctx} apply -f {job_file}'
+        if dry_run:
+            logging.info(cmd)
+        else:
+            safe_exec(cmd)
+            logging.info(f'Submitted init-pv-partitioned job for {num_partitions} partitions')
+
+    if wait != ElbExecutionMode.WAIT:
+        return
+
+    # Wait for the init job to complete
+    timeout = init_timeout
+    sec2wait = 30
+    while timeout > 0:
+        cmd = f'kubectl --context={k8s_ctx} get job init-pv-partitioned ' \
+              f'-o jsonpath=' + "'{.status.succeeded}{\"\\t\"}{.status.failed}'"
+        if dry_run:
+            logging.info(cmd)
+            break
+        else:
+            try:
+                proc = safe_exec(cmd)
+                res = handle_error(proc.stdout)
+                parts = res.split('\t')
+                succeeded = parts[0].strip() if len(parts) > 0 else ''
+                failed = parts[1].strip() if len(parts) > 1 else ''
+                if failed and int(failed) > 0:
+                    raise RuntimeError(f'init-pv-partitioned job failed')
+                if succeeded and int(succeeded) > 0:
+                    logging.info('init-pv-partitioned job completed successfully')
+                    break
+            except SafeExecError:
+                pass
+        time.sleep(sec2wait)
+        timeout -= sec2wait
+
+    if timeout <= 0:
+        raise TimeoutError('init-pv-partitioned job timed out')
+
+
 def initialize_storage(cfg: ElasticBlastConfig, query_files: list[str] = [], wait=ElbExecutionMode.WAIT) -> None:
     """ Initialize storage for ElasticBLAST cluster """
     use_local_ssd = cfg.cluster.use_local_ssd

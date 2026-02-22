@@ -137,6 +137,176 @@ class ElasticBlastAzure(ElasticBlast):
                   f' Please increase the batch-len parameter to at least {suggested_batch_len} and repeat the search.'
             raise UserReportError(INPUT_ERROR, msg)
 
+    def _submit_partitioned(self, query_batches: List[str], query_length) -> None:
+        """DB-partitioned mode: search each partition independently against all queries.
+        
+        Architecture:
+            P partitions × N query batches = P×N total batch jobs
+            Each partition's jobs produce results in a per-partition subdirectory.
+            Results are organized as: {results}/part_00/, {results}/part_01/, etc.
+        """
+        cfg = self.cfg
+        num_partitions = cfg.blast.db_partitions
+
+        if not self.cluster_initialized:
+            # Check total job count: partitions × queries
+            if query_batches:
+                total_jobs = len(query_batches) * num_partitions
+                k8s_job_limit = kubernetes.get_maximum_number_of_allowed_k8s_jobs(self.dry_run)
+                if total_jobs > k8s_job_limit:
+                    msg = f'DB-partitioned search would create {total_jobs} jobs ' \
+                          f'({num_partitions} partitions × {len(query_batches)} queries), ' \
+                          f'exceeding the limit of {k8s_job_limit}. ' \
+                          f'Reduce db-partitions or increase batch-len.'
+                    raise UserReportError(INPUT_ERROR, msg)
+
+            self.query_files = []
+            logging.debug(f"Initialize cluster for partitioned DB search ({num_partitions} partitions)")
+            self._initialize_cluster_partitioned(query_batches)
+            self.cluster_initialized = True
+
+        self._generate_partitioned_jobs(query_batches)
+        self.cleanup_stack.clear()
+        self.cleanup_stack.append(lambda: kubernetes.collect_k8s_logs(cfg))
+
+    def _initialize_cluster_partitioned(self, queries: Optional[List[str]]) -> None:
+        """Initialize cluster for partitioned DB search.
+        Creates AKS cluster and downloads all DB partitions to PVC."""
+        cfg, clean_up_stack = self.cfg, self.cleanup_stack
+
+        print(f'\033[33m[3/5] Initialize cluster (partitioned DB: {cfg.blast.db_partitions} partitions)\033[0m')
+
+        logging.info('Starting cluster for partitioned DB search')
+        clean_up_stack.append(lambda: logging.debug('Before creating cluster'))
+        if not cfg.cluster.reuse:
+            clean_up_stack.append(lambda: delete_cluster_with_cleanup(cfg))
+        clean_up_stack.append(lambda: kubernetes.collect_k8s_logs(cfg))
+
+        aks_status = check_cluster(cfg)
+        if not cfg.cluster.reuse or aks_status == '':
+            start_cluster(cfg)
+        clean_up_stack.append(lambda: logging.debug('After creating cluster'))
+
+        self._get_aks_credentials()
+        self._label_nodes()
+
+        if not cfg.cluster.reuse or aks_status == '':
+            set_role_assignment(cfg)
+
+        if self.cloud_job_submission or self.auto_shutdown:
+            kubernetes.enable_service_account(cfg)
+
+        print(f'\033[33m[4/5] Initializing partitioned storage ({cfg.blast.db_partitions} partitions)\033[0m')
+        logging.info(f'Initializing partitioned storage: {cfg.blast.db_partitions} partitions')
+
+        kubernetes.initialize_storage_partitioned(
+            cfg, self.query_files,
+            ElbExecutionMode.NOWAIT if self.cloud_job_submission else ElbExecutionMode.WAIT
+        )
+
+        print(f'\033[33m[5/5] Done (partitioned init)\033[0m')
+
+    def _generate_partitioned_jobs(self, query_batches: List[str]) -> None:
+        """Generate and submit BLAST batch jobs for each DB partition.
+        
+        For each partition i (0..P-1), generates N batch jobs where
+        each job searches one query batch against partition i.
+        Results for partition i go to: {results}/part_{i:02d}/
+        """
+        cfg = self.cfg
+        num_partitions = cfg.blast.db_partitions
+        partition_prefix = cfg.blast.db_partition_prefix
+
+        base_results = os.path.join(cfg.cluster.results, cfg.azure.elb_job_id)
+        sas_token = cfg.azure.get_sas_token()
+
+        all_job_files = []
+        with TemporaryDirectory() as job_path:
+            for part_idx in range(num_partitions):
+                # Derive partition DB name from prefix: e.g., "swissprot_part_00"
+                partition_db_name = os.path.basename(f'{partition_prefix}{part_idx:02d}')
+                # DB path on PVC: part_XX/db_name
+                partition_db_on_pvc = f'part_{part_idx:02d}/{partition_db_name}'
+
+                subs = self._job_substitutions_for_partition(
+                    query_batches, part_idx, partition_db_on_pvc, partition_db_name
+                )
+                job_template_text = read_job_template(cfg=cfg)
+
+                job_files = write_job_files(
+                    job_path, f'part{part_idx:02d}_batch_',
+                    job_template_text, query_batches, **subs
+                )
+                all_job_files.extend(job_files)
+
+            total_jobs = len(all_job_files)
+            logging.info(f'Submitting {total_jobs} partitioned jobs '
+                         f'({num_partitions} partitions × {len(query_batches)} queries)')
+
+            assert cfg.appstate.k8s_ctx
+            start = timer()
+            job_names = kubernetes.submit_jobs(cfg.appstate.k8s_ctx, Path(job_path), dry_run=self.dry_run)
+            end = timer()
+            logging.debug(f'RUNTIME submit-partitioned-jobs {end-start} seconds')
+
+        # Signal total number of jobs submitted
+        with open_for_write_immediate(os.path.join(base_results, ELB_METADATA_DIR,
+                                                    ELB_NUM_JOBS_SUBMITTED), sas_token=sas_token) as f:
+            f.write(str(total_jobs))
+
+    def _job_substitutions_for_partition(self, query_batches: List[str],
+                                         partition_idx: int, partition_db: str,
+                                         partition_db_name: str) -> Dict[str, str]:
+        """Prepare substitution dictionary for a specific partition's batch jobs.
+        
+        Args:
+            query_batches: list of query batch file paths
+            partition_idx: 0-based partition index
+            partition_db: DB path on PVC (e.g., "part_00/swissprot_part_00")
+            partition_db_name: DB name for labeling (e.g., "swissprot_part_00")
+        """
+        cfg = self.cfg
+        usage_reporting = get_usage_reporting()
+        blast_program = cfg.blast.program
+
+        # CPU allocation
+        if len(query_batches) == cfg.cluster.num_nodes:
+            num_cpu_req = cfg.cluster.num_cpus - 2
+        else:
+            num_cpu_req = ((cfg.cluster.num_nodes * cfg.cluster.num_cpus) // 4) - 2
+
+        # Results go to partition-specific subdirectory
+        base_results = os.path.join(cfg.cluster.results, cfg.azure.elb_job_id)
+        partition_results = os.path.join(base_results, f'part_{partition_idx:02d}')
+
+        subs = {
+            'ELB_BLAST_PROGRAM': blast_program,
+            'ELB_DB': partition_db,
+            'ELB_DB_LABEL': f'part{partition_idx:02d}',
+            'ELB_MEM_REQUEST': str(cfg.cluster.mem_request),
+            'ELB_MEM_LIMIT': str(cfg.cluster.mem_limit),
+            'ELB_BLAST_OPTIONS': cfg.blast.options,
+            'ELB_BLAST_TIMEOUT': str(cfg.timeouts.blast_k8s * 60),
+            'ELB_RESULTS': partition_results,
+            'ELB_NUM_CPUS_REQ': str(num_cpu_req),
+            'ELB_NUM_CPUS': str(cfg.cluster.num_cpus),
+            'ELB_DB_MOL_TYPE': str(ElbSupportedPrograms().get_db_mol_type(blast_program)),
+            'ELB_DOCKER_IMAGE': cfg.azure.elb_docker_image,
+            'ELB_TIMEFMT': '%s%N',
+            'BLAST_ELB_JOB_ID': cfg.azure.elb_job_id,
+            'BLAST_ELB_VERSION': VERSION,
+            'BLAST_USAGE_REPORT': str(usage_reporting).lower(),
+            'K8S_JOB_GET_BLASTDB': K8S_JOB_GET_BLASTDB,
+            'K8S_JOB_LOAD_BLASTDB_INTO_RAM': K8S_JOB_LOAD_BLASTDB_INTO_RAM,
+            'K8S_JOB_IMPORT_QUERY_BATCHES': K8S_JOB_IMPORT_QUERY_BATCHES,
+            'K8S_JOB_SUBMIT_JOBS': K8S_JOB_SUBMIT_JOBS,
+            'K8S_JOB_BLAST': K8S_JOB_BLAST,
+            'K8S_JOB_RESULTS_EXPORT': K8S_JOB_RESULTS_EXPORT,
+            'ELB_AZURE_RESOURCE_GROUP': cfg.azure.resourcegroup,
+            'ELB_METADATA_DIR': ELB_METADATA_DIR,
+        }
+        return subs
+
     def submit(self, query_batches: List[str], query_length, one_stage_cloud_query_split: bool) -> None:
         """ Submit query batches to cluster
             Parameters:
@@ -146,6 +316,11 @@ class ElasticBlastAzure(ElasticBlast):
                                               of executing a regular job """
         # Can't use one stage cloud split for GCP, should never happen
         assert(not one_stage_cloud_query_split)
+
+        # DB-partitioned mode: each partition searched independently against all queries
+        if self.cfg.blast.db_partitions > 0:
+            return self._submit_partitioned(query_batches, query_length)
+
         if not self.cluster_initialized:
             self._check_job_number_limit(query_batches, query_length)
             self.query_files = []  # No cloud split
