@@ -325,28 +325,132 @@ class ElasticBlastAzure(ElasticBlast):
 
 
     def delete(self):
-        enable_gcp_api(self.cfg.gcp.project, self.cfg.cluster.dry_run)
+        """Delete cluster and associated resources.
+        In reuse mode, only clean up jobs/data, preserving the cluster and PVCs."""
+        if self.cfg.cluster.reuse:
+            logging.info('Reuse mode: preserving cluster and PVCs, cleaning up jobs only')
+            self._cleanup_jobs_only()
+            return
         delete_cluster_with_cleanup(self.cfg)
 
+    def _cleanup_jobs_only(self) -> None:
+        """In reuse mode: delete completed/failed BLAST jobs but preserve cluster, PVCs, and DB.
+        This allows the next search to skip DB initialization entirely."""
+        cfg = self.cfg
+        dry_run = cfg.cluster.dry_run
+        try:
+            k8s_ctx = self._get_aks_credentials()
+            kubectl = f'kubectl --context={k8s_ctx}'
+            # Delete BLAST batch jobs only (app=blast), preserve init-pv PVC/data
+            cmd = f'{kubectl} delete jobs -l app=blast --ignore-not-found=true'
+            if dry_run:
+                logging.info(cmd)
+            else:
+                safe_exec(shlex.split(cmd))
+            # Delete submit-jobs pod
+            cmd = f'{kubectl} delete jobs -l app=submit --ignore-not-found=true'
+            if dry_run:
+                logging.info(cmd)
+            else:
+                safe_exec(shlex.split(cmd))
+            logging.info('Reuse mode cleanup complete: jobs deleted, cluster and PVCs preserved')
+        except Exception as e:
+            logging.warning(f'Cleanup in reuse mode failed: {e}')
+
+    def _db_already_loaded(self) -> bool:
+        """Check if the BLAST DB is already loaded on the PV/NVMe in the cluster.
+        Returns True if init-pv has previously completed successfully and PVC exists."""
+        cfg = self.cfg
+        if cfg.cluster.dry_run:
+            return False
+        try:
+            k8s_ctx = self._get_aks_credentials()
+            kubectl = f'kubectl --context={k8s_ctx}'
+            # Check if PVC exists and is bound
+            if cfg.cluster.use_local_ssd:
+                # For local SSD mode, we can't easily verify DB presence
+                # without running a pod; conservatively return False
+                return False
+            cmd = f'{kubectl} get pvc blast-dbs-pvc-rwm -o jsonpath={{.status.phase}}'
+            proc = safe_exec(shlex.split(cmd))
+            pvc_status = proc.stdout.strip() if proc.stdout else ''
+            if pvc_status != 'Bound':
+                logging.debug(f'PVC not bound (status={pvc_status}), DB not loaded')
+                return False
+            # Check if init-pv job completed successfully
+            cmd = f'{kubectl} get job init-pv -o jsonpath={{.status.succeeded}}'
+            proc = safe_exec(shlex.split(cmd))
+            succeeded = proc.stdout.strip() if proc.stdout else ''
+            if succeeded == '1':
+                logging.info('Reuse mode: DB already loaded on PV (init-pv succeeded, PVC bound)')
+                return True
+            logging.debug(f'init-pv job succeeded count: {succeeded}')
+            return False
+        except Exception as e:
+            logging.debug(f'DB existence check failed: {e}')
+            return False
+
+    def _upload_queries_only(self, queries: Optional[List[str]]) -> None:
+        """In reuse mode with DB already loaded: only upload new query batches to PV.
+        Skip DB download (init-pv) entirely."""
+        cfg = self.cfg
+        k8s_ctx = self._get_aks_credentials()
+        sas_token = cfg.azure.get_sas_token()
+
+        if self.cloud_job_submission:
+            # Upload the job template and batch list for submit-jobs Pod
+            subs = self.job_substitutions(queries)
+            template_name = ELB_LOCAL_SSD_BLAST_JOB_AKS_TEMPLATE if cfg.cluster.use_local_ssd else ELB_DFLT_BLAST_JOB_AKS_TEMPLATE
+            job_template = read_job_template(template_name=template_name, cfg=cfg)
+            s = substitute_params(job_template, subs)
+            bucket_job_template = os.path.join(cfg.cluster.results, cfg.azure.elb_job_id,
+                                               ELB_METADATA_DIR, 'job.yaml.template')
+            with open_for_write_immediate(bucket_job_template, sas_token=sas_token) as f:
+                f.write(s)
+
+        # Import query batches to existing PV (skip DB download)
+        logging.info('Reuse mode: uploading query batches only (DB already loaded)')
+        kubernetes.import_query_batches_only(cfg)
+
+    def scale_nodes(self, node_count: int) -> None:
+        """Scale AKS node pool to specified count.
+        Use 0 to scale down (cost savings), >0 to scale up.
+        In scale-down: PVCs are preserved, DB will need re-caching on scale-up."""
+        cfg = self.cfg
+        rg = cfg.azure.resourcegroup
+        name = cfg.cluster.name
+        dry_run = cfg.cluster.dry_run
+        cmd = f'az aks nodepool scale --resource-group {rg} --cluster-name {name} ' \
+              f'--name nodepool1 --node-count {node_count} --no-wait'
+        if dry_run:
+            logging.info(cmd)
+        else:
+            logging.info(f'Scaling AKS node pool to {node_count} nodes')
+            safe_exec(shlex.split(cmd))
+
     def _initialize_cluster(self, queries: Optional[List[str]]):
-        """ Creates a k8s cluster, connects to it and initializes the persistent disk """
+        """ Creates a k8s cluster, connects to it and initializes the persistent disk.
+        In reuse mode with DB already loaded, skips DB initialization and only uploads queries. """
         cfg, query_files, clean_up_stack = self.cfg, self.query_files, self.cleanup_stack
         pd_size = MemoryStr(cfg.cluster.pd_size).asGB()
-        # disk_limit, disk_usage = self.get_disk_quota()
         
         print(f'\033[33m[3/5] Initialize cluster\033[0m')
         
-        # TODO: need to implement get_disk_quota
-        disk_limit, disk_usage = 1e9, 0.0
+        # Check for warm cluster reuse: cluster exists + DB already on PV
+        if cfg.cluster.reuse:
+            aks_status = check_cluster(cfg)
+            if aks_status == AKS_PROVISIONING_STATE.SUCCEEDED and self._db_already_loaded():
+                print(f'\033[32m[3/5] Reuse mode: cluster running, DB already loaded — skipping init\033[0m')
+                logging.info('Warm cluster reuse: skipping cluster creation and DB initialization')
+                self._upload_queries_only(queries)
+                clean_up_stack.append(lambda: kubernetes.collect_k8s_logs(cfg))
+                return
         
-        disk_quota = disk_limit - disk_usage
-        if pd_size > disk_quota:
-            raise UserReportError(INPUT_ERROR, f'Requested disk size {pd_size}G is larger than allowed ({disk_quota}G) for region {cfg.gcp.region}\n'
-                f'Please adjust parameter [cluster] pd-size to less than {disk_quota}G, run your request in another region, or\n'
-                'request a disk quota increase (see https://cloud.google.com/compute/quotas)')
+        # TODO: Azure disk quota check not yet implemented
         logging.info('Starting cluster')
         clean_up_stack.append(lambda: logging.debug('Before creating cluster'))
-        clean_up_stack.append(lambda: delete_cluster_with_cleanup(cfg))
+        if not cfg.cluster.reuse:
+            clean_up_stack.append(lambda: delete_cluster_with_cleanup(cfg))
         clean_up_stack.append(lambda: kubernetes.collect_k8s_logs(cfg))
         if self.cloud_job_submission:
             subs = self.job_substitutions(queries)            
@@ -358,7 +462,6 @@ class ElasticBlastAzure(ElasticBlast):
             sas_token = self.cfg.azure.get_sas_token()
             with open_for_write_immediate(bucket_job_template, sas_token=sas_token) as f:
                 f.write(s)
-        # test comment !!!
         aks_status = check_cluster(cfg)
         if not cfg.cluster.reuse or aks_status == '':
             start_cluster(cfg)
@@ -367,8 +470,7 @@ class ElasticBlastAzure(ElasticBlast):
         self._get_aks_credentials()
 
         self._label_nodes()
-        
-        # test comment !!!
+
         if not cfg.cluster.reuse or aks_status == '':
             set_role_assignment(cfg)
 
@@ -383,6 +485,10 @@ class ElasticBlastAzure(ElasticBlast):
             ElbExecutionMode.NOWAIT if self.cloud_job_submission else ElbExecutionMode.WAIT)
         clean_up_stack.append(lambda: logging.debug('After initializing storage'))
 
+        # Deploy vmtouch DaemonSet in reuse mode to keep DB in RAM across searches
+        if cfg.cluster.reuse and not cfg.cluster.use_local_ssd:
+            self._deploy_vmtouch_daemonset()
+
         if not self.auto_shutdown:
             logging.debug('Disabling janitor')
         else:
@@ -390,6 +496,51 @@ class ElasticBlastAzure(ElasticBlast):
             print(f'\033[33m[5/5] Done\033[0m')
             pass
             # kubernetes.submit_janitor_cronjob(cfg)
+
+    def _deploy_vmtouch_daemonset(self) -> None:
+        """Deploy vmtouch DaemonSet to keep BLAST DB cached in RAM.
+        Uses 80% of available RAM instead of hardcoded 5GB."""
+        cfg = self.cfg
+        k8s_ctx = self._get_aks_credentials()
+        kubectl = f'kubectl --context={k8s_ctx}'
+        dry_run = cfg.cluster.dry_run
+
+        # Check if already deployed
+        cmd = f'{kubectl} get daemonset vmtouch-db-cache --ignore-not-found -o name'
+        if not dry_run:
+            try:
+                proc = safe_exec(shlex.split(cmd))
+                if proc.stdout and proc.stdout.strip():
+                    logging.info('vmtouch DaemonSet already deployed, skipping')
+                    return
+            except Exception:
+                pass
+
+        sas_token = cfg.azure.get_sas_token()
+        db, _, _ = get_blastdb_info(cfg.blast.db, None, sas_token=sas_token)
+        program = cfg.blast.program
+
+        subs = {
+            'ELB_DOCKER_IMAGE': cfg.azure.elb_docker_image,
+            'ELB_DB': db,
+            'ELB_DB_MOL_TYPE': str(ElbSupportedPrograms().get_db_mol_type(program)),
+        }
+
+        from importlib.resources import files as pkg_files
+        ref = pkg_files('elastic_blast').joinpath('templates/vmtouch-daemonset-aks.yaml.template')
+        template_text = ref.read_text()
+        daemonset_yaml = substitute_params(template_text, subs)
+
+        with TemporaryDirectory() as d:
+            ds_file = os.path.join(d, 'vmtouch-daemonset.yaml')
+            with open(ds_file, 'w') as f:
+                f.write(daemonset_yaml)
+            cmd = f'{kubectl} apply -f {ds_file}'
+            if dry_run:
+                logging.info(cmd)
+            else:
+                safe_exec(shlex.split(cmd))
+                logging.info('Deployed vmtouch DaemonSet for DB RAM caching')
 
     def _label_nodes(self):
         """ Label nodes by ordinal numbers for proper initialization.

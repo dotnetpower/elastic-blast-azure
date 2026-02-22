@@ -470,6 +470,66 @@ def wait_for_pvc(k8s_ctx: str, pvc_name: str, attempts: int = 30, secs2wait: int
         raise TimeoutError(f'Waiting for PVC {pvc_name} timed out')
 
 
+def import_query_batches_only(cfg: ElasticBlastConfig) -> None:
+    """Import query batches to existing PV without re-downloading the DB.
+    Used in warm cluster reuse mode when DB is already loaded.
+    Runs a lightweight Job that only copies query batches."""
+    from .constants import CSP
+    k8s_ctx = cfg.appstate.k8s_ctx
+    if not k8s_ctx:
+        raise RuntimeError('kubernetes context is missing for import_query_batches_only')
+
+    dry_run = cfg.cluster.dry_run
+    results_bucket = cfg.cluster.results
+    if cfg.cloud_provider.cloud == CSP.AZURE:
+        results_bucket = os.path.join(results_bucket, cfg.azure.elb_job_id)
+
+    batch_len = str(cfg.blast.batch_len)
+    qs_image = cfg.azure.qs_docker_image if cfg.cloud_provider.cloud == CSP.AZURE else ELB_QS_DOCKER_IMAGE_GCP
+
+    # Create a lightweight Job that only imports query batches
+    job_yaml = f"""apiVersion: batch/v1
+kind: Job
+metadata:
+  name: import-queries
+  labels:
+    app: setup
+spec:
+  template:
+    metadata:
+      labels:
+        app: setup
+    spec:
+      volumes:
+      - name: blastdb
+        persistentVolumeClaim:
+          claimName: blast-dbs-pvc-rwm
+          readOnly: false
+      containers:
+      - name: import-query-batches
+        image: {qs_image}
+        workingDir: /blast/queries
+        volumeMounts:
+        - name: blastdb
+          mountPath: /blast/queries
+          readOnly: false
+        command: ["run.sh", "-i", "None", "-o", "{results_bucket}", "-b", "{batch_len}", "-c", "1", "-q", "/blast/queries/"]
+      restartPolicy: Never
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+"""
+    with TemporaryDirectory() as d:
+        job_file = os.path.join(d, 'job-import-queries.yaml')
+        with open(job_file, 'w') as f:
+            f.write(job_yaml)
+        cmd = f'kubectl --context={k8s_ctx} apply -f {job_file}'
+        if dry_run:
+            logging.info(cmd)
+        else:
+            safe_exec(cmd)
+            logging.info('Submitted import-queries job for warm cluster reuse')
+
+
 def initialize_storage(cfg: ElasticBlastConfig, query_files: list[str] = [], wait=ElbExecutionMode.WAIT) -> None:
     """ Initialize storage for ElasticBLAST cluster """
     use_local_ssd = cfg.cluster.use_local_ssd

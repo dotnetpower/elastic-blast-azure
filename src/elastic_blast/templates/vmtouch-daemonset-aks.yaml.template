@@ -1,0 +1,48 @@
+---
+# vmtouch DaemonSet for Warm Cluster mode
+# Keeps BLAST DB cached in RAM across searches to eliminate Phase 1 I/O overhead.
+# Deployed when reuse=true to maintain DB RAM residency between searches.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vmtouch-db-cache
+  labels:
+    app: vmtouch-cache
+spec:
+  selector:
+    matchLabels:
+      app: vmtouch-cache
+  template:
+    metadata:
+      labels:
+        app: vmtouch-cache
+    spec:
+      volumes:
+      - name: blast-dbs
+        persistentVolumeClaim:
+          claimName: blast-dbs-pvc-rwm
+          readOnly: true
+      containers:
+      - name: vmtouch
+        image: ${ELB_DOCKER_IMAGE}
+        workingDir: /blast/blastdb
+        volumeMounts:
+        - name: blast-dbs
+          mountPath: /blast/blastdb
+          readOnly: true
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          echo "vmtouch DaemonSet: caching BLAST DB to RAM";
+          AVAIL_MEM=$(awk '/MemAvailable/ {print int($2/1024/1024*0.8)"G"}' /proc/meminfo);
+          echo "Available memory for cache: ${AVAIL_MEM}";
+          blastdb_path -dbtype ${ELB_DB_MOL_TYPE} -db ${ELB_DB} -getvolumespath |
+            tr ' ' '\n' | parallel vmtouch -dlm ${AVAIL_MEM};
+          echo "DB cached in RAM, sleeping to maintain cache";
+          sleep infinity;
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "100m"
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 10
