@@ -530,6 +530,59 @@ spec:
             logging.info('Submitted import-queries job for warm cluster reuse')
 
 
+def create_scripts_configmap(k8s_ctx: str, dry_run: bool = False) -> None:
+    """Create a ConfigMap containing all AKS shell scripts.
+    
+    Reads .sh files from the templates/scripts/ package directory and
+    creates a Kubernetes ConfigMap named 'elb-scripts'. Job/DaemonSet
+    templates mount this ConfigMap as /scripts/ to run the scripts.
+    
+    This replaces inline shell scripts in YAML templates with proper,
+    standalone script files that can be edited, tested, and linted
+    independently.
+    """
+    scripts_dir = files('elastic_blast').joinpath('templates/scripts')
+
+    # Build ConfigMap YAML with script files as data entries
+    configmap_lines = [
+        'apiVersion: v1',
+        'kind: ConfigMap',
+        'metadata:',
+        '  name: elb-scripts',
+        'data:',
+    ]
+
+    script_files = sorted(
+        f for f in scripts_dir.iterdir()
+        if f.name.endswith('.sh')
+    )
+
+    if not script_files:
+        logging.warning('No script files found in templates/scripts/')
+        return
+
+    for script_file in script_files:
+        content = script_file.read_text()
+        configmap_lines.append(f'  {script_file.name}: |')
+        for line in content.splitlines():
+            # YAML block scalar: indent each line by 4 spaces
+            configmap_lines.append(f'    {line}' if line.strip() else '')
+        configmap_lines.append('')  # blank line between scripts
+
+    configmap_yaml = '\n'.join(configmap_lines)
+
+    with TemporaryDirectory() as d:
+        cm_file = os.path.join(d, 'configmap-scripts.yaml')
+        with open(cm_file, 'w') as f:
+            f.write(configmap_yaml)
+        cmd = f'kubectl --context={k8s_ctx} apply -f {cm_file}'
+        if dry_run:
+            logging.info(cmd)
+        else:
+            safe_exec(cmd)
+            logging.info(f'Created elb-scripts ConfigMap with {len(script_files)} scripts')
+
+
 def initialize_storage_partitioned(cfg: ElasticBlastConfig, query_files: list[str] = [],
                                     wait=ElbExecutionMode.WAIT) -> None:
     """Initialize storage for a partitioned DB search.
@@ -569,20 +622,6 @@ def initialize_storage_partitioned(cfg: ElasticBlastConfig, query_files: list[st
     elb_image = cfg.azure.elb_docker_image if cfg.cloud_provider.cloud == CSP.AZURE else ELB_DOCKER_IMAGE_GCP
     init_timeout = cfg.timeouts.init_pv * 60
 
-    # Build partition download commands
-    download_commands = []
-    for i in range(num_partitions):
-        part_url = f'{partition_prefix}{i:02d}/*'
-        part_dir = f'part_{i:02d}'
-        download_commands.append(
-            f'echo "Downloading partition {i} from {part_url}";'
-            f'mkdir -p /blast/blastdb/{part_dir};'
-            f'azcopy cp \'{part_url}\' /blast/blastdb/{part_dir}/ --recursive;'
-            f'exit_code=$?;'
-            f'[ $exit_code -eq 0 ] || exit $exit_code;'
-        )
-    download_script = '\n          '.join(download_commands)
-
     # Create PVC first (reuse existing PVC template)
     pd_size = str(cfg.cluster.pd_size)
     with TemporaryDirectory() as d:
@@ -597,58 +636,26 @@ def initialize_storage_partitioned(cfg: ElasticBlastConfig, query_files: list[st
         else:
             safe_exec(cmd)
 
-    # Create init job that downloads all partitions + imports queries
-    job_yaml = f"""apiVersion: batch/v1
-kind: Job
-metadata:
-  name: init-pv-partitioned
-  labels:
-    app: setup
-spec:
-  template:
-    metadata:
-      labels:
-        app: setup
-    spec:
-      volumes:
-      - name: blast-dbs
-        persistentVolumeClaim:
-          claimName: blast-dbs-pvc-rwm
-          readOnly: false
-      initContainers:
-      - name: {K8S_JOB_GET_BLASTDB}
-        image: {elb_image}
-        workingDir: /blast/blastdb
-        volumeMounts:
-        - name: blast-dbs
-          mountPath: /blast/blastdb
-          readOnly: false
-        command: ["/bin/bash", "-c"]
-        args:
-        - echo "Downloading {num_partitions} DB partitions";
-          azcopy login --identity;
-          start=`date +%s`;
-          {download_script}
-          end=`date +%s`;
-          echo "RUNTIME download-partitions $(($end-$start)) seconds";
-      containers:
-      - name: {K8S_JOB_IMPORT_QUERY_BATCHES}
-        image: {qs_image}
-        workingDir: /blast/queries
-        volumeMounts:
-        - name: blast-dbs
-          mountPath: /blast/queries
-          readOnly: false
-        command: ["run.sh", "-i", "{input_query}", "-o", "{results_bucket}", "-b", "{batch_len}", "-c", "{copy_only}", "-q", "/blast/queries/"]
-      restartPolicy: Never
-  backoffLimit: 3
-  activeDeadlineSeconds: {init_timeout}
-"""
+    # Create init job using template (scripts mounted via ConfigMap)
+    subs = {
+        'K8S_JOB_GET_BLASTDB': K8S_JOB_GET_BLASTDB,
+        'K8S_JOB_IMPORT_QUERY_BATCHES': K8S_JOB_IMPORT_QUERY_BATCHES,
+        'ELB_DOCKER_IMAGE': elb_image,
+        'ELB_IMAGE_QS': qs_image,
+        'ELB_NUM_PARTITIONS': str(num_partitions),
+        'ELB_PARTITION_PREFIX': partition_prefix,
+        'INPUT_QUERY': input_query,
+        'ELB_RESULTS': results_bucket,
+        'BATCH_LEN': batch_len,
+        'COPY_ONLY': copy_only,
+        'TIMEOUT': str(init_timeout),
+    }
 
     with TemporaryDirectory() as d:
+        ref = files('elastic_blast').joinpath('templates/job-init-pv-partitioned-aks.yaml.template')
         job_file = os.path.join(d, 'job-init-pv-partitioned.yaml')
         with open(job_file, 'w') as f:
-            f.write(job_yaml)
+            f.write(substitute_params(ref.read_text(), subs))
         cmd = f'kubectl --context={k8s_ctx} apply -f {job_file}'
         if dry_run:
             logging.info(cmd)

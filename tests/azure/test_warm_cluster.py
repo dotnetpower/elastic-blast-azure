@@ -245,13 +245,14 @@ class TestInitializeClusterReuse:
                 with patch('elastic_blast.azure.start_cluster') as mock_start:
                     with patch('elastic_blast.azure.set_role_assignment'):
                         with patch('elastic_blast.azure.kubernetes.enable_service_account'):
-                            with patch('elastic_blast.azure.kubernetes.initialize_storage'):
-                                with patch.object(elb, '_label_nodes'):
-                                    with patch.object(elb, '_get_aks_credentials', return_value='test-ctx'):
-                                        with patch.object(elb, '_deploy_vmtouch_daemonset'):
-                                            with patch('elastic_blast.azure.get_blastdb_info', return_value=('testdb', '', 'testdb')):
-                                                with patch('elastic_blast.azure.get_usage_reporting', return_value=False):
-                                                    elb._initialize_cluster(queries=None)
+                            with patch('elastic_blast.azure.kubernetes.create_scripts_configmap'):
+                                with patch('elastic_blast.azure.kubernetes.initialize_storage'):
+                                    with patch.object(elb, '_label_nodes'):
+                                        with patch.object(elb, '_get_aks_credentials', return_value='test-ctx'):
+                                            with patch.object(elb, '_deploy_vmtouch_daemonset'):
+                                                with patch('elastic_blast.azure.get_blastdb_info', return_value=('testdb', '', 'testdb')):
+                                                    with patch('elastic_blast.azure.get_usage_reporting', return_value=False):
+                                                        elb._initialize_cluster(queries=None)
 
         # start_cluster should be called (new cluster)
         mock_start.assert_called_once()
@@ -266,11 +267,12 @@ class TestInitializeClusterReuse:
             with patch('elastic_blast.azure.start_cluster') as mock_start:
                 with patch('elastic_blast.azure.set_role_assignment'):
                     with patch('elastic_blast.azure.kubernetes.enable_service_account'):
-                        with patch('elastic_blast.azure.kubernetes.initialize_storage'):
-                            with patch.object(elb, '_label_nodes'):
-                                with patch.object(elb, '_get_aks_credentials', return_value='test-ctx'):
-                                    with patch('elastic_blast.azure.get_blastdb_info', return_value=('testdb', '', 'testdb')):
-                                        with patch('elastic_blast.azure.get_usage_reporting', return_value=False):
-                                            elb._initialize_cluster(queries=None)
+                        with patch('elastic_blast.azure.kubernetes.create_scripts_configmap'):
+                            with patch('elastic_blast.azure.kubernetes.initialize_storage'):
+                                with patch.object(elb, '_label_nodes'):
+                                    with patch.object(elb, '_get_aks_credentials', return_value='test-ctx'):
+                                        with patch('elastic_blast.azure.get_blastdb_info', return_value=('testdb', '', 'testdb')):
+                                            with patch('elastic_blast.azure.get_usage_reporting', return_value=False):
+                                                elb._initialize_cluster(queries=None)
 
         mock_start.assert_called_once()

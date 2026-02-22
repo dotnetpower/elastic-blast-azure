@@ -219,9 +219,10 @@ class TestInitializeClusterPartitioned:
     @patch('elastic_blast.azure.start_cluster')
     @patch('elastic_blast.azure.set_role_assignment')
     @patch('elastic_blast.kubernetes.enable_service_account')
+    @patch('elastic_blast.kubernetes.create_scripts_configmap')
     @patch('elastic_blast.kubernetes.initialize_storage_partitioned')
     def test_creates_cluster_and_inits_partitioned_storage(
-            self, mock_init_part, mock_sa, mock_role, mock_start,
+            self, mock_init_part, mock_configmap, mock_sa, mock_role, mock_start,
             mock_check, mock_usage, mock_dbinfo):
         """Full cluster creation + partitioned storage init."""
         cfg = _make_cfg(db_partitions=4, db_partition_prefix=PARTITION_PREFIX)
@@ -233,6 +234,7 @@ class TestInitializeClusterPartitioned:
             elb._initialize_cluster_partitioned(['batch_000.fa'])
 
         mock_start.assert_called_once()
+        mock_configmap.assert_called_once()
         mock_init_part.assert_called_once()
 
     @patch('elastic_blast.azure.get_blastdb_info', return_value=('testdb', '', 'testdb'))
@@ -241,9 +243,10 @@ class TestInitializeClusterPartitioned:
     @patch('elastic_blast.azure.start_cluster')
     @patch('elastic_blast.azure.set_role_assignment')
     @patch('elastic_blast.kubernetes.enable_service_account')
+    @patch('elastic_blast.kubernetes.create_scripts_configmap')
     @patch('elastic_blast.kubernetes.initialize_storage_partitioned')
     def test_reuse_skips_cluster_creation(
-            self, mock_init_part, mock_sa, mock_role, mock_start,
+            self, mock_init_part, mock_configmap, mock_sa, mock_role, mock_start,
             mock_check, mock_usage, mock_dbinfo):
         """In reuse mode with existing cluster, skips start_cluster."""
         cfg = _make_cfg(db_partitions=4, db_partition_prefix=PARTITION_PREFIX, reuse=True)
@@ -255,6 +258,7 @@ class TestInitializeClusterPartitioned:
             elb._initialize_cluster_partitioned(['batch_000.fa'])
 
         mock_start.assert_not_called()
+        mock_configmap.assert_called_once()
         mock_init_part.assert_called_once()
 
 
@@ -311,8 +315,8 @@ class TestInitializeStoragePartitioned:
         with pytest.raises(RuntimeError, match='kubernetes context is missing'):
             kubernetes.initialize_storage_partitioned(cfg)
 
-    def test_generates_download_commands_for_each_partition(self):
-        """The init job YAML should contain download commands for each partition."""
+    def test_uses_template_with_configmap_scripts(self):
+        """The init job YAML uses template with ConfigMap-mounted scripts."""
         cfg = _make_cfg(db_partitions=3, db_partition_prefix=PARTITION_PREFIX,
                         dry_run=False)
         cfg.appstate.k8s_ctx = 'test-ctx'
@@ -337,9 +341,74 @@ class TestInitializeStoragePartitioned:
         with patch('elastic_blast.kubernetes.safe_exec', side_effect=capture_safe_exec):
             kubernetes.initialize_storage_partitioned(cfg, wait=False)
 
-        # Verify the generated YAML contains all partition references
+        # Verify the generated YAML uses ConfigMap scripts + correct env vars
         assert len(created_files) >= 1, 'Expected init job YAML to be captured'
         yaml_content = created_files[-1]
-        for i in range(3):
-            assert f'part_{i:02d}' in yaml_content, \
-                f'Expected part_{i:02d} in init job YAML'
+        # Template uses ConfigMap-mounted script instead of inline shell
+        assert 'init-db-partitioned-aks.sh' in yaml_content, \
+            'Expected ConfigMap script reference'
+        assert 'elb-scripts' in yaml_content, \
+            'Expected ConfigMap name in volumes'
+        # Env vars pass partition info to the script
+        assert 'ELB_NUM_PARTITIONS' in yaml_content
+        assert '"3"' in yaml_content, \
+            'Expected num_partitions=3 in env var'
+        assert PARTITION_PREFIX in yaml_content, \
+            'Expected partition prefix in env var'
+
+
+class TestCreateScriptsConfigMap:
+    """Tests for kubernetes.create_scripts_configmap()."""
+
+    def test_creates_configmap_with_scripts(self):
+        """ConfigMap should contain all .sh script files."""
+        created_files = []
+
+        def capture_safe_exec(cmd, **kwargs):
+            if isinstance(cmd, str):
+                cmd_str = cmd
+            else:
+                cmd_str = ' '.join(cmd)
+            if 'apply -f' in cmd_str:
+                yaml_path = cmd_str.split('-f ')[-1].strip()
+                if os.path.exists(yaml_path):
+                    with open(yaml_path) as f:
+                        created_files.append(f.read())
+            result = MagicMock()
+            result.stdout = b''
+            return result
+
+        with patch('elastic_blast.kubernetes.safe_exec', side_effect=capture_safe_exec):
+            kubernetes.create_scripts_configmap('test-ctx', dry_run=False)
+
+        assert len(created_files) == 1, 'Expected ConfigMap YAML to be captured'
+        cm_yaml = created_files[0]
+        assert 'kind: ConfigMap' in cm_yaml
+        assert 'name: elb-scripts' in cm_yaml
+        # Check that all 6 script files are included
+        expected_scripts = [
+            'init-db-download-aks.sh',
+            'blast-vmtouch-aks.sh',
+            'blast-run-aks.sh',
+            'results-export-aks.sh',
+            'query-download-ssd-aks.sh',
+            'init-db-partitioned-aks.sh',
+        ]
+        for script in expected_scripts:
+            assert script in cm_yaml, f'Expected {script} in ConfigMap'
+
+    def test_dry_run_does_not_call_kubectl(self):
+        """Dry run should log but not execute kubectl."""
+        with patch('elastic_blast.kubernetes.safe_exec') as mock_exec:
+            kubernetes.create_scripts_configmap('test-ctx', dry_run=True)
+            mock_exec.assert_not_called()
+
+    def test_scripts_contain_valid_shebang(self):
+        """All script files should have proper shebang line."""
+        from importlib_resources import files as pkg_files
+        scripts_dir = pkg_files('elastic_blast').joinpath('templates/scripts')
+        for script_file in scripts_dir.iterdir():
+            if script_file.name.endswith('.sh'):
+                content = script_file.read_text()
+                assert content.startswith('#!/bin/bash'), \
+                    f'{script_file.name} missing #!/bin/bash shebang'

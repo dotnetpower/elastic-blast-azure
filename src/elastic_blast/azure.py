@@ -196,6 +196,9 @@ class ElasticBlastAzure(ElasticBlast):
         if self.cloud_job_submission or self.auto_shutdown:
             kubernetes.enable_service_account(cfg)
 
+        # Create ConfigMap with shell scripts before any jobs reference it
+        kubernetes.create_scripts_configmap(cfg.appstate.k8s_ctx, cfg.cluster.dry_run)
+
         print(f'\033[33m[4/5] Initializing partitioned storage ({cfg.blast.db_partitions} partitions)\033[0m')
         logging.info(f'Initializing partitioned storage: {cfg.blast.db_partitions} partitions')
 
@@ -651,6 +654,9 @@ class ElasticBlastAzure(ElasticBlast):
 
         if self.cloud_job_submission or self.auto_shutdown:
             kubernetes.enable_service_account(cfg)
+
+        # Create ConfigMap with shell scripts before any jobs reference it
+        kubernetes.create_scripts_configmap(cfg.appstate.k8s_ctx, cfg.cluster.dry_run)
 
         print(f'\033[33m[4/5] Initializing storage\033[0m')
         logging.info('Initializing storage')

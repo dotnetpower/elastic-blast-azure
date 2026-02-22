@@ -2,7 +2,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: init-pv
+  name: init-pv-partitioned
   labels:
     app: setup
 spec:
@@ -12,7 +12,7 @@ spec:
         app: setup
     spec:
       volumes:
-      - name: blastdb
+      - name: blast-dbs
         persistentVolumeClaim:
           claimName: blast-dbs-pvc-rwm
           readOnly: false
@@ -20,39 +20,32 @@ spec:
         configMap:
           name: elb-scripts
           defaultMode: 0755
-      containers:
+      initContainers:
       - name: ${K8S_JOB_GET_BLASTDB}
         image: ${ELB_DOCKER_IMAGE}
         workingDir: /blast/blastdb
         volumeMounts:
-        - name: blastdb
+        - name: blast-dbs
           mountPath: /blast/blastdb
           readOnly: false
         - name: scripts
           mountPath: /scripts
           readOnly: true
         env:
-        - name: BLAST_USAGE_REPORT
-          value: "false"
-        - name: ELB_DB
-          value: "${ELB_DB}"
-        - name: ELB_DB_PATH
-          value: "${ELB_DB_PATH}"
-        - name: ELB_BLASTDB_SRC
-          value: "${ELB_BLASTDB_SRC}"
-        - name: ELB_DB_MOL_TYPE
-          value: "${ELB_DB_MOL_TYPE}"
-        - name: ELB_TAXIDLIST
-          value: "${ELB_TAXIDLIST}"
-        command: ["/scripts/init-db-download-aks.sh"]
+        - name: ELB_NUM_PARTITIONS
+          value: "${ELB_NUM_PARTITIONS}"
+        - name: ELB_PARTITION_PREFIX
+          value: "${ELB_PARTITION_PREFIX}"
+        command: ["/scripts/init-db-partitioned-aks.sh"]
+      containers:
       - name: ${K8S_JOB_IMPORT_QUERY_BATCHES}
         image: ${ELB_IMAGE_QS}
         workingDir: /blast/queries
         volumeMounts:
-        - name: blastdb
+        - name: blast-dbs
           mountPath: /blast/queries
           readOnly: false
         command: ["run.sh", "-i", "${INPUT_QUERY}", "-o", "${ELB_RESULTS}", "-b", "${BATCH_LEN}", "-c", "${COPY_ONLY}", "-q", "/blast/queries/"]
       restartPolicy: Never
-  backoffLimit: 9
+  backoffLimit: 3
   activeDeadlineSeconds: ${TIMEOUT}
