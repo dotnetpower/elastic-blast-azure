@@ -17,7 +17,7 @@ spec:
       containers:
       - name: ${K8S_JOB_SUBMIT_JOBS}
         image: ${ELB_DOCKER_IMAGE}
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
         env:
         - name: ELB_RESULTS
           value: "${ELB_RESULTS}"

@@ -49,3 +49,6 @@ tests/submit/data/260_part_aa.ini
 bin/elastic-blast
 
 docker-openapi/app/elastic-blast.ini
+
+# Internal Korean reference docs (local only)
+docs/improvement-plan-ko.md

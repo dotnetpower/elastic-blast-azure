@@ -14,7 +14,7 @@ from .base import InstanceProperties
 from .util import UserReportError, safe_exec
 from .constants import DEPENDENCY_ERROR, GCP_APIS
 from datetime import datetime, timedelta, timezone
-from azure.identity import ClientSecretCredential # type: ignore
+from azure.identity import ClientSecretCredential, DefaultAzureCredential # type: ignore
 from azure.storage.blob import (BlobServiceClient, generate_account_sas, generate_container_sas, AccountSasPermissions, ContainerSasPermissions, ResourceTypes)  # type: ignore
 
 AZURE_HPC_MACHINES = {
@@ -41,26 +41,43 @@ def get_azure_blob_client(account_url: str, tenant_id:str, client_id: str, clien
     return BlobServiceClient(account_url=account_url, credential=credential)
 
 def get_sas_token(storage_account: str, storage_account_container: str, storage_account_key: str) -> str:
-    """ Get SAS token for Azure Blob Storage """
+    """ Get SAS token for Azure Blob Storage.
+        Returns empty string if key-based auth is not permitted, enabling
+        fallback to AZCOPY_AUTO_LOGIN_TYPE=AZCLI. """
     try:
+        # First verify that key-based auth is permitted by testing connection
+        account_url = f"https://{storage_account}.blob.core.windows.net"
+        connection_string = f"DefaultEndpointsProtocol=https;AccountName={storage_account};AccountKey={storage_account_key};EndpointSuffix=core.windows.net"
+        client = BlobServiceClient.from_connection_string(connection_string)
+        client.get_container_client(storage_account_container).get_container_properties()
+        
         return generate_account_sas(
             account_key=storage_account_key,
             account_name=storage_account,
             resource_types=ResourceTypes(container=True, object=True),
-            # container_name=storage_account_container,
             permission=AccountSasPermissions(read=True, write=True, delete=True, create=True, add=True, list=True),
-            start=datetime.now(timezone.utc) - timedelta(hours=1), # allow 1 hour back
+            start=datetime.now(timezone.utc) - timedelta(hours=1),
             expiry=datetime.now(timezone.utc) + timedelta(hours=8)
         )
     except Exception as e:
-        logging.error(f'Error generating SAS token: {e}')
+        logging.warning(f'SAS token generation skipped (key-based auth may not be permitted): {e}')
     return ''
     
 def get_latest_dir(storage_account: str, storage_account_container: str, storage_account_key: str) -> str:
-    """ Get the latest directory from Azure Blob Storage """
-    connection_string = f"DefaultEndpointsProtocol=https;AccountName={storage_account};AccountKey={storage_account_key};EndpointSuffix=core.windows.net"
-    client = BlobServiceClient.from_connection_string(connection_string)
-    container = client.get_container_client(storage_account_container)
+    """ Get the latest directory from Azure Blob Storage.
+        Falls back to DefaultAzureCredential if key-based auth is not permitted. """
+    try:
+        connection_string = f"DefaultEndpointsProtocol=https;AccountName={storage_account};AccountKey={storage_account_key};EndpointSuffix=core.windows.net"
+        client = BlobServiceClient.from_connection_string(connection_string)
+        # Test the connection with a lightweight call
+        container = client.get_container_client(storage_account_container)
+        container.get_container_properties()
+    except Exception as e:
+        logging.warning(f'Key-based auth failed ({e}), falling back to DefaultAzureCredential')
+        account_url = f"https://{storage_account}.blob.core.windows.net"
+        credential = DefaultAzureCredential()
+        client = BlobServiceClient(account_url=account_url, credential=credential)
+        container = client.get_container_client(storage_account_container)
     
     # get all folders
     folder_list = []

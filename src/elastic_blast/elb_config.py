@@ -1474,6 +1474,8 @@ class JSONEnumEncoder(json.JSONEncoder):
         """Handle encoding"""
         if issubclass(type(o), Enum):
             return o.name
+        elif isinstance(o, bytes):
+            return o.decode('utf-8', errors='replace')
         else:
-            return json.JSONEncoder(self, o)
+            return super().default(o)
 

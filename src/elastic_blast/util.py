@@ -346,7 +346,8 @@ def get_blastdb_info(blastdb: str, gcp_prj: str | None = None, sas_token: Option
     elif db.startswith(ELB_AZURE_PREFIX):
         try:
             db = db[:-2] if '.*' in db else db # remove .* if present
-            proc = safe_exec(f'azcopy list {os.path.dirname(db)}?{sas_token}')
+            azcopy_url = f'{os.path.dirname(db)}?{sas_token}' if sas_token else os.path.dirname(db)
+            proc = safe_exec(f'azcopy list {azcopy_url}')
         except SafeExecError:
             raise ValueError(f'Error requesting for {db}.*')
         output = handle_error(proc.stdout)
@@ -363,7 +364,10 @@ def get_blastdb_info(blastdb: str, gcp_prj: str | None = None, sas_token: Option
             db_path = db + '.tar.gz'
         else:
             # db_path = db + '.*'
-            db_path = f'{os.path.dirname(db)}/*?{sas_token}'
+            if sas_token:
+                db_path = f'{os.path.dirname(db)}/*?{sas_token}'
+            else:
+                db_path = f'{os.path.dirname(db)}/*'
             
         db = os.path.basename(db)
     return db, db_path, sanitize_for_k8s(db)
@@ -385,7 +389,8 @@ def check_user_provided_blastdb_exists(db: str, mol_type: MolType, db_source: DB
             cmd = f'aws s3 ls {db}'
             safe_exec(cmd)
         elif db.startswith(ELB_AZURE_PREFIX):
-            cmd = f'azcopy list {os.path.dirname(db)}?{sas_token}'
+            azcopy_url = f'{os.path.dirname(db)}?{sas_token}' if sas_token else os.path.dirname(db)
+            cmd = f'azcopy list {azcopy_url}'
             proc = safe_exec(cmd)
             output = handle_error(proc.stdout)
             fnames = list(

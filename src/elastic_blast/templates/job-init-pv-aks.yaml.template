@@ -32,6 +32,7 @@ spec:
         - |
           echo "BASH version ${BASH_VERSION}";
           start=`date +%s`;
+          azcopy login --identity;
           log() { ts=`date +'%F %T'`; printf '%s RUNTIME %s %f seconds\n' "$ts" "$1" "$2"; };
           if [ -z '${ELB_DB_PATH}' ]; then
             echo update_blastdb.pl ${ELB_DB} --decompress --source ${ELB_BLASTDB_SRC} --verbose --verbose --verbose --verbose --verbose --verbose;

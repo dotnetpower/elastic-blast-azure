@@ -58,6 +58,13 @@ from .constants import ELB_S3_PREFIX, ELB_GCS_PREFIX, ELB_FTP_PREFIX, ELB_AZURE_
 from .constants import ELB_QUERY_BATCH_FILE_PREFIX, ELB_HTTP_PREFIX
 from .constants import ELB_DFLT_FSIZE_FOR_TESTING
 
+def _azure_url_with_auth(url: str, sas_token: Optional[str] = None) -> str:
+    """Build Azure URL with SAS token if available, otherwise return bare URL
+    for use with AZCOPY_AUTO_LOGIN_TYPE=AZCLI or DefaultAzureCredential."""
+    if sas_token:
+        return f'{url}?{sas_token}'
+    return url
+
 
 def harvest_query_splitting_results(bucket_name: str, dry_run: bool = False, boto_cfg: Config = None, gcp_project: str | None = None) -> QuerySplittingResults:
     """ Retrieves the results for query splitting from bucket, used in 2-stage cloud
@@ -105,8 +112,9 @@ def upload_file_to_gcs(filename: str, gcs_location: str, dry_run: bool = False) 
 
 @retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))    # type: ignore
 def upload_file_to_azure(filename: str, azure_location: str, dry_run: bool = False, sas_token: Optional[str] = None) -> None:
-    """ Function to copy the filename provided to GCS """
-    cmd = f'azcopy cp {filename} {azure_location}?{sas_token}'
+    """ Function to copy the filename provided to Azure Blob Storage """
+    dest = _azure_url_with_auth(azure_location, sas_token)
+    cmd = f'azcopy cp {filename} {dest}'
     if dry_run:
         logging.info(cmd)
     else:
@@ -134,7 +142,8 @@ def copy_to_bucket(dry_run: bool = False, sas_token: Optional[str] = None):
         # gsutil -mq cp tempdir/* bucket_key/
         if bucket_key.startswith(ELB_AZURE_PREFIX):
             bucket_dir = bucket_key + ('/' if bucket_key[-1] != '/' else '')
-            cmd = f'azcopy cp {tempdir}/* {bucket_dir}?{sas_token} --recursive=true'
+            dest = _azure_url_with_auth(bucket_dir, sas_token)
+            cmd = f'azcopy cp {tempdir}/* {dest} --recursive=true'
             if dry_run:
                 logging.info(cmd)
             else:
@@ -323,7 +332,8 @@ def open_for_write_immediate(fname, sas_token: Optional[str] = None):
             buffer.close()
             logging.debug(f'Attempting to stream {bufsize} bytes to {fname}')
 
-            proc = subprocess.Popen(['azcopy', 'cp', temp_file.name, f'{fname}?{sas_token}'],
+            dest = _azure_url_with_auth(fname, sas_token)
+            proc = subprocess.Popen(['azcopy', 'cp', temp_file.name, dest],
                 stdin=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 universal_newlines=True)
             proc.communicate()
@@ -513,7 +523,8 @@ def get_length(fname: str, dry_run: bool = False, gcp_prj: str | None = None, sa
             # return int(obj.headers['Content-Length'])
             temp_file = NamedTemporaryFile(delete=False, mode='wb')
             temp_file.close()
-            cmd = f'azcopy cp {fname}?{sas_token} {temp_file.name}'
+            src = _azure_url_with_auth(fname, sas_token)
+            cmd = f'azcopy cp {src} {temp_file.name}'
             safe_exec(cmd.split(' '))
             file_size = os.path.getsize(temp_file.name)
             
@@ -575,18 +586,15 @@ def open_for_read(fname: str, gcp_prj: str | None = None, sas_token: Optional[st
     binary = gzipped or tarred
     mode = 'rb' if binary else 'rt'
     if fname.startswith(ELB_AZURE_PREFIX):
-        cmd = f''
         try:
-            response = urllib.request.urlopen(f'{fname}?{sas_token}')
-            # temp_file = NamedTemporaryFile(delete=False, mode='wb')
-            # temp_file.close()
-            # cmd = f'azcopy cp {fname}?{sas_token} {temp_file.name}'
-            # proc = safe_exec(cmd.split(' '))
-            # response = open(temp_file.name, mode='r')
+            src = _azure_url_with_auth(fname, sas_token)
+            temp_file = NamedTemporaryFile(delete=False, mode='wb')
+            temp_file.close()
+            cmd = f'azcopy cp {src} {temp_file.name}'
+            safe_exec(cmd.split(' '))
+            response = open(temp_file.name, mode=mode)
         except Exception as e:
-            raise FileNotFoundError(2, f'Length is not available for {fname}')
-        # finally:
-        #     os.unlink(temp_file.name)
+            raise FileNotFoundError(2, f'File is not available for {fname}: {e}')
             
         return unpack_stream(response, gzipped, tarred)
         

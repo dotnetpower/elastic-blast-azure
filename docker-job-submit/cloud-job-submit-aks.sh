@@ -78,9 +78,9 @@ while true; do
     sleep 30
 done
 
-s=`${KUBECTL} get jobs -l app=setup -o jsonpath='{.items[*].status.conditions[*].type}'`
-if [[ "$s" != Complete*( Complete) ]]; then
-    echo "Setup job(s) failed:" `${KUBECTL} get jobs -l app=setup -o jsonpath='{.items[?(@.status.failed)].metadata.name}'` 
+s=`${KUBECTL} get jobs -l app=setup -o jsonpath='{.items[?(@.status.failed)].metadata.name}'`
+if [[ -n "$s" ]]; then
+    echo "Setup job(s) failed:" $s
     copy_job_logs_to_results_bucket setup "${K8S_JOB_GET_BLASTDB}"
     copy_job_logs_to_results_bucket setup "${K8S_JOB_IMPORT_QUERY_BATCHES}"
     exit 1
@@ -155,9 +155,11 @@ if ${AZCOPY_COPY} ${ELB_RESULTS}/${ELB_METADATA_DIR}/job.yaml.template . &&
             export BLAST_ELB_BATCH_NUM=$i
             envsubst '${JOB_NUM} ${BLAST_ELB_BATCH_NUM}' <job.yaml.template >$job_dir/job_${JOB_NUM}.yaml
 
-            echo "DEBUG: Job $i: $job_dir/job_${JOB_NUM}.yaml"
-            echo "----------------------------------------------"
-            cat $job_dir/job_${JOB_NUM}.yaml
+            if [ -n "${ELB_DEBUG:-}" ]; then
+                echo "DEBUG: Job $i: $job_dir/job_${JOB_NUM}.yaml"
+                echo "----------------------------------------------"
+                cat $job_dir/job_${JOB_NUM}.yaml
+            fi
         fi
         i=$[i + 1]
         j=$[j + 1]
@@ -188,7 +190,7 @@ if ${AZCOPY_COPY} ${ELB_RESULTS}/${ELB_METADATA_DIR}/job.yaml.template . &&
         printf "SPEED to submit-jobs %f jobs/second\n" $(( $num_jobs/($end-$start) ))
     fi
     echo Submitted $num_jobs jobs
-    echo $num_jobs | "$num_jobs" >> num_jobs | ${AZCOPY_COPY} num_jobs ${ELB_RESULTS}/${ELB_METADATA_DIR}/${ELB_NUM_JOBS_SUBMITTED}
+    echo $num_jobs > num_jobs && ${AZCOPY_COPY} num_jobs ${ELB_RESULTS}/${ELB_METADATA_DIR}/${ELB_NUM_JOBS_SUBMITTED}
     # if [ ${ELB_NUM_NODES} -ne 1 ] ; then
         # echo Reconfiguring cluster to auto-scale to ${ELB_NUM_NODES} nodes
         # az login --identity
@@ -230,14 +232,4 @@ done
 # ${KUBECTL} delete volumesnapshot --all
 
 echo exit
-exit 0;
-# check if the writable disk was deleted and try deleting again,
-# if unsuccessful save its id in GS
-if gcloud compute disks describe $pv_rwo --zone $ELB_GCP_ZONE ; then
-    gcloud compute disks delete $pv_rwo --zone $ELB_GCP_ZONE
-    sleep 10
-
-    if gcloud compute disks describe $pv_rwo --zone $ELB_GCP_ZONE ; then
-        jq -n --arg d1 $pv_rwo --arg d2 $pv --arg ss $vs '{"disks": [$d1, $d2], "snapshots": [$ss]}' | gsutil -qm cp - ${ELB_RESULTS}/${ELB_METADATA_DIR}/$ELB_DISK_ID_FILE
-    fi
-fi
+exit 0
