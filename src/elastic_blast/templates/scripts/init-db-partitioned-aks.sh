@@ -12,8 +12,38 @@ set -o pipefail
 
 echo "Downloading $ELB_NUM_PARTITIONS DB partitions"
 
-azcopy login --identity
+azcopy login --identity || { echo "ERROR: azcopy login failed"; exit 1; }
 start=$(date +%s)
+
+# Optimize azcopy for parallel downloads
+export AZCOPY_CONCURRENCY_VALUE=${AZCOPY_CONCURRENCY_VALUE:-64}
+export AZCOPY_BUFFER_GB=${AZCOPY_BUFFER_GB:-4}
+
+# Retry wrapper for transient network errors
+retry_azcopy() {
+    local max_attempts=3 attempt=1 wait=5
+    while [ $attempt -le $max_attempts ]; do
+        if azcopy "$@"; then return 0; fi
+        echo "azcopy attempt $attempt/$max_attempts failed, retrying in ${wait}s..."
+        sleep $wait; wait=$((wait * 2)); attempt=$((attempt + 1))
+    done
+    echo "ERROR: azcopy failed after $max_attempts attempts"; return 1
+}
+
+for i in $(seq 0 $((ELB_NUM_PARTITIONS - 1))); do
+    part_idx=$(printf '%02d' "$i")
+    part_url="${ELB_PARTITION_PREFIX}${part_idx}/*"
+    part_dir="part_${part_idx}"
+    
+    echo "Downloading partition $i from $part_url"
+    mkdir -p "/blast/blastdb/${part_dir}"
+    retry_azcopy cp "$part_url" "/blast/blastdb/${part_dir}/" --recursive --block-size-mb=256 --log-level=WARNING
+    exit_code=$?
+    [ $exit_code -eq 0 ] || exit $exit_code
+done
+
+end=$(date +%s)
+echo "RUNTIME download-partitions $((end - start)) seconds"
 
 for i in $(seq 0 $((ELB_NUM_PARTITIONS - 1))); do
     part_idx=$(printf '%02d' "$i")
@@ -22,7 +52,7 @@ for i in $(seq 0 $((ELB_NUM_PARTITIONS - 1))); do
 
     echo "Downloading partition $i from $part_url"
     mkdir -p "/blast/blastdb/${part_dir}"
-    azcopy cp "$part_url" "/blast/blastdb/${part_dir}/" --recursive
+    retry_azcopy cp "$part_url" "/blast/blastdb/${part_dir}/" --recursive --block-size-mb=256 --log-level=WARNING
     exit_code=$?
     [ $exit_code -eq 0 ] || exit $exit_code
 done

@@ -1,0 +1,42 @@
+---
+# elb-finalizer Job: runs after all BLAST jobs complete.
+# Uploads SUCCESS/FAILURE marker and optionally scales nodes to 0.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: elb-finalizer
+  labels:
+    app: finalizer
+spec:
+  template:
+    metadata:
+      labels:
+        app: finalizer
+    spec:
+      serviceAccountName: ${ELB_SERVICE_ACCOUNT}
+      volumes:
+      - name: scripts
+        configMap:
+          name: elb-scripts
+          defaultMode: 0755
+      containers:
+      - name: finalizer
+        image: ${ELB_DOCKER_IMAGE}
+        env:
+        - name: ELB_RESULTS
+          value: "${ELB_RESULTS}"
+        - name: ELB_AZURE_RESOURCE_GROUP
+          value: "${ELB_AZURE_RESOURCE_GROUP}"
+        - name: ELB_CLUSTER_NAME
+          value: "${ELB_CLUSTER_NAME}"
+        - name: ELB_REUSE_CLUSTER
+          value: "${ELB_REUSE_CLUSTER}"
+        - name: ELB_METADATA_DIR
+          value: "${ELB_METADATA_DIR}"
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+        command: ["/scripts/elb-finalizer-aks.sh"]
+      restartPolicy: Never
+  backoffLimit: 2

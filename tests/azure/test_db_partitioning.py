@@ -25,6 +25,7 @@ import pytest
 from elastic_blast.azure import ElasticBlastAzure
 from elastic_blast.constants import ElbCommand, AKS_PROVISIONING_STATE, INPUT_ERROR
 from elastic_blast.elb_config import ElasticBlastConfig
+from elastic_blast.db_metadata import DbMetadata
 from elastic_blast import config, kubernetes
 from elastic_blast.util import SafeExecError, UserReportError
 
@@ -33,13 +34,31 @@ INI = os.path.join(DATA_DIR, 'test-cfg-file.ini')
 
 PARTITION_PREFIX = 'https://stgelb.blob.core.windows.net/blast-db/mydb/part_'
 
+DB_METADATA = DbMetadata(version='1',
+                         dbname='some-name',
+                         dbtype='Protein',
+                         description='A test database',
+                         number_of_letters=25,
+                         number_of_sequences=25,
+                         files=[],
+                         last_updated='some-date',
+                         bytes_total=25,
+                         bytes_to_cache=25,
+                         number_of_volumes=1)
+
 
 def _make_cfg(db_partitions: int = 0, db_partition_prefix: str = '',
               reuse: bool = False, dry_run: bool = True,
               use_local_ssd: bool = False) -> ElasticBlastConfig:
-    """Create a test config with optional partitioning settings."""
+    """Create a test config with optional partitioning settings.
+    
+    Mocks get_latest_dir and get_db_metadata to avoid Azure Storage
+    connections during ElasticBlastConfig construction.
+    """
     args = Namespace(cfg=INI)
-    cfg = ElasticBlastConfig(config.configure(args), task=ElbCommand.SUBMIT)
+    with patch('elastic_blast.elb_config.get_latest_dir', return_value='latest'), \
+         patch('elastic_blast.elb_config.get_db_metadata', return_value=DB_METADATA):
+        cfg = ElasticBlastConfig(config.configure(args), task=ElbCommand.SUBMIT)
     cfg.blast.db_partitions = db_partitions
     cfg.blast.db_partition_prefix = db_partition_prefix
     cfg.cluster.reuse = reuse
@@ -134,7 +153,7 @@ class TestSubmitPartitioned:
             # 100 partitions × 10 queries = 1000 > 100 limit
             with pytest.raises(UserReportError) as exc_info:
                 elb._submit_partitioned(query_batches, 1000)
-            assert 'exceeding the limit' in str(exc_info.value.message)
+            assert 'exceeding limit' in str(exc_info.value.message)
 
 
 class TestJobSubstitutionsPartition:
@@ -229,7 +248,7 @@ class TestInitializeClusterPartitioned:
         elb = ElasticBlastAzure(cfg)
         elb.cloud_job_submission = False
 
-        with patch.object(elb, '_get_aks_credentials', return_value='test-ctx'), \
+        with patch.object(elb, '_get_k8s_ctx', return_value='test-ctx'), \
              patch.object(elb, '_label_nodes'):
             elb._initialize_cluster_partitioned(['batch_000.fa'])
 
@@ -253,7 +272,7 @@ class TestInitializeClusterPartitioned:
         elb = ElasticBlastAzure(cfg)
         elb.cloud_job_submission = False
 
-        with patch.object(elb, '_get_aks_credentials', return_value='test-ctx'), \
+        with patch.object(elb, '_get_k8s_ctx', return_value='test-ctx'), \
              patch.object(elb, '_label_nodes'):
             elb._initialize_cluster_partitioned(['batch_000.fa'])
 
@@ -412,3 +431,44 @@ class TestCreateScriptsConfigMap:
                 content = script_file.read_text()
                 assert content.startswith('#!/bin/bash'), \
                     f'{script_file.name} missing #!/bin/bash shebang'
+
+
+class TestMergePartitionedResults:
+    """Tests for merge_partitioned_results()."""
+
+    def test_merge_copies_partition_results(self):
+        """Merging should call azcopy for each partition."""
+        cfg = _make_cfg(db_partitions=3, db_partition_prefix=PARTITION_PREFIX, dry_run=False)
+        elb = ElasticBlastAzure.__new__(ElasticBlastAzure)
+        elb.cfg = cfg
+        elb.dry_run = False
+        elb.cleanup_stack = []
+
+        with patch('elastic_blast.azure.safe_exec') as mock_exec:
+            result = elb.merge_partitioned_results()
+            assert mock_exec.call_count == 3
+            assert len(result) == 3
+
+    def test_merge_skips_when_no_partitions(self):
+        """Should return empty list when not a partitioned search."""
+        cfg = _make_cfg(db_partitions=0, dry_run=False)
+        elb = ElasticBlastAzure.__new__(ElasticBlastAzure)
+        elb.cfg = cfg
+        elb.dry_run = False
+        elb.cleanup_stack = []
+
+        result = elb.merge_partitioned_results()
+        assert result == []
+
+    def test_merge_dry_run_logs_only(self):
+        """Dry run should log commands without executing."""
+        cfg = _make_cfg(db_partitions=2, db_partition_prefix=PARTITION_PREFIX, dry_run=True)
+        elb = ElasticBlastAzure.__new__(ElasticBlastAzure)
+        elb.cfg = cfg
+        elb.dry_run = True
+        elb.cleanup_stack = []
+
+        with patch('elastic_blast.azure.safe_exec') as mock_exec:
+            result = elb.merge_partitioned_results()
+            mock_exec.assert_not_called()
+            assert result == []

@@ -76,6 +76,8 @@ spec:
           value: "${ELB_DB_MOL_TYPE}"
         - name: ELB_TAXIDLIST
           value: "${ELB_TAXIDLIST}"
+        - name: ELB_SKIP_DB_VERIFY
+          value: "true"
         - name: STARTUP_DELAY
           value: "30"
         command: ["/scripts/init-db-download-aks.sh"]

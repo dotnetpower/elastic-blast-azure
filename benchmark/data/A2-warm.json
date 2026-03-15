@@ -1,0 +1,44 @@
+{
+  "benchmark_date": "2026-03-14",
+  "test_id": "A2-warm",
+  "description": "E32s_v3 x1, small query, Blob NFS, reuse=true (2nd run - warm cluster)",
+  "config": {
+    "vm_type": "Standard_E32s_v3",
+    "num_nodes": 1,
+    "storage": "azureblob-nfs-premium",
+    "region": "koreacentral",
+    "blast_program": "blastx",
+    "db": "wolf18/RNAvirome.S2.RDRP",
+    "db_size_mb": 10,
+    "query": "small.fa",
+    "query_size_bytes": 1725,
+    "num_batches": 1,
+    "reuse": true,
+    "spot": false,
+    "warm_cluster": true
+  },
+  "timings": {
+    "cluster_create_s": 0,
+    "iam_setup_s": 0,
+    "credentials_s": 3.4,
+    "init_pv_s": 0,
+    "import_queries_s": 15,
+    "submit_jobs_s": 48,
+    "blast_job_s": 17,
+    "finalizer_s": 5,
+    "total_submit_to_complete_s": 101
+  },
+  "results": {
+    "blast_output_size_bytes": 273,
+    "success": true,
+    "num_jobs_submitted": 1
+  },
+  "warm_cluster_savings": {
+    "init_pv_skipped": true,
+    "cluster_create_skipped": true,
+    "cold_total_s": 280,
+    "warm_total_s": 101,
+    "speedup_pct": 64
+  },
+  "notes": "Warm cluster: DB already loaded on PV, init-pv skipped. Only query upload + job submission."
+}

@@ -1,0 +1,19 @@
+{
+  "k8s": {
+    "timestamp": "2026-03-15T07:04:24.972790",
+    "test_id": "H2",
+    "pods": "",
+    "jobs": "",
+    "nodes": "N/A",
+    "pvc": ""
+  },
+  "job_timings": {},
+  "phase_timing": {},
+  "azure_monitor": {
+    "start": "2026-03-15T07:04:12Z",
+    "end": "2026-03-15T07:04:24Z"
+  },
+  "pod_metrics": {},
+  "submit_stdout": "",
+  "submit_stderr": "ERROR: BLAST database https://stgelb.blob.core.windows.net/blast-db/nt_prok/nt_prok memory requirements exceed memory available on selected machine type \"Standard_D8s_v3\". Please select machine type with at least 81.7GB available memory.\n"
+}

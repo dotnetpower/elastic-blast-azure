@@ -1,9 +1,15 @@
-# Warning! This repository is still a work in progress, DO NOT USE IT.
-![alt text](./docs/architecture.png)
-# [Read Me](./docs/azure-prereq.md)
+# ElasticBLAST Azure — Research Fork for Azure AKS Optimization
 
-ElasticBLAST
-============
+> **Status**: Active research — extending ElasticBLAST to run more efficiently on Microsoft Azure.
+> See [Benchmark Report](benchmark/results/report-final.md) for performance evaluation results.
+
+![alt text](./docs/architecture.png)
+
+## Azure Quick Start
+
+See [Azure Prerequisites](./docs/azure-prereq.md) for setup instructions.
+
+# ElasticBLAST
 
 [![Anaconda-Server Badge](https://anaconda.org/bioconda/elastic-blast/badges/version.svg)](https://anaconda.org/bioconda/elastic-blast)
 [![Anaconda-Server Badge](https://anaconda.org/bioconda/elastic-blast/badges/latest_release_date.svg)](https://anaconda.org/bioconda/elastic-blast)
@@ -14,7 +20,7 @@ ElasticBLAST
 
 ElasticBLAST is a cloud-based tool to perform your BLAST searches faster and make you more effective.
 
-ElasticBLAST is ideal for users who have a large number (thousands or more) of queries to BLAST or who prefer to use cloud infrastructure for their searches.  It can run BLAST searches that cannot be done on [NCBI WebBLAST](https://blast.ncbi.nlm.nih.gov) and runs them more quickly than stand-alone [BLAST+](https://www.ncbi.nlm.nih.gov/books/NBK279690/).
+ElasticBLAST is ideal for users who have a large number (thousands or more) of queries to BLAST or who prefer to use cloud infrastructure for their searches. It can run BLAST searches that cannot be done on [NCBI WebBLAST](https://blast.ncbi.nlm.nih.gov) and runs them more quickly than stand-alone [BLAST+](https://www.ncbi.nlm.nih.gov/books/NBK279690/).
 
 ElasticBLAST speeds up your work by distributing your BLAST+ searches across multiple cloud instances. The ability to scale resources in this way allows larger numbers of queries to be searched in a shorter time than you could with BLAST+ on a single host.
 
@@ -23,43 +29,37 @@ Medicine at the NIH, developed and maintains ElasticBLAST.
 
 The NCBI is making the source code for ElasticBLAST available on GitHub as an
 Open Distribution to allow the user community to easily obtain and examine
-that code.  GitHub also provides a means for users to report issues and
-suggest modifications through pull requests. 
+that code. GitHub also provides a means for users to report issues and
+suggest modifications through pull requests.
 
 The NCBI will use internal source code control as the repository of record and
 push regular releases of the ElasticBLAST
-source code to GitHub.  The BLAST developers will work to ensure that
-ElasticBLAST continues to function in 
+source code to GitHub. The BLAST developers will work to ensure that
+ElasticBLAST continues to function in
 changing environments and, when possible, integrate user feedback into
-ElasticBLAST.  Owing to resource constraints, 
+ElasticBLAST. Owing to resource constraints,
 they cannot absolutely commit to act on all issue reports, except critical
 security vulnerabilities.
 
-End-user documentation
-----------------------
+## End-user documentation
 
 Please visit https://blast.ncbi.nlm.nih.gov/doc/elastic-blast/
 
-How to get ElasticBLAST
------------------------
+## How to get ElasticBLAST
 
 There are several ways to obtain ElasticBLAST, please select the one that is
 most suitable to you:
 
-* [Installation from PyPI.org][1]
-* [Installation from BioConda][2]
-* [Installation for the AWS Cloud Shell][3]
-* [Installation for the GCP Cloud Shell][4]
+- [Installation from PyPI.org][1]
+- [Installation from BioConda][2]
+- [Installation for the AWS Cloud Shell][3]
+- [Installation for the GCP Cloud Shell][4]
 
-
-Publication:
-------------
+## Publication:
 
 Camacho C, Boratyn GM, Joukov V, Vera Alvarez R, Madden TL. ElasticBLAST: accelerating sequence search via cloud computing. BMC Bioinformatics. 2023 Mar 26;24(1):117. doi: [10.1186/s12859-023-05245-9](https://bmcbioinformatics.biomedcentral.com/articles/10.1186/s12859-023-05245-9). PMID: [36967390](https://pubmed.ncbi.nlm.nih.gov/36967390/); PMCID: [PMC10040096](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10040096/).
 
-
-Developer information
----------------------
+## Developer information
 
 ### How to build ElasticBLAST
 
@@ -68,7 +68,6 @@ Developer information
 ### Requirements for building ElasticBLAST
 
 In addition to the requirements listed in the [documentation][5], the [AWS Command Line Interface][6] is required.
-
 
 [1]: https://blast.ncbi.nlm.nih.gov/doc/elastic-blast/tutorials/pypi-install.html#tutorial-pypi
 [2]: https://blast.ncbi.nlm.nih.gov/doc/elastic-blast/tutorials/conda-install.html#tutorial-conda

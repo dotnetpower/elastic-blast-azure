@@ -356,7 +356,10 @@ class AZUREConfig(CloudProviderBaseConfig, ConfigParserToDataclassMapper):
     
     def get_storage_account_endpoint(self) -> str:
         """return without the protocol. e.g. myaccount.blob.core.windows.net"""
-        latest_dir = get_latest_dir(str(self.storage_account), str(self.storage_account_container), str(self.storage_account_key))
+        try:
+            latest_dir = get_latest_dir(str(self.storage_account), str(self.storage_account_container), str(self.storage_account_key))
+        except Exception:
+            latest_dir = ''
         return f'{str(self.storage_account)}.blob.core.windows.net/{str(self.storage_account_container)}/{latest_dir}' 
     
     def get_sas_token(self) -> str:

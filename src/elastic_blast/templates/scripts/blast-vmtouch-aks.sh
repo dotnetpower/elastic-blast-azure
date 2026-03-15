@@ -16,10 +16,12 @@ log() {
     printf '%s RUNTIME %s %f seconds\n' "$ts" "$1" "$2"
 }
 
-# Touch all DB volume files into page cache
+# Use 80% of available RAM instead of hardcoded 5G for large DB support
+AVAIL_MEM=$(awk '/MemAvailable/ {print int($2/1024/1024*0.8)"G"}' /proc/meminfo)
+echo "vmtouch memory limit: ${AVAIL_MEM}"
 blastdb_path -dbtype "$ELB_DB_MOL_TYPE" -db "$ELB_DB" -getvolumespath \
-    | tr ' ' '\n' \
-    | parallel vmtouch -tqm 5G
+| tr ' ' '\n' \
+| parallel vmtouch -tqm "$AVAIL_MEM"
 
 mkdir -p results
 exit_code=$?

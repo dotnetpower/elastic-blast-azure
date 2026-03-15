@@ -1,0 +1,35 @@
+{
+  "benchmark_date": "2026-03-14",
+  "test_id": "A2-cold",
+  "description": "E32s_v3 x1, small query, Blob NFS, reuse=true (1st run - cold)",
+  "config": {
+    "vm_type": "Standard_E32s_v3",
+    "num_nodes": 1,
+    "storage": "azureblob-nfs-premium",
+    "region": "koreacentral",
+    "blast_program": "blastx",
+    "db": "wolf18/RNAvirome.S2.RDRP",
+    "db_size_mb": 10,
+    "query": "small.fa",
+    "query_size_bytes": 1725,
+    "num_batches": 1,
+    "reuse": true,
+    "spot": false
+  },
+  "timings": {
+    "cluster_create_s": 288,
+    "iam_setup_s": 11.7,
+    "credentials_s": 3.4,
+    "init_pv_s": 135,
+    "submit_jobs_s": 104,
+    "blast_job_s": 15,
+    "finalizer_s": 42,
+    "total_submit_to_complete_s": 280
+  },
+  "results": {
+    "blast_output_size_bytes": 273,
+    "success": true,
+    "num_jobs_submitted": 1
+  },
+  "notes": "First run on fresh cluster. DB download + query copy included in init-pv."
+}

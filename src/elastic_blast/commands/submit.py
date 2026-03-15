@@ -128,6 +128,11 @@ def submit(args, cfg: ElasticBlastConfig, clean_up_stack):
     dry_run = cfg.cluster.dry_run
     cfg.validate(ElbCommand.SUBMIT, dry_run)
 
+    # Azure-specific prerequisites check (kubectl, azcopy, Azure SDK auth)
+    if cfg.cloud_provider.cloud == CSP.AZURE:
+        from elastic_blast.azure_sdk import check_prerequisites as azure_check_prerequisites
+        azure_check_prerequisites()
+
     # For now, checking resources is only implemented for AWS
     if (cfg.cloud_provider.cloud == CSP.AWS or cfg.cloud_provider.cloud == CSP.AZURE) and os.getenv('TEAMCITY_VERSION') is None:
         check_resource_quotas(cfg)

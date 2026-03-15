@@ -1,0 +1,48 @@
+#                           PUBLIC DOMAIN NOTICE
+#              National Center for Biotechnology Information
+#
+# This software is a "United States Government Work" under the
+# terms of the United States Copyright Act.  It was written as part of
+# the authors' official duties as United States Government employees and
+# thus cannot be copyrighted.  This software is freely available
+# to the public for use.  The National Library of Medicine and the U.S.
+# Government have not placed any restriction on its use or reproduction.
+#
+# Although all reasonable efforts have been taken to ensure the accuracy
+# and reliability of the software and data, the NLM and the U.S.
+# Government do not and cannot warrant the performance or results that
+# may be obtained by using this software or data.  The NLM and the U.S.
+# Government disclaim all warranties, express or implied, including
+# warranties of performance, merchantability or fitness for any particular
+# purpose.
+#
+# Please cite NCBI in any work or product based on this material.
+
+FROM python:3.11-alpine AS builder
+
+RUN apk add --no-cache gcc musl-dev python3-dev libffi-dev openssl-dev cargo make
+RUN python3 -m venv /opt/venv \
+    && . /opt/venv/bin/activate \
+    && pip install --upgrade pip \
+    && pip install --no-cache-dir azure-cli
+
+FROM alpine:3.19
+
+ARG version
+LABEL Description="NCBI ElasticBLAST Janitor for Azure"
+LABEL Version=${version}
+LABEL Vendor="Microsoft"
+LABEL Maintainer=moonchoi@microsoft.com
+
+COPY --from=builder /opt/venv /opt/venv
+
+RUN apk -U upgrade && \
+    apk add --no-cache bash curl jq python3 && \
+    rm -rf /var/cache/apk/*
+
+COPY elastic-blast-janitor-azure.sh /usr/bin/
+RUN chmod +x /usr/bin/elastic-blast-janitor-azure.sh
+
+ENV PATH="/opt/venv/bin:$PATH"
+
+CMD ["/usr/bin/elastic-blast-janitor-azure.sh"]

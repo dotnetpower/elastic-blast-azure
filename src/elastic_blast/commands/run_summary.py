@@ -146,6 +146,8 @@ def _run_summary(args, cfg, clean_up_stack):
             logs.flush()
     elif cloud_provider == CSP.GCP:
         run = _read_job_logs_gcp(cfg)
+    elif cloud_provider == CSP.AZURE:
+        run = _read_job_logs_azure(cfg, args.results)
     else:
         raise NotImplementedError(f'run-summary sub-command is not implemented for {cloud_provider.name}')
     nnotdone = sum(map(lambda x: 1 if x < 0 else 0, run.exit_codes))
@@ -307,6 +309,56 @@ def _read_job_logs_gcp(cfg):
             exit_codes.append(int(parts[4]))
     if not nread:
         logging.error(proc.stderr.read().strip(), file=sys.stderr)
+    return Run(njobs, start_time, end_time, exit_codes)
+
+
+def _read_job_logs_azure(cfg, results_base):
+    """Read BLAST runtime logs from Azure Blob Storage.
+    Logs are at: {results}/{job_id}/logs/BLAST_RUNTIME-*.out"""
+    dry_run = cfg.cluster.dry_run
+    if not results_base:
+        return Run()
+
+    # Azure results include job_id in path
+    job_id = cfg.azure.elb_job_id if cfg.azure else ''
+    log_dir = os.path.join(results_base, job_id, ELB_LOG_DIR) if job_id else os.path.join(results_base, ELB_LOG_DIR)
+
+    if dry_run:
+        logging.info(f'Would read Azure logs from {log_dir}')
+        return Run()
+
+    njobs = 0
+    start_time = end_time = 0
+    exit_codes = []
+    try:
+        # Download all runtime logs via azcopy to temp dir
+        import tempfile, shlex
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cmd = f'azcopy cp "{log_dir}/BLAST_RUNTIME-*.out" {tmpdir}/ --recursive'
+            safe_exec(shlex.split(cmd))
+            for fname in sorted(Path(tmpdir).glob('BLAST_RUNTIME-*.out')):
+                with open(fname) as f:
+                    for line in f:
+                        if not line.strip():
+                            continue
+                        parts = line.split()
+                        try:
+                            timestamp = float(parts[0]) / 1e9
+                        except (ValueError, IndexError):
+                            continue
+                        verb = parts[2] if len(parts) > 2 else ''
+                        if verb == 'start' and (njobs == 0 or timestamp < start_time):
+                            start_time = timestamp
+                        elif verb == 'end' and (njobs == 0 or timestamp > end_time):
+                            end_time = timestamp
+                        if verb == 'end':
+                            njobs += 1
+                        if verb == 'exitCode' and len(parts) > 4:
+                            exit_codes.append(int(parts[4]))
+    except Exception as e:
+        logging.warning(f'Failed to read Azure logs: {e}')
+        return Run()
+
     return Run(njobs, start_time, end_time, exit_codes)
 
 

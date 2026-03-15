@@ -19,31 +19,39 @@
 # Please cite NCBI in any work or product based on this material.
 
 """
-Test for elastic_blast.gcp_traits
+Unit tests for elastic_blast.azure_traits
 
 Author: Victor Joukov joukovv@ncbi.nlm.nih.gov
 """
-from elastic_blast.azure_traits import get_machine_properties, get_sas_token, get_instance_type_offerings
+from elastic_blast.azure_traits import get_machine_properties, get_instance_type_offerings
 from elastic_blast.base import InstanceProperties
 import os
 import pytest
 
 def test_ram():
-    assert get_machine_properties('n1-standard-32') == InstanceProperties(32, 120)
+    assert get_machine_properties('Standard_E32s_v3') == InstanceProperties(32, 256)
+
+def test_l_series_storage_optimized():
+    """L-series VMs for TB-scale BLAST DB with large NVMe."""
+    assert get_machine_properties('Standard_L32s_v3') == InstanceProperties(32, 256)
+    assert get_machine_properties('Standard_L64s_v3') == InstanceProperties(64, 512)
+    assert get_machine_properties('Standard_L80s_v3') == InstanceProperties(80, 640)
+
+def test_e_series_v5():
+    """E-series v5 VMs with NVMe temp storage."""
+    assert get_machine_properties('Standard_E32bs_v5') == InstanceProperties(32, 256)
+    assert get_machine_properties('Standard_E64bs_v5') == InstanceProperties(64, 512)
 
 def test_unsupported_instance_type_optimal():
     with pytest.raises(NotImplementedError):
         get_machine_properties('optimal')
 
 def test_not_found():
-    with pytest.raises(KeyError):
-        get_machine_properties('n1-nonstandard-32')
+    with pytest.raises(NotImplementedError):
+        get_machine_properties('Standard_NONEXISTENT_32')
         
-def test_get_sas_token():
-    # account_key = os.environ['AZURE-STORAGE-ACCOUNT-KEY'] if os.environ['AZURE-STORAGE-ACCOUNT-KEY'] else '' # from .env file
-    result = get_sas_token('saelb01', 'blast-db', 'account_key')
-    assert result != None
-    
+@pytest.mark.skipif(not os.getenv('RUN_ALL_TESTS'),
+                    reason='Requires Azure CLI credentials (az vm list-sizes)')
 def test_get_instance_type_offerings():
     result = get_instance_type_offerings('eastus')
     assert result != None

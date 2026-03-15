@@ -6,569 +6,488 @@ Unit tests for azure module
 Author: Moon Hyuk Choi moonchoi@microsoft.com
 """
 
-import subprocess
+import json
 import os
+import subprocess
 from argparse import Namespace
 from unittest.mock import patch, MagicMock
+
 import pytest  # type: ignore
-from elastic_blast.azure import ElasticBlastAzure
-from elastic_blast import gcp
+
+from elastic_blast.azure import (
+    ElasticBlastAzure,
+    get_disks,
+    get_snapshots,
+    delete_disk,
+    delete_snapshot,
+    get_aks_clusters,
+    get_aks_credentials,
+    delete_cluster_with_cleanup,
+    check_cluster,
+    remove_split_query,
+    check_prerequisites,
+)
 from elastic_blast import azure
 from elastic_blast import kubernetes
 from elastic_blast import config
-from elastic_blast import elb_config
-from elastic_blast import util
-from elastic_blast.constants import CLUSTER_ERROR, ElbCommand
+from elastic_blast.constants import (
+    CLUSTER_ERROR,
+    ElbCommand,
+    ElbStatus,
+    AKS_PROVISIONING_STATE,
+)
 from elastic_blast.util import SafeExecError, UserReportError
 from elastic_blast.elb_config import ElasticBlastConfig
 from elastic_blast.db_metadata import DbMetadata
-from tests.utils import MockedCompletedProcess
-from tests.utils import mocked_safe_exec, get_mocked_config
-from tests.utils import GCP_PROJECT, GCP_DISKS, GKE_PVS, GKE_CLUSTERS
-from tests.utils import GKEMock, gke_mock, GCP_REGIONS
-from elastic_blast.util import safe_exec
+from tests.utils import MockedCompletedProcess, AZURE_DISKS, AZURE_SNAPSHOTS, AKS_CLUSTERS
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
 INI = os.path.join(DATA_DIR, 'test-cfg-file.ini')
 
-# Mocked tests
+DB_METADATA = DbMetadata(version='1',
+                         dbname='some-name',
+                         dbtype='Protein',
+                         description='A test database',
+                         number_of_letters=25,
+                         number_of_sequences=25,
+                         files=[],
+                         last_updated='some-date',
+                         bytes_total=25,
+                         bytes_to_cache=25,
+                         number_of_volumes=1)
 
-DB_METADATA = DbMetadata(version = '1',
-                         dbname = 'some-name',
-                         dbtype = 'Protein',
-                         description = 'A test database',
-                         number_of_letters = 25,
-                         number_of_sequences = 25,
-                         files = [],
-                         last_updated = 'some-date',
-                         bytes_total = 25,
-                         bytes_to_cache = 25,
-                         number_of_volumes = 1)
-def test_safe_exec():
-    cmd = "az aks create --auto-upgrade-channel none --resource-group rg-elasticblast-test-01 --name elastic-blast-moonchoi-test1 --generate-ssh-keys --node-vm-size Standard_E32s_v3 --node-count 1 --tags"
-    cmd = cmd.split(' ')
-    cmd.append('{"Environment":"Production","Owner":"TeamA"}')
+
+def _make_cfg(dry_run: bool = True) -> ElasticBlastConfig:
+    """Create a test config from the Azure INI file.
     
-    # safe_exec(cmd)
-    
-def test_run_cmd():
-    cmd = "kubectl get pods -A"
-    
+    Mocks get_latest_dir and get_db_metadata to avoid Azure Storage
+    connections during ElasticBlastConfig construction.
+    """
     args = Namespace(cfg=INI)
-    cfg = ElasticBlastConfig(config.configure(args), task = ElbCommand.STATUS)
-    cfg.cluster.name = cfg.cluster.name + f'-{os.environ["USER"]}' + '-28'
-    elastic_blast =  ElasticBlastAzure(cfg)
-    result = elastic_blast.run_command(cmd)
-    print(result)
-    assert result != None
-    
-    
-    # subprocess.run(cmd)
-
-@patch(target='elastic_blast.elb_config.gcp_get_regions', new=MagicMock(return_value=GCP_REGIONS))
-def test_get_disks(gke_mock):
-    """Test getting a list of GCP persistent disks"""
-    cfg = get_mocked_config()
-    disks = gcp.get_disks(cfg)
-    assert sorted(disks) == sorted(GCP_DISKS)
-    gcp.safe_exec.assert_called()
-
-
-@patch(target='elastic_blast.elb_config.get_db_metadata', new=MagicMock(return_value=DB_METADATA))
-@patch(target='elastic_blast.elb_config.gcp_get_regions', new=MagicMock(return_value=GCP_REGIONS))
-def test_get_disks_bad_output(mocker):
-    """Test that gcp.get_disks raises RuntimeError for bad gcloud output"""
-
-    def safe_exec_bad_gcloud(cmd):
-        """Mocked util.safe_exec function that returns incorrect JSON"""
-        if not cmd.startswith('gcloud compute disks list --format json'):
-            raise ValueError(f'Bad gcloud command line: {cmd}')
-        return MockedCompletedProcess('some-non-json-string')
-
-    mocker.patch('elastic_blast.gcp.safe_exec', side_effect=safe_exec_bad_gcloud)
-    with patch(target='elastic_blast.elb_config.safe_exec', new=MagicMock(side_effect=GKEMock().mocked_safe_exec)):
-        with patch(target='elastic_blast.util.safe_exec', new=MagicMock(side_effect=GKEMock().mocked_safe_exec)):
-            cfg = get_mocked_config()
-    with pytest.raises(RuntimeError):
-        gcp.get_disks(cfg)
-    gcp.safe_exec.assert_called()
-
-
-@patch(target='elastic_blast.elb_config.gcp_get_regions', new=MagicMock(return_value=GCP_REGIONS))
-def test_delete_disk(gke_mock):
-    """Test deleting a GCP disk"""
-    cfg = get_mocked_config()
-    gcp.delete_disk(GCP_DISKS[0], cfg)
-    gcp.safe_exec.assert_called()
-
-
-@patch(target='elastic_blast.elb_config.gcp_get_regions', new=MagicMock(return_value=GCP_REGIONS))
-@patch(target='elastic_blast.elb_config.get_db_metadata', new=MagicMock(return_value=DB_METADATA))
-def test_delete_nonexistent_disk(mocker):
-    """Test that deleting a GCP disk that does not exits raises util.SafeExecError"""
-
-    def fake_subprocess_run(cmd, check, stdout, stderr, env):
-        """Fake subprocess.run function that raises exception and emulates
-        command line returning with a non-zero exit code"""
-        raise subprocess.CalledProcessError(returncode=1, cmd=cmd, output=b'',
-                                            stderr=b'')
-
-    with patch(target='elastic_blast.elb_config.safe_exec', new=MagicMock(side_effect=GKEMock().mocked_safe_exec)):
-        with patch(target='elastic_blast.util.safe_exec', new=MagicMock(side_effect=GKEMock().mocked_safe_exec)):
-            cfg = get_mocked_config()
-
-    mocker.patch('subprocess.run', side_effect=fake_subprocess_run)
-
-    with pytest.raises(SafeExecError):
-        gcp.delete_disk('some-disk', cfg)
-    subprocess.run.assert_called()
-
-
-@patch(target='elastic_blast.elb_config.gcp_get_regions', new=MagicMock(return_value=GCP_REGIONS))
-def test_delete_disk_empty_name(gke_mock):
-    """Test that deleting disk with and empty name results in ValueError"""
-    cfg = get_mocked_config()
-    with pytest.raises(ValueError):
-        gcp.delete_disk('', cfg)
-
-
-@patch(target='elastic_blast.elb_config.gcp_get_regions', new=MagicMock(return_value=GCP_REGIONS))
-def test_get_gke_clusters(gke_mock):
-    """Test listing GKE clusters"""
-    cfg = get_mocked_config()
-    clusters = gcp.get_gke_clusters(cfg)
-    assert sorted(clusters) == sorted(GKE_CLUSTERS)
-    gcp.safe_exec.assert_called()
-
-
-@patch(target='elastic_blast.elb_config.get_db_metadata', new=MagicMock(return_value=DB_METADATA))
-@patch(target='elastic_blast.elb_config.gcp_get_regions', new=MagicMock(return_value=GCP_REGIONS))
-def test_get_gke_clusters_empty(mocker):
-    """Test listing GKE clusters for an empty list"""
-
-    def safe_exec_empty(cmd):
-        """Mocked safe_exec returning an emty JSON list"""
-        return MockedCompletedProcess('[]')
-
-    mocker.patch('elastic_blast.gcp.safe_exec', side_effect=safe_exec_empty)
-    with patch(target='elastic_blast.elb_config.safe_exec', new=MagicMock(side_effect=GKEMock().mocked_safe_exec)):
-        with patch(target='elastic_blast.util.safe_exec', new=MagicMock(side_effect=GKEMock().mocked_safe_exec)):
-            cfg = get_mocked_config()
-    assert len(gcp.get_gke_clusters(cfg)) == 0
-    gcp.safe_exec.assert_called()
-
-
-@patch(target='elastic_blast.elb_config.gcp_get_regions', new=MagicMock(return_value=GCP_REGIONS))
-def test_delete_cluster_with_cleanup(gke_mock):
-    """Test deleting GKE cluster and its persistent disks"""
-    cfg = get_mocked_config()
-    gcp.delete_cluster_with_cleanup(cfg)
-    gcp.safe_exec.assert_called()
-    kubernetes.safe_exec.assert_called()
-
-
-@patch(target='elastic_blast.elb_config.gcp_get_regions', new=MagicMock(return_value=GCP_REGIONS))
-def test_delete_cluster_with_cleanup_no_cluster(gke_mock):
-    """Test deleting GKE cluster with cleanup when no cluster is present"""
-    # no cluster found in GKE
-    gke_mock.set_options(['no-cluster'])
-
-    cfg = get_mocked_config()
-    with pytest.raises(UserReportError):
-        gcp.delete_cluster_with_cleanup(cfg)
-    gcp.safe_exec.assert_called()
-
-
-@patch(target='elastic_blast.elb_config.gcp_get_regions', new=MagicMock(return_value=GCP_REGIONS))
-def test_delete_cluster_with_cleanup_disk_left(gke_mock, mocker):
-    """Test that disk is deleted even if k8s did not delete it"""
-    def mocked_get_disks(cfg, dry_run):
-        """Mocked getting GCP disks"""
-        return GCP_DISKS
-
-    def mocked_delete_disk(name, cfg):
-        """Mocked GCP disk deletion"""
-        pass
-
-    def mocked_delete_cluster(cfg):
-        """Mocked deletion of GKE cluster"""
-        return GKE_CLUSTERS[0]
-
-    def mocked_get_persistent_disks(ignore_me, dry_run):
-        """Mocked listing of kubernets persistent disks"""
-        # persistent disk to delete
-        return [GCP_DISKS[0]]
-
-    mocker.patch('elastic_blast.gcp.get_disks', side_effect=mocked_get_disks)
-    mocker.patch('elastic_blast.gcp.delete_disk', side_effect=mocked_delete_disk)
-    mocker.patch('elastic_blast.gcp.delete_cluster', side_effect=mocked_delete_cluster)
-    mocker.patch('elastic_blast.kubernetes.get_persistent_disks',
-                 side_effect=mocked_get_persistent_disks)
-
-    cfg = get_mocked_config()
-    #with pytest.raises(UserReportError) as err:
-    gcp.delete_cluster_with_cleanup(cfg)
-    #assert err.value.returncode == CLUSTER_ERROR
-    #assert 'not able to delete persistent disk' in err.value.message
-    #assert GCP_DISKS[0] in err.value.message
-    gcp.safe_exec.assert_called()
-    kubernetes.get_persistent_disks.assert_called()
-    # test that GCP disk deletion was called for the appropriate disk
-    gcp.delete_disk.assert_called_with(GCP_DISKS[0], cfg)
-    # test that cluster deletion was called
-    gcp.delete_cluster.assert_called_with(cfg)
-
-
-@patch(target='elastic_blast.elb_config.gcp_get_regions', new=MagicMock(return_value=GCP_REGIONS))
-def test_delete_cluster_with_cleanup_failed_kubectl(gke_mock, mocker):
-    """Test that cluster deletion is called when we cannot communicate with
-    it with kubectl"""
-    def mocked_delete_cluster(cfg):
-        """Mocked cluster deletion"""
-        return GKE_CLUSTERS[0]
-
-    # any kubectl call fails
-    gke_mock.set_options(['kubectl-error'])
-    mocker.patch('elastic_blast.gcp.delete_cluster', side_effect=mocked_delete_cluster)
-
-    cfg = get_mocked_config()
-    gcp.delete_cluster_with_cleanup(cfg)
-    kubernetes.safe_exec.assert_called()
-    # test cluster deletion was called
-    gcp.delete_cluster.assert_called_with(cfg)
-
-
-@patch(target='elastic_blast.elb_config.gcp_get_regions', new=MagicMock(return_value=GCP_REGIONS))
-def test_delete_cluster_with_cleanup_failed_get_disks(gke_mock, mocker):
-    """Test that cluster and disk deletion are called when getting a list of
-    GCP disks failed"""
-    def mocked_get_disks(cfg, dry_run):
-        """Mocked listing of GCP disks"""
-        mocked_get_disks.invocation_counter += 1
-        if mocked_get_disks.invocation_counter == 1:
-            raise RuntimeError('Mocked GCP listing error')
-        elif mocked_get_disks.invocation_counter == 2:
-            return [GCP_DISKS[0]]
-        return []
-    mocked_get_disks.invocation_counter = 0
-
-    def mocked_delete_cluster(cfg):
-        """Mocked cluster deletion"""
-        return GKE_CLUSTERS[0]
-
-    def mocked_delete_disk(name, cfg):
-        """Mocked disk deletion"""
-        pass
-
-    def mocked_get_persistent_disks(ignore_me, dry_run):
-        """Mocked listing of GKE cluster persistent disks"""
-        return [GCP_DISKS[0]]
-
-    mocker.patch('elastic_blast.gcp.get_disks', side_effect=mocked_get_disks)
-    mocker.patch('elastic_blast.gcp.delete_cluster', side_effect=mocked_delete_cluster)
-    mocker.patch('elastic_blast.gcp.delete_disk', side_effect=mocked_delete_disk)
-    mocker.patch('elastic_blast.kubernetes.get_persistent_disks',
-                 side_effect=mocked_get_persistent_disks)
-
-    cfg = get_mocked_config()
-    gcp.delete_cluster_with_cleanup(cfg)
-    gcp.safe_exec.assert_called()
-    kubernetes.safe_exec.assert_called()
-    # test cluster deletion was called
-    gcp.delete_cluster.assert_called_with(cfg)
-    # test that disk deletion was called
-    gcp.delete_disk.assert_called_with(GCP_DISKS[0], cfg)
-
-
-@patch(target='elastic_blast.elb_config.gcp_get_regions', new=MagicMock(return_value=GCP_REGIONS))
-def test_delete_cluster_with_cleanup_cluster_provisioning(gke_mock, mocker):
-    """Test that cluster provisioning is handled when deleting the cluster.
-    The code should wait until cluster status is RUNNING and delete it then."""
-    class GKEStatusMock:
-        """Class to mock changin GKE cluster status"""
-
-        def __init__(self):
-            self.status = 'PROVISIONING'
-
-        def mocked_check_cluster(self, cfg):
-            """Mocked check cluster status. Returns PROVISIONING the first time
-            and RUNNING after that"""
-            if self.status == 'PROVISIONING':
-                self.status = 'RUNNING'
-                return 'PROVISIONING'
-            return self.status
-
-    def mocked_delete_cluster(cfg):
-        """Mocked cluster deletion"""
-        return cfg.cluster.name
-
-    mocked_cluster = GKEStatusMock()
-    mocker.patch('elastic_blast.gcp.check_cluster',
-                 side_effect=mocked_cluster.mocked_check_cluster)
-    mocker.patch('elastic_blast.gcp.delete_cluster', side_effect=mocked_delete_cluster)
-
-    cfg = get_mocked_config()
-    gcp.delete_cluster_with_cleanup(cfg)
-    # test that gcp.check_cluster was called more than once
-    assert gcp.check_cluster.call_count > 1
-    # test that cluster deletion was called
-    gcp.delete_cluster.assert_called()
-
-
-@patch(target='elastic_blast.elb_config.gcp_get_regions', new=MagicMock(return_value=GCP_REGIONS))
-def test_delete_cluster_with_cleanup_cluster_reconciling(gke_mock, mocker):
-    """Test that cluster status RECONCILING is handled when deleting the
-    cluster. The code should wait until cluster status is RUNNING and delete
-    it then."""
-    class GKEStatusMock:
-        """Class to mock changin GKE cluster status"""
-
-        def __init__(self):
-            self.status = 'RECONCILING'
-
-        def mocked_check_cluster(self, cfg):
-            """Mocked check cluster status. Returns RECONCILING the first time
-            and RUNNING after that"""
-            if self.status == 'RECONCILING':
-                self.status = 'RUNNING'
-                return 'RECONCILING'
-            return self.status
-
-    def mocked_delete_cluster(cfg):
-        """Mocked cluster deletion"""
-        return cfg.cluster.name
-
-    mocked_cluster = GKEStatusMock()
-    mocker.patch('elastic_blast.gcp.check_cluster',
-                 side_effect=mocked_cluster.mocked_check_cluster)
-    mocker.patch('elastic_blast.gcp.delete_cluster', side_effect=mocked_delete_cluster)
-
-    cfg = get_mocked_config()
-    gcp.delete_cluster_with_cleanup(cfg)
-    # test that gcp.check_cluster was called more than once
-    assert gcp.check_cluster.call_count > 1
-    # test that cluster deletion was called
-    gcp.delete_cluster.assert_called()
-
-
-@patch(target='elastic_blast.elb_config.gcp_get_regions', new=MagicMock(return_value=GCP_REGIONS))
-def test_delete_cluster_with_cleanup_cluster_error(gke_mock, mocker):
-    """Test deleting a cluster with ERROR status"""
-    def mocked_check_cluster(cfg):
-        """Mocked checking cluster status"""
-        return 'ERROR'
-
-    def mocked_delete_cluster(cfg):
-        """Mocked cluster deletion only to verify that it was called"""
-        return cfg.cluster.name
-
-    mocker.patch('elastic_blast.gcp.check_cluster', side_effect=mocked_check_cluster)
-    mocker.patch('elastic_blast.gcp.delete_cluster', side_effect=mocked_delete_cluster)
-    cfg = get_mocked_config()
-    gcp.delete_cluster_with_cleanup(cfg)
-    gcp.check_cluster.assert_called()
-    # cluster deletion must be called
-    gcp.delete_cluster.assert_called()
-
-
-@patch(target='elastic_blast.elb_config.gcp_get_regions', new=MagicMock(return_value=GCP_REGIONS))
-def test_delete_cluster_with_cleanup_cluster_status_unrecognized(gke_mock, mocker):
-    """Test deleting a cluster with unrecognized status"""
-    def mocked_check_cluster(cfg):
-        """Mocked checking cluster status"""
-        return 'SOME_STRANGE_STATUS'
-
-    def mocked_delete_cluster(cfg):
-        """Mocked cluster deletion only to verify that it was called"""
-        return cfg.cluster.name
-
-    mocker.patch('elastic_blast.gcp.check_cluster', side_effect=mocked_check_cluster)
-    mocker.patch('elastic_blast.gcp.delete_cluster', side_effect=mocked_delete_cluster)
-    cfg = get_mocked_config()
-    gcp.delete_cluster_with_cleanup(cfg)
-    gcp.check_cluster.assert_called()
-    # cluster deletion must be called
-    gcp.delete_cluster.assert_called()
-
-
-@patch(target='elastic_blast.elb_config.gcp_get_regions', new=MagicMock(return_value=GCP_REGIONS))
-def test_delete_cluster_with_cleanup_cluster_stopping(gke_mock, mocker):
-    """Test deleting cluster with the cluster is beeing stopped. The code
-    should raise RuntimeError"""
-    def mocked_check_cluster(cfg):
-        """Mocked check cluster status. STOPPING never changes to RUNNING."""
-        return 'STOPPING'
-
-    mocker.patch('elastic_blast.gcp.check_cluster', side_effect=mocked_check_cluster)
-    cfg = get_mocked_config()
-    with pytest.raises(UserReportError) as errinfo:
-        gcp.delete_cluster_with_cleanup(cfg)
-
-    # test return code and message in UserReportError
-    assert errinfo.value.returncode == CLUSTER_ERROR
-    assert GKE_CLUSTERS[0] in errinfo.value.message
-    assert 'already being deleted' in errinfo.value.message
-
-
-@patch(target='elastic_blast.elb_config.gcp_get_regions', new=MagicMock(return_value=GCP_REGIONS))
-def test_remove_split_query(mocker):
-    """Test that util.remove_split_query calls safe_exec with correct command"""
-
-    RESULTS = 'gs://results'
-    QUERIES = RESULTS + '/query_batches/*'
-
-    def safe_exec_gsutil_rm(cmd):
-        """Mocked util.safe_exec function that simulates gsutil rm"""
-        if cmd != f'gsutil -mq rm {QUERIES}':
-            raise ValueError(f'Bad gsutil command line: {cmd}')
-        return MockedCompletedProcess('')
-
-    mocker.patch('elastic_blast.gcp.safe_exec', side_effect=safe_exec_gsutil_rm)
-    mocker.patch('elastic_blast.gcp_traits.safe_exec', side_effect=mocked_safe_exec)
-    with patch(target='elastic_blast.elb_config.safe_exec', new=MagicMock(side_effect=GKEMock().mocked_safe_exec)):
-        with patch(target='elastic_blast.util.safe_exec', new=MagicMock(side_effect=GKEMock().mocked_safe_exec)):
-            cfg = ElasticBlastConfig(gcp_project = 'test-gcp-project',
-                                     gcp_region = 'test-gcp-region',
-                                     gcp_zone = 'test-gcp-zone',
-                                     results = 'gs://test-bucket',
-                                     task = ElbCommand.DELETE)
-
-    cfg.cluster.results = RESULTS
-    gcp.remove_split_query(cfg)
-    gcp.safe_exec.assert_called()
-
-
-
-# Tests running real gcloud
-
-# A few test require specific GCP credentials and may create GCP resources.
-# They are skipped. Set environment variable RUN_ALL_TESTS to run all tests.
+    with patch('elastic_blast.elb_config.get_latest_dir', return_value='latest'), \
+         patch('elastic_blast.elb_config.get_db_metadata', return_value=DB_METADATA):
+        cfg = ElasticBlastConfig(config.configure(args), task=ElbCommand.SUBMIT)
+    cfg.cluster.dry_run = dry_run
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# Azure Disk tests
+# ---------------------------------------------------------------------------
+
+class TestGetDisks:
+    """Tests for azure.get_disks()."""
+
+    def test_returns_disk_names(self):
+        cfg = _make_cfg(dry_run=False)
+        with patch('elastic_blast.azure_sdk.get_disks', return_value=['disk-1', 'disk-2']):
+            assert get_disks(cfg) == ['disk-1', 'disk-2']
+
+    def test_returns_empty_list(self):
+        cfg = _make_cfg(dry_run=False)
+        with patch('elastic_blast.azure_sdk.get_disks', return_value=[]):
+            assert get_disks(cfg) == []
+
+    def test_raises_runtime_error_on_bad_json(self):
+        cfg = _make_cfg(dry_run=False)
+        with patch('elastic_blast.azure_sdk.get_disks', side_effect=RuntimeError('SDK error')):
+            with pytest.raises(RuntimeError):
+                get_disks(cfg)
+
+    def test_dry_run_returns_empty(self):
+        cfg = _make_cfg(dry_run=True)
+        with patch('elastic_blast.azure_sdk.get_disks', return_value=[]) as m:
+            assert get_disks(cfg, dry_run=True) == []
+            m.assert_called_once()
+
+
+class TestGetSnapshots:
+    """Tests for azure.get_snapshots()."""
+
+    def test_returns_snapshot_names(self):
+        cfg = _make_cfg(dry_run=False)
+        with patch('elastic_blast.azure_sdk.get_snapshots', return_value=['snap-1']):
+            assert get_snapshots(cfg) == ['snap-1']
+
+    def test_raises_runtime_error_on_bad_json(self):
+        cfg = _make_cfg(dry_run=False)
+        with patch('elastic_blast.azure_sdk.get_snapshots', side_effect=RuntimeError('SDK error')):
+            with pytest.raises(RuntimeError):
+                get_snapshots(cfg)
+
+
+class TestDeleteDisk:
+    """Tests for azure.delete_disk()."""
+
+    def test_calls_az_disk_delete(self):
+        cfg = _make_cfg(dry_run=False)
+        with patch('elastic_blast.azure_sdk.delete_disk') as mock:
+            delete_disk('my-disk', cfg)
+        mock.assert_called_once_with(cfg.azure.resourcegroup, 'my-disk')
+
+    def test_empty_name_raises_value_error(self):
+        cfg = _make_cfg()
+        with pytest.raises(ValueError, match='No disk name'):
+            delete_disk('', cfg)
+
+    def test_none_cfg_raises_value_error(self):
+        with pytest.raises(ValueError, match='No application config'):
+            delete_disk('some-disk', None)
+
+    def test_propagates_safe_exec_error(self):
+        cfg = _make_cfg(dry_run=False)
+        with patch('elastic_blast.azure_sdk.delete_disk',
+                   side_effect=Exception('disk not found')):
+            with pytest.raises(Exception):
+                delete_disk('nonexistent-disk', cfg)
+
+
+class TestDeleteSnapshot:
+    """Tests for azure.delete_snapshot()."""
+
+    def test_calls_az_snapshot_delete(self):
+        cfg = _make_cfg(dry_run=False)
+        with patch('elastic_blast.azure_sdk.delete_snapshot') as mock:
+            delete_snapshot('my-snap', cfg)
+        mock.assert_called_once_with(cfg.azure.resourcegroup, 'my-snap')
+
+    def test_empty_name_raises_value_error(self):
+        cfg = _make_cfg()
+        with pytest.raises(ValueError, match='No snapshot name'):
+            delete_snapshot('', cfg)
+
+
+# ---------------------------------------------------------------------------
+# AKS Cluster tests
+# ---------------------------------------------------------------------------
+
+class TestGetAksClusters:
+    """Tests for azure.get_aks_clusters()."""
+
+    def test_returns_cluster_names(self):
+        cfg = _make_cfg(dry_run=False)
+        with patch('elastic_blast.azure_sdk.get_aks_clusters', return_value=['cluster-a', 'cluster-b']):
+            assert get_aks_clusters(cfg) == ['cluster-a', 'cluster-b']
+
+    def test_returns_empty_list(self):
+        cfg = _make_cfg(dry_run=False)
+        with patch('elastic_blast.azure_sdk.get_aks_clusters', return_value=[]):
+            assert get_aks_clusters(cfg) == []
+
+    def test_raises_runtime_error_on_bad_json(self):
+        cfg = _make_cfg(dry_run=False)
+        with patch('elastic_blast.azure_sdk.get_aks_clusters', side_effect=RuntimeError('parse error')):
+            with pytest.raises(RuntimeError):
+                get_aks_clusters(cfg)
+
+    def test_calls_az_aks_list_with_resource_group(self):
+        cfg = _make_cfg(dry_run=False)
+        with patch('elastic_blast.azure_sdk.get_aks_clusters', return_value=[]) as mock:
+            get_aks_clusters(cfg)
+        mock.assert_called_once_with(cfg.azure.resourcegroup, cfg.cluster.dry_run)
+
+
+class TestGetAksCredentials:
+    """Tests for azure.get_aks_credentials()."""
+
+    def test_returns_kubernetes_context(self):
+        cfg = _make_cfg(dry_run=False)
+        with patch('elastic_blast.azure_sdk.get_aks_credentials', return_value='my-aks-context'):
+            assert get_aks_credentials(cfg) == 'my-aks-context'
+
+    def test_propagates_error_for_nonexistent_cluster(self):
+        cfg = _make_cfg(dry_run=False)
+        with patch('elastic_blast.azure_sdk.get_aks_credentials',
+                   side_effect=UserReportError(1, 'cluster not found')):
+            with pytest.raises(UserReportError):
+                get_aks_credentials(cfg)
+
+
+# ---------------------------------------------------------------------------
+# delete_cluster_with_cleanup tests
+# ---------------------------------------------------------------------------
+
+class TestDeleteClusterWithCleanup:
+    """Tests for azure.delete_cluster_with_cleanup()."""
+
+    def test_successful_cleanup_and_deletion(self, mocker):
+        """Full cluster deletion: get credentials, delete k8s resources, delete cluster."""
+        cfg = _make_cfg(dry_run=False)
+
+        mocker.patch('elastic_blast.azure.check_cluster',
+                     return_value=AKS_PROVISIONING_STATE.SUCCEEDED)
+        mocker.patch('elastic_blast.azure._get_resource_ids',
+                     return_value=MagicMock(disks=[], snapshots=[]))
+        mocker.patch('elastic_blast.azure.get_aks_credentials', return_value='test-ctx')
+        mocker.patch('elastic_blast.azure.kubernetes.check_server')
+        mocker.patch('elastic_blast.azure.kubernetes.get_persistent_disks', return_value=[])
+        mocker.patch('elastic_blast.azure.kubernetes.get_volume_snapshots', return_value=[])
+        mocker.patch('elastic_blast.azure.kubernetes.delete_all', return_value=[])
+        mocker.patch('elastic_blast.azure.get_disks', return_value=[])
+        mocker.patch('elastic_blast.azure.get_snapshots', return_value=[])
+        mocker.patch('elastic_blast.azure.remove_split_query')
+        mocker.patch('elastic_blast.azure.delete_cluster', return_value=cfg.cluster.name)
+
+        delete_cluster_with_cleanup(cfg)
+        azure.delete_cluster.assert_called_with(cfg)
+
+    def test_no_cluster_raises_error(self, mocker):
+        """Raises UserReportError when cluster not found and not dry_run."""
+        cfg = _make_cfg(dry_run=False)
+
+        mocker.patch('elastic_blast.azure.check_cluster', return_value='')
+        mocker.patch('elastic_blast.azure._get_resource_ids',
+                     return_value=MagicMock(disks=[], snapshots=[]))
+        # Mock ElasticBlastAzure constructor — _status_from_results returns UNKNOWN
+        mock_elb = MagicMock()
+        mock_elb._status_from_results.return_value = ElbStatus.UNKNOWN
+        mocker.patch('elastic_blast.azure.ElasticBlastAzure', return_value=mock_elb)
+
+        with pytest.raises(UserReportError) as errinfo:
+            delete_cluster_with_cleanup(cfg)
+        assert errinfo.value.returncode == CLUSTER_ERROR
+
+    def test_dry_run_no_cluster_returns(self, mocker):
+        """In dry_run, returns without error when cluster not found."""
+        cfg = _make_cfg(dry_run=True)
+
+        mocker.patch('elastic_blast.azure.check_cluster', return_value='')
+        mocker.patch('elastic_blast.azure._get_resource_ids',
+                     return_value=MagicMock(disks=[], snapshots=[]))
+
+        # Should not raise
+        delete_cluster_with_cleanup(cfg)
+
+    def test_failed_kubectl_still_deletes_cluster(self, mocker):
+        """Cluster deletion proceeds when kubectl communication fails."""
+        cfg = _make_cfg(dry_run=False)
+
+        mocker.patch('elastic_blast.azure.check_cluster',
+                     return_value=AKS_PROVISIONING_STATE.SUCCEEDED)
+        mocker.patch('elastic_blast.azure._get_resource_ids',
+                     return_value=MagicMock(disks=[], snapshots=[]))
+        mocker.patch('elastic_blast.azure.get_aks_credentials',
+                     side_effect=Exception('connection refused'))
+        mocker.patch('elastic_blast.azure.get_disks', return_value=[])
+        mocker.patch('elastic_blast.azure.get_snapshots', return_value=[])
+        mocker.patch('elastic_blast.azure.remove_split_query')
+        mocker.patch('elastic_blast.azure.delete_cluster', return_value=cfg.cluster.name)
+
+        delete_cluster_with_cleanup(cfg)
+        azure.delete_cluster.assert_called_with(cfg)
+
+    def test_disk_left_after_k8s_delete_is_cleaned(self, mocker):
+        """Disks remaining after k8s delete_all are cleaned up."""
+        cfg = _make_cfg(dry_run=False)
+        leaked_disk = 'leaked-disk-1'
+
+        mocker.patch('elastic_blast.azure.check_cluster',
+                     return_value=AKS_PROVISIONING_STATE.SUCCEEDED)
+        mocker.patch('elastic_blast.azure._get_resource_ids',
+                     return_value=MagicMock(disks=[leaked_disk], snapshots=[]))
+        mocker.patch('elastic_blast.azure.get_aks_credentials', return_value='test-ctx')
+        mocker.patch('elastic_blast.azure.kubernetes.check_server')
+        mocker.patch('elastic_blast.azure.kubernetes.get_persistent_disks',
+                     return_value=[leaked_disk])
+        mocker.patch('elastic_blast.azure.kubernetes.get_volume_snapshots', return_value=[])
+        mocker.patch('elastic_blast.azure.kubernetes.delete_all', return_value=[])
+        mocker.patch('elastic_blast.azure.get_disks', return_value=[leaked_disk])
+        mocker.patch('elastic_blast.azure.delete_disk')
+        mocker.patch('elastic_blast.azure.get_snapshots', return_value=[])
+        mocker.patch('elastic_blast.azure.remove_split_query')
+        mocker.patch('elastic_blast.azure.delete_cluster', return_value=cfg.cluster.name)
+
+        delete_cluster_with_cleanup(cfg)
+        azure.delete_disk.assert_called_with(leaked_disk, cfg)
+
+    def test_handles_cluster_starting_status(self, mocker):
+        """Waits when cluster is Starting, then proceeds to delete."""
+        cfg = _make_cfg(dry_run=False)
+        call_count = [0]
+
+        def status_transition(ignored_cfg):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return AKS_PROVISIONING_STATE.STARTING.value
+            return AKS_PROVISIONING_STATE.SUCCEEDED.value
+
+        mocker.patch('elastic_blast.azure.check_cluster', side_effect=status_transition)
+        mocker.patch('elastic_blast.azure._get_resource_ids',
+                     return_value=MagicMock(disks=[], snapshots=[]))
+        mocker.patch('elastic_blast.azure.get_aks_credentials', return_value='test-ctx')
+        mocker.patch('elastic_blast.azure.kubernetes.check_server')
+        mocker.patch('elastic_blast.azure.kubernetes.get_persistent_disks', return_value=[])
+        mocker.patch('elastic_blast.azure.kubernetes.get_volume_snapshots', return_value=[])
+        mocker.patch('elastic_blast.azure.kubernetes.delete_all', return_value=[])
+        mocker.patch('elastic_blast.azure.get_disks', return_value=[])
+        mocker.patch('elastic_blast.azure.get_snapshots', return_value=[])
+        mocker.patch('elastic_blast.azure.remove_split_query')
+        mocker.patch('elastic_blast.azure.delete_cluster', return_value=cfg.cluster.name)
+        mocker.patch('time.sleep')
+
+        delete_cluster_with_cleanup(cfg)
+        assert azure.check_cluster.call_count > 1
+        azure.delete_cluster.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# remove_split_query tests
+# ---------------------------------------------------------------------------
+
+class TestRemoveSplitQuery:
+    """Tests for azure.remove_split_query()."""
+
+    def test_calls_azcopy_rm(self):
+        """remove_split_query invokes azcopy rm for Azure results."""
+        cfg = _make_cfg(dry_run=False)
+
+        with patch('elastic_blast.azure.safe_exec') as mock_exec:
+            remove_split_query(cfg)
+
+        mock_exec.assert_called_once()
+        cmd = mock_exec.call_args[0][0]
+        cmd_str = ' '.join(str(arg) for arg in cmd) if isinstance(cmd, list) else str(cmd)
+        assert 'azcopy' in cmd_str
+        assert 'rm' in cmd_str
+
+    def test_dry_run_does_not_execute(self):
+        """In dry_run mode, remove_split_query does not call safe_exec."""
+        cfg = _make_cfg(dry_run=True)
+
+        with patch('elastic_blast.azure.safe_exec') as mock_exec:
+            remove_split_query(cfg)
+
+        mock_exec.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _decode helper tests
+# ---------------------------------------------------------------------------
+
+class TestDecode:
+    """Tests for ElasticBlastAzure._decode() helper."""
+
+    def test_bytes(self):
+        from elastic_blast.azure import ElasticBlastAzure
+        assert ElasticBlastAzure._decode(b'hello') == 'hello'
+
+    def test_str(self):
+        from elastic_blast.azure import ElasticBlastAzure
+        assert ElasticBlastAzure._decode('hello') == 'hello'
+
+    def test_none(self):
+        from elastic_blast.azure import ElasticBlastAzure
+        assert ElasticBlastAzure._decode(None) == ''
+
+    def test_bytes_with_invalid_utf8(self):
+        from elastic_blast.azure import ElasticBlastAzure
+        result = ElasticBlastAzure._decode(b'\xff\xfe')
+        assert isinstance(result, str)
+
+
+# ---------------------------------------------------------------------------
+# Cluster name validation tests
+# ---------------------------------------------------------------------------
+
+class TestClusterNameValidation:
+    """Tests for AKS cluster name validation in azure_sdk."""
+
+    def test_valid_name(self):
+        from elastic_blast.azure_sdk import start_cluster
+        start_cluster('rg', 'elb-test-01', location='eastus',
+                      machine_type='Standard_D8s_v3', num_nodes=1, dry_run=True)
+
+    def test_uppercase_rejected(self):
+        from elastic_blast.azure_sdk import start_cluster
+        with pytest.raises(ValueError, match='Invalid AKS cluster name'):
+            start_cluster('rg', 'ELB-Test', location='eastus',
+                          machine_type='Standard_D8s_v3', num_nodes=1, dry_run=True)
+
+    def test_spaces_rejected(self):
+        from elastic_blast.azure_sdk import start_cluster
+        with pytest.raises(ValueError, match='Invalid AKS cluster name'):
+            start_cluster('rg', 'elb test', location='eastus',
+                          machine_type='Standard_D8s_v3', num_nodes=1, dry_run=True)
+
+
+# ---------------------------------------------------------------------------
+# check_prerequisites tests
+# ---------------------------------------------------------------------------
+
+class TestCheckPrerequisites:
+    """Tests for azure.check_prerequisites()."""
+
+    def test_succeeds_when_all_tools_present(self):
+        with patch('elastic_blast.azure_sdk.check_prerequisites'):
+            check_prerequisites()
+
+    def test_raises_when_az_missing(self):
+        with patch('elastic_blast.azure_sdk.check_prerequisites',
+                   side_effect=UserReportError(1, 'Azure authentication failed')):
+            with pytest.raises(UserReportError):
+                check_prerequisites()
+
+    def test_raises_when_kubectl_missing(self):
+        with patch('elastic_blast.azure_sdk.check_prerequisites',
+                   side_effect=UserReportError(1, "kubectl doesn't work")):
+            with pytest.raises(UserReportError):
+                check_prerequisites()
+
+    def test_raises_when_azcopy_missing(self):
+        with patch('elastic_blast.azure_sdk.check_prerequisites',
+                   side_effect=UserReportError(1, 'azcopy is not installed')):
+            with pytest.raises(UserReportError, match='azcopy'):
+                check_prerequisites()
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — require Azure credentials and may create resources
+# ---------------------------------------------------------------------------
+
 SKIP = not os.getenv('RUN_ALL_TESTS')
-
-
-@pytest.mark.skipif(SKIP, reason='This test requires specific GCP credentials and may create GCP resources. It should be used with care.')
-def test_get_gcp_project_real():
-    """Test getting GCP project using real command line"""
-    result = elb_config.get_gcp_project()
-    # result must not be an empty string
-    assert (result is None or len(result) > 0)
-
-
-@pytest.fixture
-def provide_disk():
-    """Fixture function that creates GCP disk when setting up a test and
-    deletes it when tearing the test down, returns disk name."""
-
-    # test setup
-    name = os.environ['USER'] + '-elastic-blast-test-suite'
-    data_dir = os.path.join(os.path.dirname(__file__), 'data')
-    args = Namespace(cfg=os.path.join(data_dir, 'test-cfg-file.ini'))
-    cfg = ElasticBlastConfig(config.configure(args), task = ElbCommand.SUBMIT)
-    cmd = f'gcloud beta compute disks create {name} --project={cfg.gcp.project} --type=pd-standard --size=10GB --zone={cfg.gcp.zone}'
-    gcp.safe_exec(cmd.split())
-    yield name, cfg
-
-    # test teardown
-    if name in gcp.get_disks(cfg):
-        gcp.delete_disk(name, cfg)
-
-
-@pytest.mark.skipif(SKIP, reason='This test requires specific GCP credentials and may create GCP resources. It should be used with care.')
-def test_get_delete_disk_real(provide_disk):
-    """Test deleting GCP disk using real gcloud calls"""
-
-    # disk name
-    name, cfg = provide_disk
-
-    # the disk was created in setp
-    assert name in gcp.get_disks(cfg)
-
-    # delete the disk and test that it does not appear when listing disks
-    gcp.delete_disk(name, cfg)
-    assert name not in gcp.get_disks(cfg)
 
 
 @pytest.fixture
 def provide_cluster():
-    """Create a AKS cluster before and delete it after a test"""
-    # setup
-    data_dir = os.path.join(os.path.dirname(__file__), 'data')
-    args = Namespace(cfg=os.path.join(data_dir, 'test-cfg-file.ini'))
-    cfg = ElasticBlastConfig(config.configure(args), task = ElbCommand.SUBMIT)
-    
-    # The following values should be defined in .env.
-    
+    """Create an AKS cluster before and delete it after a test."""
+    args = Namespace(cfg=INI)
+    cfg = ElasticBlastConfig(config.configure(args), task=ElbCommand.SUBMIT)
     cfg.cluster.name = cfg.cluster.name + f'-{os.environ["USER"]}' + '-02'
-
-    # cfg.azure.tenant_id = os.environ['AZURE_TENANT_ID']
-    # cfg.azure.client_id = os.environ['AZURE_CLIENT_ID']
-    # cfg.azure.client_secret = os.environ['AZURE_CLIENT_SECRET']
-    
-    """test commands
-    az group create --name rg-elb-test --location koreacentral
-    az aks create --resource-group rg-elb-test --name elb-test --node-count 1 --node-vm-size Standard_D2s_v3 --tags elb=test-suite --generate-ssh-keys
-    
-    """
-    
-    # cmd = f'az group create --name {cfg.azure.resourcegroup} --location {cfg.azure.region}'
-    # azure.safe_exec(cmd.split())
-
-    # cmd = f'az aks create --resource-group {cfg.azure.resourcegroup} --name {cfg.cluster.name} --node-count 1 --node-vm-size Standard_D2s_v3 --tags elb=test-suite --generate-ssh-keys'
-    # azure.safe_exec(cmd.split())
     yield cfg
 
-    return
     # teardown
     name = cfg.cluster.name
-    if name in azure.get_aks_clusters(cfg):
-        cmd = f'az aks delete --resource-group {cfg.azure.resourcegroup} --name {cfg.cluster.name}'
-        azure.safe_exec(cmd.split())
+    try:
+        if name in azure.get_aks_clusters(cfg):
+            cmd = f'az aks delete --resource-group {cfg.azure.resourcegroup} --name {name} --yes'
+            azure.safe_exec(cmd.split())
+    except Exception:
+        pass
 
-def test_create_cluster(provide_cluster):
-    """Test that azure.create_aks_cluster does not raise exceptions when a
-    cluster is present"""
-    cfg = provide_cluster
-    """test commands
-    az group create --name rg-elb-test --location koreacentral
-    az aks create --resource-group rg-elb-test --name elb-test --node-count 1 --node-vm-size Standard_D2s_v3 --tags elb=test-suite --generate-ssh-keys
-    
-    """
-    
-    cmd = f'az group create --name {cfg.azure.resourcegroup} --location {cfg.azure.region}'
-    azure.safe_exec(cmd.split())
 
-    cmd = f'az aks create --resource-group {cfg.azure.resourcegroup} --name {cfg.cluster.name} --node-count 1 --node-vm-size Standard_D2s_v3 --tags elb=test-suite --generate-ssh-keys'
-    azure.safe_exec(cmd.split())
-    yield cfg
-    assert cfg.cluster.name in azure.get_aks_clusters(cfg)
-
-@pytest.mark.skipif(False, reason='This test requires specific GCP credentials and may create GCP resources. It should be used with care.')
+@pytest.mark.skipif(SKIP, reason='Requires Azure credentials and may create AKS resources')
 def test_get_aks_credentials_real(provide_cluster):
-    """Test that gcp.get_gke_credentials does not raise exceptiions when a
-    cluster is present"""
+    """Test that azure.get_aks_credentials does not raise exceptions when
+    a cluster is present."""
     cfg = provide_cluster
     azure.get_aks_credentials(cfg)
-    
 
-def test_set_role_assignment(provide_cluster):
-    """Test that azure.set_role_assignment does not raise exceptions when a
-    cluster is present"""
+
+@pytest.mark.skipif(SKIP, reason='Requires Azure credentials and may create AKS resources')
+def test_set_role_assignment_real(provide_cluster):
+    """Test that azure.set_role_assignment does not raise exceptions when
+    a cluster is present."""
     cfg = provide_cluster
     azure.set_role_assignment(cfg)
 
 
-@pytest.mark.skipif(False, reason='This test requires specific GCP credentials and may create GCP resources. It should be used with care.')
-def test_get_gke_credentials_no_cluster_real():
-    """Test that util.SafeExecError is raised when getting credentials of a
-    non-existent cluster"""
-    data_dir = os.path.join(os.path.dirname(__file__), 'data')
-    args = Namespace(cfg=os.path.join(data_dir, 'test-cfg-file.ini'))
-    cfg = ElasticBlastConfig(config.configure(args), task = ElbCommand.SUBMIT)
+@pytest.mark.skipif(SKIP, reason='Requires Azure credentials and may create AKS resources')
+def test_get_aks_credentials_no_cluster_real():
+    """Test that SafeExecError is raised when getting credentials of a
+    non-existent AKS cluster."""
+    args = Namespace(cfg=INI)
+    cfg = ElasticBlastConfig(config.configure(args), task=ElbCommand.SUBMIT)
     cfg.cluster.name = 'some-strange-cluster-name'
-    assert cfg.cluster.name not in gcp.get_gke_clusters(cfg)
+    assert cfg.cluster.name not in azure.get_aks_clusters(cfg)
     with pytest.raises(SafeExecError):
-        gcp.get_gke_credentials(cfg)
-        
-# def test_submit(provide_cluster):
-    
-
+        azure.get_aks_credentials(cfg)

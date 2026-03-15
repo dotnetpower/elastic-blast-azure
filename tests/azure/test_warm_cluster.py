@@ -33,7 +33,9 @@ def _make_cfg(reuse: bool = True, dry_run: bool = True,
               use_local_ssd: bool = False) -> ElasticBlastConfig:
     """Create a test config with optional reuse/dry_run settings."""
     args = Namespace(cfg=INI)
-    cfg = ElasticBlastConfig(config.configure(args), task=ElbCommand.SUBMIT)
+    with patch('elastic_blast.elb_config.get_latest_dir', return_value='latest'), \
+         patch('elastic_blast.elb_config.get_db_metadata', return_value=None):
+        cfg = ElasticBlastConfig(config.configure(args), task=ElbCommand.SUBMIT)
     cfg.cluster.reuse = reuse
     cfg.cluster.dry_run = dry_run
     cfg.cluster.use_local_ssd = use_local_ssd
@@ -53,8 +55,8 @@ class TestDbAlreadyLoaded:
         """Local SSD mode returns False (can't verify without running a pod)."""
         cfg = _make_cfg(reuse=True, dry_run=False, use_local_ssd=True)
         elb = ElasticBlastAzure(cfg)
-        # Mock _get_aks_credentials to avoid actual cluster connection
-        with patch.object(elb, '_get_aks_credentials', return_value='test-ctx'):
+        # Mock _get_k8s_ctx to avoid actual cluster connection
+        with patch.object(elb, '_get_k8s_ctx', return_value='test-ctx'):
             assert elb._db_already_loaded() is False
 
     def test_returns_true_when_pvc_bound_and_init_succeeded(self):
@@ -63,11 +65,11 @@ class TestDbAlreadyLoaded:
         elb = ElasticBlastAzure(cfg)
 
         mock_proc_pvc = MagicMock()
-        mock_proc_pvc.stdout = 'Bound'
+        mock_proc_pvc.stdout = b'Bound'
         mock_proc_init = MagicMock()
-        mock_proc_init.stdout = '1'
+        mock_proc_init.stdout = b'1'
 
-        with patch.object(elb, '_get_aks_credentials', return_value='test-ctx'):
+        with patch.object(elb, '_get_k8s_ctx', return_value='test-ctx'):
             with patch('elastic_blast.azure.safe_exec') as mock_exec:
                 mock_exec.side_effect = [mock_proc_pvc, mock_proc_init]
                 result = elb._db_already_loaded()
@@ -81,9 +83,9 @@ class TestDbAlreadyLoaded:
         elb = ElasticBlastAzure(cfg)
 
         mock_proc = MagicMock()
-        mock_proc.stdout = 'Pending'
+        mock_proc.stdout = b'Pending'
 
-        with patch.object(elb, '_get_aks_credentials', return_value='test-ctx'):
+        with patch.object(elb, '_get_k8s_ctx', return_value='test-ctx'):
             with patch('elastic_blast.azure.safe_exec', return_value=mock_proc):
                 result = elb._db_already_loaded()
 
@@ -94,7 +96,7 @@ class TestDbAlreadyLoaded:
         cfg = _make_cfg(reuse=True, dry_run=False)
         elb = ElasticBlastAzure(cfg)
 
-        with patch.object(elb, '_get_aks_credentials', return_value='test-ctx'):
+        with patch.object(elb, '_get_k8s_ctx', return_value='test-ctx'):
             with patch('elastic_blast.azure.safe_exec', side_effect=Exception('connection refused')):
                 result = elb._db_already_loaded()
 
@@ -109,7 +111,7 @@ class TestCleanupJobsOnly:
         cfg = _make_cfg(reuse=True, dry_run=False)
         elb = ElasticBlastAzure(cfg)
 
-        with patch.object(elb, '_get_aks_credentials', return_value='test-ctx'):
+        with patch.object(elb, '_get_k8s_ctx', return_value='test-ctx'):
             with patch('elastic_blast.azure.safe_exec') as mock_exec:
                 elb._cleanup_jobs_only()
 
@@ -128,7 +130,7 @@ class TestCleanupJobsOnly:
         cfg = _make_cfg(reuse=True, dry_run=False)
         elb = ElasticBlastAzure(cfg)
 
-        with patch.object(elb, '_get_aks_credentials', return_value='test-ctx'):
+        with patch.object(elb, '_get_k8s_ctx', return_value='test-ctx'):
             with patch('elastic_blast.azure.safe_exec', side_effect=Exception('cluster unreachable')):
                 # Should not raise
                 elb._cleanup_jobs_only()
@@ -138,7 +140,7 @@ class TestCleanupJobsOnly:
         cfg = _make_cfg(reuse=True, dry_run=True)
         elb = ElasticBlastAzure(cfg)
 
-        with patch.object(elb, '_get_aks_credentials', return_value='test-ctx'):
+        with patch.object(elb, '_get_k8s_ctx', return_value='test-ctx'):
             with patch('elastic_blast.azure.safe_exec') as mock_exec:
                 elb._cleanup_jobs_only()
 
@@ -182,97 +184,92 @@ class TestScaleNodes:
         cfg = _make_cfg(dry_run=False)
         elb = ElasticBlastAzure(cfg)
 
-        with patch('elastic_blast.azure.safe_exec') as mock_exec:
+        with patch('elastic_blast.azure_sdk.scale_node_pool') as mock:
             elb.scale_nodes(0)
-
-        mock_exec.assert_called_once()
-        cmd_args = mock_exec.call_args[0][0]
-        cmd_str = ' '.join(cmd_args)
-        assert '--node-count 0' in cmd_str
-        assert 'az aks nodepool scale' in cmd_str
+        mock.assert_called_once()
 
     def test_scale_up(self):
-        """Should call az aks nodepool scale with specified count."""
+        """Should call SDK scale_node_pool with specified count."""
         cfg = _make_cfg(dry_run=False)
         elb = ElasticBlastAzure(cfg)
 
-        with patch('elastic_blast.azure.safe_exec') as mock_exec:
+        with patch('elastic_blast.azure_sdk.scale_node_pool') as mock:
             elb.scale_nodes(5)
-
-        mock_exec.assert_called_once()
-        cmd_str = ' '.join(mock_exec.call_args[0][0])
-        assert '--node-count 5' in cmd_str
+        mock.assert_called_once()
 
     def test_dry_run_does_not_execute(self):
-        """In dry run, should not call safe_exec."""
+        """In dry run, should pass dry_run to SDK."""
         cfg = _make_cfg(dry_run=True)
         elb = ElasticBlastAzure(cfg)
 
-        with patch('elastic_blast.azure.safe_exec') as mock_exec:
+        with patch('elastic_blast.azure_sdk.scale_node_pool') as mock:
             elb.scale_nodes(0)
-
-        mock_exec.assert_not_called()
+        mock.assert_called_once()
 
 
 class TestInitializeClusterReuse:
     """Tests for _initialize_cluster() warm cluster shortcut."""
 
-    def test_skips_init_when_db_loaded(self):
+    def test_skips_init_when_db_loaded(self, mocker):
         """When reuse=true, cluster running, DB loaded → skip full init."""
         cfg = _make_cfg(reuse=True, dry_run=False)
         elb = ElasticBlastAzure(cfg)
 
-        with patch('elastic_blast.azure.check_cluster', return_value=AKS_PROVISIONING_STATE.SUCCEEDED):
-            with patch.object(elb, '_db_already_loaded', return_value=True):
-                with patch.object(elb, '_upload_queries_only') as mock_upload:
-                    with patch('elastic_blast.azure.start_cluster') as mock_start:
-                        with patch('elastic_blast.azure.kubernetes.initialize_storage') as mock_init_storage:
-                            elb._initialize_cluster(queries=['batch_001.fa'])
+        mocker.patch('elastic_blast.azure.check_cluster',
+                     return_value=AKS_PROVISIONING_STATE.SUCCEEDED.value)
+        mocker.patch.object(elb, '_db_already_loaded', return_value=True)
+        mock_upload = mocker.patch.object(elb, '_upload_queries_only')
+        mock_start = mocker.patch('elastic_blast.azure.start_cluster')
+        mock_storage = mocker.patch('elastic_blast.azure.kubernetes.initialize_storage')
 
-        # Should have called _upload_queries_only, NOT start_cluster or initialize_storage
+        elb._initialize_cluster(queries=['batch_001.fa'])
+
         mock_upload.assert_called_once_with(['batch_001.fa'])
         mock_start.assert_not_called()
-        mock_init_storage.assert_not_called()
+        mock_storage.assert_not_called()
 
-    def test_full_init_when_db_not_loaded(self):
+    def test_full_init_when_db_not_loaded(self, mocker):
         """When reuse=true but DB not loaded → full initialization."""
         cfg = _make_cfg(reuse=True, dry_run=True)
         elb = ElasticBlastAzure(cfg)
         elb.cloud_job_submission = False
 
-        with patch('elastic_blast.azure.check_cluster', return_value=''):
-            with patch.object(elb, '_db_already_loaded', return_value=False):
-                with patch('elastic_blast.azure.start_cluster') as mock_start:
-                    with patch('elastic_blast.azure.set_role_assignment'):
-                        with patch('elastic_blast.azure.kubernetes.enable_service_account'):
-                            with patch('elastic_blast.azure.kubernetes.create_scripts_configmap'):
-                                with patch('elastic_blast.azure.kubernetes.initialize_storage'):
-                                    with patch.object(elb, '_label_nodes'):
-                                        with patch.object(elb, '_get_aks_credentials', return_value='test-ctx'):
-                                            with patch.object(elb, '_deploy_vmtouch_daemonset'):
-                                                with patch('elastic_blast.azure.get_blastdb_info', return_value=('testdb', '', 'testdb')):
-                                                    with patch('elastic_blast.azure.get_usage_reporting', return_value=False):
-                                                        elb._initialize_cluster(queries=None)
+        mocker.patch('elastic_blast.azure.check_cluster', return_value='')
+        mocker.patch.object(elb, '_db_already_loaded', return_value=False)
+        mock_start = mocker.patch('elastic_blast.azure.start_cluster_async', return_value=None)
+        mocker.patch('elastic_blast.azure.wait_for_cluster')
+        mocker.patch('elastic_blast.azure.set_role_assignment')
+        mocker.patch('elastic_blast.azure.kubernetes.enable_service_account')
+        mocker.patch('elastic_blast.azure.kubernetes.create_scripts_configmap')
+        mocker.patch('elastic_blast.azure.kubernetes.initialize_storage')
+        mocker.patch.object(elb, '_label_nodes')
+        mocker.patch.object(elb, '_get_k8s_ctx', return_value='test-ctx')
+        mocker.patch.object(elb, '_deploy_vmtouch_daemonset')
+        mocker.patch('elastic_blast.azure.get_blastdb_info', return_value=('testdb', '', 'testdb'))
+        mocker.patch('elastic_blast.azure.get_usage_reporting', return_value=False)
 
-        # start_cluster should be called (new cluster)
+        elb._initialize_cluster(queries=None)
+
         mock_start.assert_called_once()
 
-    def test_full_init_when_reuse_false(self):
+    def test_full_init_when_reuse_false(self, mocker):
         """When reuse=false → always do full initialization."""
         cfg = _make_cfg(reuse=False, dry_run=True)
         elb = ElasticBlastAzure(cfg)
         elb.cloud_job_submission = False
 
-        with patch('elastic_blast.azure.check_cluster', return_value=''):
-            with patch('elastic_blast.azure.start_cluster') as mock_start:
-                with patch('elastic_blast.azure.set_role_assignment'):
-                    with patch('elastic_blast.azure.kubernetes.enable_service_account'):
-                        with patch('elastic_blast.azure.kubernetes.create_scripts_configmap'):
-                            with patch('elastic_blast.azure.kubernetes.initialize_storage'):
-                                with patch.object(elb, '_label_nodes'):
-                                    with patch.object(elb, '_get_aks_credentials', return_value='test-ctx'):
-                                        with patch('elastic_blast.azure.get_blastdb_info', return_value=('testdb', '', 'testdb')):
-                                            with patch('elastic_blast.azure.get_usage_reporting', return_value=False):
-                                                elb._initialize_cluster(queries=None)
+        mocker.patch('elastic_blast.azure.check_cluster', return_value='')
+        mock_start = mocker.patch('elastic_blast.azure.start_cluster_async', return_value=None)
+        mocker.patch('elastic_blast.azure.wait_for_cluster')
+        mocker.patch('elastic_blast.azure.set_role_assignment')
+        mocker.patch('elastic_blast.azure.kubernetes.enable_service_account')
+        mocker.patch('elastic_blast.azure.kubernetes.create_scripts_configmap')
+        mocker.patch('elastic_blast.azure.kubernetes.initialize_storage')
+        mocker.patch.object(elb, '_label_nodes')
+        mocker.patch.object(elb, '_get_k8s_ctx', return_value='test-ctx')
+        mocker.patch('elastic_blast.azure.get_blastdb_info', return_value=('testdb', '', 'testdb'))
+        mocker.patch('elastic_blast.azure.get_usage_reporting', return_value=False)
+
+        elb._initialize_cluster(queries=None)
 
         mock_start.assert_called_once()

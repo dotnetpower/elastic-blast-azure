@@ -222,6 +222,13 @@ K8S_JOBS = ['k8s-job-1', 'k8s-job-2', 'k8s-job-3', 'k8s-job-4']
 K8S_JOB_STATUS = ['Failed', 'Succeeded', 'Pending', 'Running']
 BLASTDB = 'mocked_blastdb'
 
+# Azure mock constants
+AZURE_RESOURCE_GROUP = 'rg-elb-koc'
+AZURE_REGION = 'koreacentral'
+AZURE_DISKS = ['mock-azure-disk-1', 'mock-azure-disk-2']
+AZURE_SNAPSHOTS = ['mock-azure-snapshot-1']
+AKS_CLUSTERS = ['mock-aks-cluster-1', 'mock-aks-cluster-2']
+
 
 @patch(target='elastic_blast.elb_config.enable_gcp_api', new=MagicMock())
 def get_mocked_config() -> ElasticBlastConfig:
@@ -462,12 +469,80 @@ def mocked_safe_exec(cmd: list[str] | str, env: dict[str, str] | None = None, cl
     elif ' '.join(cmd).startswith('gcloud compute regions describe'):
         return MockedCompletedProcess(stdout='{"quotas":[{"limit": 81920.0,"metric": "SSD_TOTAL_GB","usage": 2666.0}]}',stderr='',returncode=0)
 
+    # --- Azure CLI commands ---
+
+    # az account
     elif ' '.join(cmd).startswith('az') and 'account' in cmd:
         return MockedCompletedProcess(stdout='',stderr='',returncode=0)
-    elif ' '.join(cmd).startswith('azcopy') and 'list' in cmd:
-        return MockedCompletedProcess(stdout='',stderr='',returncode=0)
+
+    # az disk list
+    elif ' '.join(cmd).startswith('az disk list'):
+        return MockedCompletedProcess(json.dumps(AZURE_DISKS))
+
+    # az disk delete
+    elif ' '.join(cmd).startswith('az disk delete'):
+        return MockedCompletedProcess()
+
+    # az snapshot list
+    elif ' '.join(cmd).startswith('az snapshot list'):
+        return MockedCompletedProcess(json.dumps(AZURE_SNAPSHOTS))
+
+    # az snapshot delete
+    elif ' '.join(cmd).startswith('az snapshot delete'):
+        return MockedCompletedProcess()
+
+    # az aks list (cluster names query)
+    elif ' '.join(cmd).startswith('az aks list') and '"[].name"' in ' '.join(cmd):
+        return MockedCompletedProcess(json.dumps(AKS_CLUSTERS))
+
+    # az aks list (status query for check_cluster)
+    elif ' '.join(cmd).startswith('az aks list'):
+        return MockedCompletedProcess(stdout='Succeeded', stderr='', returncode=0)
+
+    # az aks create
+    elif ' '.join(cmd).startswith('az aks create'):
+        return MockedCompletedProcess()
+
+    # az aks delete
+    elif ' '.join(cmd).startswith('az aks delete'):
+        return MockedCompletedProcess()
+
+    # az aks get-credentials
+    elif ' '.join(cmd).startswith('az aks get-credentials'):
+        return MockedCompletedProcess()
+
+    # az aks nodepool scale
+    elif ' '.join(cmd).startswith('az aks nodepool'):
+        return MockedCompletedProcess()
+
+    # az role assignment
+    elif ' '.join(cmd).startswith('az role assignment'):
+        return MockedCompletedProcess()
+
+    # az aks show (generic)
+    elif ' '.join(cmd).startswith('az aks show'):
+        return MockedCompletedProcess(stdout='{"identityProfile":{"kubeletidentity":{"objectId":"mock-oid"}}}', stderr='', returncode=0)
+
+    # az aks (generic fallback)
     elif ' '.join(cmd).startswith('az') and 'aks' in cmd:
         return MockedCompletedProcess(stdout='',stderr='',returncode=0)
+
+    # az version
+    elif ' '.join(cmd).startswith('az version'):
+        return MockedCompletedProcess(stdout='{"azure-cli": "2.60.0"}', stderr='', returncode=0)
+
+    # azcopy list
+    elif ' '.join(cmd).startswith('azcopy') and 'list' in cmd:
+        return MockedCompletedProcess(stdout='',stderr='',returncode=0)
+
+    # azcopy rm
+    elif ' '.join(cmd).startswith('azcopy') and 'rm' in cmd:
+        return MockedCompletedProcess(stdout='',stderr='',returncode=0)
+
+    # azcopy cp
+    elif ' '.join(cmd).startswith('azcopy') and 'cp' in cmd:
+        return MockedCompletedProcess(stdout='',stderr='',returncode=0)
+
     # raise ValueError for unrecognized command line
     else:
         raise ValueError(f'Unrecognized gcloud or kubectl command line: {cmd}')

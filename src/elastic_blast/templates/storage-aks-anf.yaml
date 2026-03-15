@@ -1,0 +1,26 @@
+---
+# Azure NetApp Files Ultra StorageClass for AKS
+# Provides <1ms latency, shared NFS access across all nodes.
+# Recommended for 100GB-2TB BLAST databases where shared access is needed.
+#
+# Prerequisites:
+#   1. Azure NetApp Files account + capacity pool in same region as AKS
+#   2. Delegated subnet for ANF (Microsoft.NetApp/volumes)
+#   3. AKS cluster with anetfiles CSI driver enabled
+#
+# Usage: Set storage-class: azure-netapp-ultra in config INI
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: azure-netapp-ultra
+provisioner: netappfiles.csi.azure.com
+parameters:
+  serviceLevel: Ultra
+  networkFeatures: Standard
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+allowVolumeExpansion: true
+mountOptions:
+  - nconnect=8
+  - hard
+  - nfsvers=4.1
