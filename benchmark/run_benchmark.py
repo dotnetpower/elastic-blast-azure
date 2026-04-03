@@ -528,9 +528,9 @@ def run_single_test(test_id: str, dataset_name: str, vm_name: str,
             start_iso = datetime.utcfromtimestamp(t0).strftime('%Y-%m-%dT%H:%M:%SZ')
             end_iso = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
 
-            k8s_data = collect_k8s_metrics(cluster_name, test_id)
-            job_timings = collect_job_timings(cluster_name)
-            phase_timing = collect_blast_phase_timing(cluster_name, cluster_name)
+            k8s_data = collect_k8s_metrics('', test_id)
+            job_timings = collect_job_timings('')
+            phase_timing = collect_blast_phase_timing('', cluster_name)
 
             # Collect Azure Monitor time-series (CPU, Disk IOPS, Memory, Network)
             az_monitor = {}
@@ -542,10 +542,10 @@ def run_single_test(test_id: str, dataset_name: str, vm_name: str,
             # Collect per-pod iostat/meminfo from running BLAST pods
             pod_metrics = {}
             try:
-                pods_out = kubectl('get pods -l app=blast -o jsonpath={.items[*].metadata.name}', cluster_name)
+                pods_out = kubectl('get pods -l app=blast -o jsonpath={.items[*].metadata.name}')
                 for pname in pods_out.split():
                     if pname:
-                        pod_metrics[pname] = collect_pod_metrics(cluster_name, pname)
+                        pod_metrics[pname] = collect_pod_metrics('', pname)
             except Exception as e:
                 log.warning(f'Pod metrics collection failed: {e}')
 
@@ -628,28 +628,65 @@ options = {dataset['options']}
     log.info(f'Config written: {path}')
 
 
-def _wait_for_completion(cluster_name: str, result: BenchmarkResult, timeout: int = 3600):
-    """Wait for all BLAST jobs to complete."""
+def _wait_for_completion(cluster_name: str, result: BenchmarkResult, timeout: int = 7200):
+    """Wait for all BLAST jobs to complete.
+
+    Fetches AKS credentials first, then polls jobs without label filter
+    to handle cases where BLAST jobs don't have app=blast label.
+    Default timeout increased to 2 hours for large DB searches.
+    """
+    # Fetch AKS credentials so kubectl works
+    try:
+        az(f'aks get-credentials -g {RG} -n {cluster_name} --overwrite-existing',
+           timeout=30)
+    except Exception as e:
+        log.warning(f'Failed to get AKS credentials for {cluster_name}: {e}')
+
     deadline = time.time() + timeout
+    poll_interval = 30
+    last_status = ''
     while time.time() < deadline:
         try:
-            jobs_json = kubectl('get jobs -l app=blast -o json', cluster_name)
+            # Search for BLAST jobs: try label first, then fall back to name pattern
+            jobs_json = kubectl('get jobs -o json')
             if jobs_json:
-                jobs = json.loads(jobs_json)
-                succeeded = sum(1 for j in jobs.get('items', []) if j.get('status', {}).get('succeeded'))
-                failed = sum(1 for j in jobs.get('items', []) if j.get('status', {}).get('failed'))
-                active = sum(1 for j in jobs.get('items', []) if j.get('status', {}).get('active'))
-                result.pods_succeeded = succeeded
-                result.pods_failed = failed
-                result.num_batches = len(jobs.get('items', []))
+                all_jobs = json.loads(jobs_json)
+                # Filter to BLAST jobs: has app=blast label OR name contains 'blast' or 'batch'
+                blast_jobs = [
+                    j for j in all_jobs.get('items', [])
+                    if j.get('metadata', {}).get('labels', {}).get('app') == 'blast'
+                    or 'blast' in j.get('metadata', {}).get('name', '').lower()
+                    or 'batch' in j.get('metadata', {}).get('name', '').lower()
+                ]
+                # Exclude known non-BLAST jobs
+                blast_jobs = [
+                    j for j in blast_jobs
+                    if j.get('metadata', {}).get('name', '') not in
+                    ('init-pv', 'submit-jobs', 'elb-finalizer', 'import-queries')
+                    and not j.get('metadata', {}).get('name', '').startswith('init-ssd')
+                ]
 
-                if active == 0 and (succeeded + failed) > 0:
-                    log.info(f'Jobs complete: {succeeded} succeeded, {failed} failed')
-                    return
-        except Exception:
-            pass
-        time.sleep(30)
-    log.warning('Timeout waiting for job completion')
+                if blast_jobs:
+                    succeeded = sum(1 for j in blast_jobs if j.get('status', {}).get('succeeded'))
+                    failed = sum(1 for j in blast_jobs if j.get('status', {}).get('failed'))
+                    active = sum(1 for j in blast_jobs if j.get('status', {}).get('active'))
+                    result.pods_succeeded = succeeded
+                    result.pods_failed = failed
+                    result.num_batches = len(blast_jobs)
+
+                    status = f'{succeeded}ok/{failed}fail/{active}active'
+                    if status != last_status:
+                        remaining = int(deadline - time.time())
+                        log.info(f'BLAST jobs: {status} (timeout in {remaining}s)')
+                        last_status = status
+
+                    if active == 0 and (succeeded + failed) > 0:
+                        log.info(f'Jobs complete: {succeeded} succeeded, {failed} failed')
+                        return
+        except Exception as e:
+            log.debug(f'Job poll error: {e}')
+        time.sleep(poll_interval)
+    log.warning(f'Timeout ({timeout}s) waiting for job completion on {cluster_name}')
 
 
 # ---------------------------------------------------------------------------

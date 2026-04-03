@@ -1,40 +1,51 @@
 #!/bin/bash
-# results-export-aks.sh — Upload BLAST results to Azure Blob Storage
+# blast-run-aks.sh — Execute BLAST search
 #
 # Environment variables (set by K8s pod spec):
-#   ELB_BLAST_PROGRAM - BLAST program name
+#   ELB_BLAST_PROGRAM - BLAST program (blastn, blastp, blastx, etc.)
 #   ELB_DB            - BLAST database name
+#   ELB_NUM_CPUS      - Number of CPU threads for BLAST
+#   ELB_BLAST_OPTIONS - Additional BLAST command-line options
 #   ELB_RESULTS       - Azure Blob Storage URL for results
-#   JOB_NUM           - Batch job number
-#   RESULTS_DIR       - Directory containing output files
+#   ELB_TIMEFMT       - Timestamp format string
+#   JOB_NUM           - Batch job number (e.g., 000, 001, ...)
+#   QUERY_DIR         - Directory containing query files
+#   RESULTS_DIR       - Directory for output files
 
-# Wait for BLAST to finish (sidecar pattern)
-until [ -s "$RESULTS_DIR/BLAST_EXIT_CODE.out" ]; do
-    sleep 1
-done
+echo "BASH version ${BASH_VERSION}"
 
-azcopy login --identity || { echo "ERROR: azcopy login failed"; exit 1; }
-set -ex
+azcopy login --identity
 
-# Upload metadata and logs
-azcopy cp "$RESULTS_DIR/BLASTDB_LENGTH.out" "$ELB_RESULTS/metadata/"
-azcopy cp "$RESULTS_DIR/BLAST_RUNTIME-${JOB_NUM}.out" "$ELB_RESULTS/logs/"
+BLAST_RUNTIME=$(mktemp)
+ERROR_FILE=$(mktemp)
+DATE_NOW=$(date -u +"$ELB_TIMEFMT")
 
-# Upload performance metrics if collected by blast-run-aks.sh
-PERF_FILE="$RESULTS_DIR/PERF_METRICS-${JOB_NUM}.log"
-if [ -f "$PERF_FILE" ]; then
-    azcopy cp "$PERF_FILE" "$ELB_RESULTS/logs/"
-fi
+# Get database length for metadata
+blastdbcmd -info -db "$ELB_DB" \
+| awk '/total/ {print $3}' \
+| tr -d , > "$RESULTS_DIR/BLASTDB_LENGTH.out"
 
-# Upload result file only if not already streamed by blast-run-aks.sh
-RESULT_FILE="$RESULTS_DIR/batch_${JOB_NUM}-${ELB_BLAST_PROGRAM}-${ELB_DB}.out.gz"
-if [ -f "$RESULT_FILE" ]; then
-    azcopy cp "$RESULT_FILE" "$ELB_RESULTS/"
-fi
+start=$(date +%s)
+echo "run start $JOB_NUM $ELB_BLAST_PROGRAM $ELB_DB"
 
-exit "$(cat "$RESULTS_DIR/BLAST_EXIT_CODE.out")"
-echo "PERF_METRICS: $((METRICS_LINES - 1)) samples collected in $METRICS_LOG"
+# Run BLAST with timing
+# shellcheck disable=SC2086
+echo "$ELB_BLAST_PROGRAM -db $ELB_DB -query $QUERY_DIR/batch_${JOB_NUM}.fa -out $RESULTS_DIR/batch_${JOB_NUM}-${ELB_BLAST_PROGRAM}-${ELB_DB}.out -num_threads $ELB_NUM_CPUS $ELB_BLAST_OPTIONS"
 
+# shellcheck disable=SC2086
+TIME="$DATE_NOW run start $JOB_NUM $ELB_BLAST_PROGRAM $ELB_DB %e %U %S %P" \
+\time -o "$BLAST_RUNTIME" \
+$ELB_BLAST_PROGRAM \
+-db "$ELB_DB" \
+-query "$QUERY_DIR/batch_${JOB_NUM}.fa" \
+-out "$RESULTS_DIR/batch_${JOB_NUM}-${ELB_BLAST_PROGRAM}-${ELB_DB}.out" \
+-num_threads "$ELB_NUM_CPUS" \
+$ELB_BLAST_OPTIONS \
+2>"$ERROR_FILE"
+BLAST_EXIT_CODE=$?
+
+end=$(date +%s)
+cat "$ERROR_FILE"
 printf 'RUNTIME %s %f seconds\n' "blast-job-${JOB_NUM}" $((end - start))
 
 echo "run end $JOB_NUM $BLAST_EXIT_CODE"

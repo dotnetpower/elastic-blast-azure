@@ -1,0 +1,556 @@
+[
+  {
+    "test_id": "B1",
+    "timestamp": "2026-04-03T04:29:51.952834",
+    "dataset": "small",
+    "vm_type": "Standard_E32s_v3",
+    "num_nodes": 1,
+    "storage_type": "blob_nfs",
+    "reuse_run": 0,
+    "cluster_create_s": 0,
+    "db_download_s": 123.0,
+    "job_submit_s": 95.0,
+    "blast_total_s": 14.0,
+    "blast_phase1_io_s": 0,
+    "blast_phase2_cpu_s": 0,
+    "blast_phase3_write_s": 0,
+    "results_upload_s": 0,
+    "total_elapsed_s": 411.7591235637665,
+    "num_threads": 32,
+    "blast_options": "-task blastx-fast -evalue 0.01 -outfmt 7",
+    "estimated_cost_usd": 0.23058510919570924,
+    "pods_succeeded": 1,
+    "pods_failed": 0,
+    "num_batches": 1,
+    "disk_read_iops_avg": 64.22333333333333,
+    "disk_read_iops_max": 124.27,
+    "disk_read_mbps_avg": 281.63324486732483,
+    "disk_read_mbps_max": 511.5909428501129,
+    "disk_write_iops_avg": 0,
+    "disk_write_mbps_avg": 0,
+    "disk_latency_ms_avg": 0,
+    "cpu_percent_avg": 2.436,
+    "cpu_percent_max": 5.095,
+    "memory_used_gb_avg": 7.103759765625,
+    "memory_used_gb_max": 7.78173828125,
+    "network_in_mbps": 0,
+    "network_out_mbps": 0,
+    "metrics_timeseries": {
+      "start": "2026-04-03T04:29:51Z",
+      "end": "2026-04-03T04:38:51Z",
+      "raw": "{\n  \"cost\": 192,\n  \"interval\": \"PT1M\",\n  \"namespace\": \"Microsoft.Compute/virtualMachineScaleSets\",\n  \"resourceregion\": \"koreacentral\",\n  \"timespan\": \"2026-04-03T04:29:51Z/2026-04-03T04:38:51Z\",\n  \"value\": [\n    {\n      \"displayDescription\": \"The number of bytes received on all network interfaces by the Virtual Machine(s) (Incoming Traffic)\",\n      \"errorCode\": \"Success\",\n      \"id\": \"/subscriptions/b052302c-4c8d-49a4-aa2f-9d60a7301a80/resourceGroups/MC_rg-elb-koc_elb-bench-b1_koreacentral/providers/Microsoft.Compute/virtualMachineScaleSets/aks-nodepool1-14974978-vmss/providers/Microsoft.Insights/metrics/Network In Total\",\n      \"name\": {\n        \"localizedValue\": \"Network In Total\",\n        \"value\": \"Network In Total\"\n      },\n      \"resourceGroup\": \"MC_rg-elb-koc_elb-bench-b1_koreacentral\",\n      \"timeseries\": [],\n      \"type\": \"Microsoft.Insights/metrics\",\n      \"unit\": \"Bytes\"\n    },\n    {\n      \"displayDescription\": \"The number of bytes out on all network interfaces by the Virtual Machine(s) (Outgoing Traffic)\",\n      \"errorCode\": \"Success\",\n      \"id\": \"/subscriptions/b052302c-4c8d-49a4-aa2f-9d60a7301a80/resourceGroups/MC_rg-elb-koc_elb-bench-b1_koreacentral/providers/Microsoft.Compute/virtualMachineScaleSets/aks-nodepool1-14974978-vmss/providers/Microsoft.Insights/metrics/Network Out Total\",\n      \"name\": {\n        \"localizedValue\": \"Network Out Total\",\n        \"value\": \"Network Out Total\"\n      },\n      \"resourceGroup\": \"MC_rg-elb-koc_elb-bench-b1_koreacentral\",\n      \"timeseries\": [],\n      \"type\": \"Microsoft.Insights/metrics\",\n      \"unit\": \"Bytes\"\n    },\n    {\n      \"displayDescription\": \"The percentage of allocated compute units that are currently in use by the Virtual Machine(s)\",\n      \"errorCode\": \"Success\",\n      \"id\": \"/subscriptions/b052302c-4c8d-49a4-aa2f-9d60a7301a80/resourceGroups/MC_rg-elb-koc_elb-bench-b1_koreacentral/providers/Microsoft.Compute/virtualMachineScaleSets/aks-nodepool1-14974978-vmss/providers/Microsoft.Insights/metrics/Percentage CPU\",\n      \"name\": {\n        \"localizedValue\": \"Percentage CPU\",\n        \"value\": \"Percentage CPU\"\n      },\n      \"resourceGroup\": \"MC_rg-elb-koc_elb-bench-b1_koreacentral\",\n      \"timeseries\": [\n        {\n          \"data\": [\n            {\n              \"timeStamp\": \"2026-04-03T04:29:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:30:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:31:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:32:00Z\"\n            },\n            {\n              \"average\": 0.1,\n              \"maximum\": 0.2,\n              \"timeStamp\": \"2026-04-03T04:33:00Z\",\n              \"total\": 0.2\n            },\n            {\n              \"average\": 2.515,\n              \"maximum\": 3.43,\n              \"timeStamp\": \"2026-04-03T04:34:00Z\",\n              \"total\": 5.03\n            },\n            {\n              \"average\": 3.69,\n              \"maximum\": 5.78,\n              \"timeStamp\": \"2026-04-03T04:35:00Z\",\n              \"total\": 7.38\n            },\n            {\n              \"average\": 0.78,\n              \"maximum\": 0.81,\n              \"timeStamp\": \"2026-04-03T04:36:00Z\",\n              \"total\": 1.56\n            },\n            {\n              \"average\": 5.095,\n              \"maximum\": 9.1,\n              \"timeStamp\": \"2026-04-03T04:37:00Z\",\n              \"total\": 10.19\n            }\n          ],\n          \"metadatavalues\": []\n        }\n      ],\n      \"type\": \"Microsoft.Insights/metrics\",\n      \"unit\": \"Percent\"\n    },\n    {\n      \"displayDescription\": \"Amount of physical memory, in bytes, immediately available for allocation to a process or for system use in the Virtual Machine\",\n      \"errorCode\": \"Success\",\n      \"id\": \"/subscriptions/b052302c-4c8d-49a4-aa2f-9d60a7301a80/resourceGroups/MC_rg-elb-koc_elb-bench-b1_koreacentral/providers/Microsoft.Compute/virtualMachineScaleSets/aks-nodepool1-14974978-vmss/providers/Microsoft.Insights/metrics/Available Memory Bytes\",\n      \"name\": {\n        \"localizedValue\": \"Available Memory Bytes\",\n        \"value\": \"Available Memory Bytes\"\n      },\n      \"resourceGroup\": \"MC_rg-elb-koc_elb-bench-b1_koreacentral\",\n      \"timeseries\": [\n        {\n          \"data\": [\n            {\n              \"timeStamp\": \"2026-04-03T04:29:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:30:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:31:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:32:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:33:00Z\"\n            },\n            {\n              \"average\": 268155486208.0,\n              \"maximum\": 268198477824.0,\n              \"timeStamp\": \"2026-04-03T04:34:00Z\",\n              \"total\": 536310972416.0\n            },\n            {\n              \"average\": 267385307136.0,\n              \"maximum\": 267419385856.0,\n              \"timeStamp\": \"2026-04-03T04:35:00Z\",\n              \"total\": 534770614272.0\n            },\n            {\n              \"average\": 266938089472.0,\n              \"maximum\": 267285168128.0,\n              \"timeStamp\": \"2026-04-03T04:36:00Z\",\n              \"total\": 533876178944.0\n            },\n            {\n              \"average\": 266522329088.0,\n              \"maximum\": 266532290560.0,\n              \"timeStamp\": \"2026-04-03T04:37:00Z\",\n              \"total\": 533044658176.0\n            }\n          ],\n          \"metadatavalues\": []\n        }\n      ],\n      \"type\": \"Microsoft.Insights/metrics\",\n      \"unit\": \"Bytes\"\n    },\n    {\n      \"displayDescription\": \"Bytes read from disk during monitoring period\",\n      \"errorCode\": \"Success\",\n      \"id\": \"/subscriptions/b052302c-4c8d-49a4-aa2f-9d60a7301a80/resourceGroups/MC_rg-elb-koc_elb-bench-b1_koreacentral/providers/Microsoft.Compute/virtualMachineScaleSets/aks-nodepool1-14974978-vmss/providers/Microsoft.Insights/metrics/Disk Read Bytes\",\n      \"name\": {\n        \"localizedValue\": \"Disk Read Bytes\",\n        \"value\": \"Disk Read Bytes\"\n      },\n      \"resourceGroup\": \"MC_rg-elb-koc_elb-bench-b1_koreacentral\",\n      \"timeseries\": [\n        {\n          \"data\": [\n            {\n              \"timeStamp\": \"2026-04-03T04:29:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:30:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:31:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:32:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:33:00Z\"\n            },\n            {\n              \"average\": 0.0,\n              \"maximum\": 0.0,\n              \"timeStamp\": \"2026-04-03T04:34:00Z\",\n              \"total\": 0.0\n            },\n            {\n              \"average\": 315468141.09,\n              \"maximum\": 315468141.09,\n              \"timeStamp\": \"2026-04-03T04:35:00Z\",\n              \"total\": 315468141.09\n            },\n            {\n              \"average\": 34031458.53,\n              \"maximum\": 34031458.53,\n              \"timeStamp\": \"2026-04-03T04:36:00Z\",\n              \"total\": 34031458.53\n            },\n            {\n              \"average\": 536441984.49,\n              \"maximum\": 536441984.49,\n              \"timeStamp\": \"2026-04-03T04:37:00Z\",\n              \"total\": 536441984.49\n            }\n          ],\n          \"metadatavalues\": []\n        }\n      ],\n      \"type\": \"Microsoft.Insights/metrics\",\n      \"unit\": \"Bytes\"\n    },\n    {\n      \"displayDescription\": \"Bytes written to disk during monitoring period\",\n      \"errorCode\": \"Success\",\n      \"id\": \"/subscriptions/b052302c-4c8d-49a4-aa2f-9d60a7301a80/resourceGroups/MC_rg-elb-koc_elb-bench-b1_koreacentral/providers/Microsoft.Compute/virtualMachineScaleSets/aks-nodepool1-14974978-vmss/providers/Microsoft.Insights/metrics/Disk Write Bytes\",\n      \"name\": {\n        \"localizedValue\": \"Disk Write Bytes\",\n        \"value\": \"Disk Write Bytes\"\n      },\n      \"resourceGroup\": \"MC_rg-elb-koc_elb-bench-b1_koreacentral\",\n      \"timeseries\": [\n        {\n          \"data\": [\n            {\n              \"timeStamp\": \"2026-04-03T04:29:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:30:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:31:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:32:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:33:00Z\"\n            },\n            {\n              \"average\": 499703.26,\n              \"maximum\": 499703.26,\n              \"timeStamp\": \"2026-04-03T04:34:00Z\",\n              \"total\": 499703.26\n            },\n            {\n              \"average\": 5932228308.89,\n              \"maximum\": 5932228308.89,\n              \"timeStamp\": \"2026-04-03T04:35:00Z\",\n              \"total\": 5932228308.89\n            },\n            {\n              \"average\": 7057959973.14,\n              \"maximum\": 7057959973.14,\n              \"timeStamp\": \"2026-04-03T04:36:00Z\",\n              \"total\": 7057959973.14\n            },\n            {\n              \"average\": 3770920263.17,\n              \"maximum\": 3770920263.17,\n              \"timeStamp\": \"2026-04-03T04:37:00Z\",\n              \"total\": 3770920263.17\n            }\n          ],\n          \"metadatavalues\": []\n        }\n      ],\n      \"type\": \"Microsoft.Insights/metrics\",\n      \"unit\": \"Bytes\"\n    },\n    {\n      \"displayDescription\": \"Disk Read IOPS\",\n      \"errorCode\": \"Success\",\n      \"id\": \"/subscriptions/b052302c-4c8d-49a4-aa2f-9d60a7301a80/resourceGroups/MC_rg-elb-koc_elb-bench-b1_koreacentral/providers/Microsoft.Compute/virtualMachineScaleSets/aks-nodepool1-14974978-vmss/providers/Microsoft.Insights/metrics/Disk Read Operations/Sec\",\n      \"name\": {\n        \"localizedValue\": \"Disk Read Operations/Sec\",\n        \"value\": \"Disk Read Operations/Sec\"\n      },\n      \"resourceGroup\": \"MC_rg-elb-koc_elb-bench-b1_koreacentral\",\n      \"timeseries\": [\n        {\n          \"data\": [\n            {\n              \"timeStamp\": \"2026-04-03T04:29:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:30:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:31:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:32:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:33:00Z\"\n            },\n            {\n              \"average\": 0.0,\n              \"maximum\": 0.0,\n              \"timeStamp\": \"2026-04-03T04:34:00Z\",\n              \"total\": 0.0\n            },\n            {\n              \"average\": 124.27,\n              \"maximum\": 236.56,\n              \"timeStamp\": \"2026-04-03T04:35:00Z\",\n              \"total\": 248.54\n            },\n            {\n              \"average\": 9.83,\n              \"maximum\": 19.66,\n              \"timeStamp\": \"2026-04-03T04:36:00Z\",\n              \"total\": 19.66\n            },\n            {\n              \"average\": 58.57,\n              \"maximum\": 117.01,\n              \"timeStamp\": \"2026-04-03T04:37:00Z\",\n              \"total\": 117.14\n            }\n          ],\n          \"metadatavalues\": []\n        }\n      ],\n      \"type\": \"Microsoft.Insights/metrics\",\n      \"unit\": \"CountPerSecond\"\n    },\n    {\n      \"displayDescription\": \"Disk Write IOPS\",\n      \"errorCode\": \"Success\",\n      \"id\": \"/subscriptions/b052302c-4c8d-49a4-aa2f-9d60a7301a80/resourceGroups/MC_rg-elb-koc_elb-bench-b1_koreacentral/providers/Microsoft.Compute/virtualMachineScaleSets/aks-nodepool1-14974978-vmss/providers/Microsoft.Insights/metrics/Disk Write Operations/Sec\",\n      \"name\": {\n        \"localizedValue\": \"Disk Write Operations/Sec\",\n        \"value\": \"Disk Write Operations/Sec\"\n      },\n      \"resourceGroup\": \"MC_rg-elb-koc_elb-bench-b1_koreacentral\",\n      \"timeseries\": [\n        {\n          \"data\": [\n            {\n              \"timeStamp\": \"2026-04-03T04:29:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:30:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:31:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:32:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:33:00Z\"\n            },\n            {\n              \"average\": 0.32,\n              \"maximum\": 0.64,\n              \"timeStamp\": \"2026-04-03T04:34:00Z\",\n              \"total\": 0.64\n            },\n            {\n              \"average\": 70.96,\n              \"maximum\": 91.67,\n              \"timeStamp\": \"2026-04-03T04:35:00Z\",\n              \"total\": 141.92\n            },\n            {\n              \"average\": 76.49,\n              \"maximum\": 81.66,\n              \"timeStamp\": \"2026-04-03T04:36:00Z\",\n              \"total\": 152.98\n            },\n            {\n              \"average\": 170.975,\n              \"maximum\": 273.83,\n              \"timeStamp\": \"2026-04-03T04:37:00Z\",\n              \"total\": 341.95\n            }\n          ],\n          \"metadatavalues\": []\n        }\n      ],\n      \"type\": \"Microsoft.Insights/metrics\",\n      \"unit\": \"CountPerSecond\"\n    }\n  ]\n}",
+      "Percentage CPU": {
+        "timestamps": [
+          "2026-04-03T04:29:00Z",
+          "2026-04-03T04:30:00Z",
+          "2026-04-03T04:31:00Z",
+          "2026-04-03T04:32:00Z",
+          "2026-04-03T04:33:00Z",
+          "2026-04-03T04:34:00Z",
+          "2026-04-03T04:35:00Z",
+          "2026-04-03T04:36:00Z",
+          "2026-04-03T04:37:00Z"
+        ],
+        "average": [
+          0,
+          0,
+          0,
+          0,
+          0.1,
+          2.515,
+          3.69,
+          0.78,
+          5.095
+        ],
+        "maximum": [
+          0,
+          0,
+          0,
+          0,
+          0.2,
+          3.43,
+          5.78,
+          0.81,
+          9.1
+        ]
+      },
+      "Available Memory Bytes": {
+        "timestamps": [
+          "2026-04-03T04:29:00Z",
+          "2026-04-03T04:30:00Z",
+          "2026-04-03T04:31:00Z",
+          "2026-04-03T04:32:00Z",
+          "2026-04-03T04:33:00Z",
+          "2026-04-03T04:34:00Z",
+          "2026-04-03T04:35:00Z",
+          "2026-04-03T04:36:00Z",
+          "2026-04-03T04:37:00Z"
+        ],
+        "average": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          268155486208.0,
+          267385307136.0,
+          266938089472.0,
+          266522329088.0
+        ],
+        "maximum": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          268198477824.0,
+          267419385856.0,
+          267285168128.0,
+          266532290560.0
+        ]
+      },
+      "Disk Read Bytes": {
+        "timestamps": [
+          "2026-04-03T04:29:00Z",
+          "2026-04-03T04:30:00Z",
+          "2026-04-03T04:31:00Z",
+          "2026-04-03T04:32:00Z",
+          "2026-04-03T04:33:00Z",
+          "2026-04-03T04:34:00Z",
+          "2026-04-03T04:35:00Z",
+          "2026-04-03T04:36:00Z",
+          "2026-04-03T04:37:00Z"
+        ],
+        "average": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          315468141.09,
+          34031458.53,
+          536441984.49
+        ],
+        "maximum": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          315468141.09,
+          34031458.53,
+          536441984.49
+        ]
+      },
+      "Disk Write Bytes": {
+        "timestamps": [
+          "2026-04-03T04:29:00Z",
+          "2026-04-03T04:30:00Z",
+          "2026-04-03T04:31:00Z",
+          "2026-04-03T04:32:00Z",
+          "2026-04-03T04:33:00Z",
+          "2026-04-03T04:34:00Z",
+          "2026-04-03T04:35:00Z",
+          "2026-04-03T04:36:00Z",
+          "2026-04-03T04:37:00Z"
+        ],
+        "average": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          499703.26,
+          5932228308.89,
+          7057959973.14,
+          3770920263.17
+        ],
+        "maximum": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          499703.26,
+          5932228308.89,
+          7057959973.14,
+          3770920263.17
+        ]
+      },
+      "Disk Read Operations/Sec": {
+        "timestamps": [
+          "2026-04-03T04:29:00Z",
+          "2026-04-03T04:30:00Z",
+          "2026-04-03T04:31:00Z",
+          "2026-04-03T04:32:00Z",
+          "2026-04-03T04:33:00Z",
+          "2026-04-03T04:34:00Z",
+          "2026-04-03T04:35:00Z",
+          "2026-04-03T04:36:00Z",
+          "2026-04-03T04:37:00Z"
+        ],
+        "average": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          124.27,
+          9.83,
+          58.57
+        ],
+        "maximum": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          236.56,
+          19.66,
+          117.01
+        ]
+      },
+      "Disk Write Operations/Sec": {
+        "timestamps": [
+          "2026-04-03T04:29:00Z",
+          "2026-04-03T04:30:00Z",
+          "2026-04-03T04:31:00Z",
+          "2026-04-03T04:32:00Z",
+          "2026-04-03T04:33:00Z",
+          "2026-04-03T04:34:00Z",
+          "2026-04-03T04:35:00Z",
+          "2026-04-03T04:36:00Z",
+          "2026-04-03T04:37:00Z"
+        ],
+        "average": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0.32,
+          70.96,
+          76.49,
+          170.975
+        ],
+        "maximum": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0.64,
+          91.67,
+          81.66,
+          273.83
+        ]
+      }
+    },
+    "status": "success",
+    "error": ""
+  },
+  {
+    "test_id": "B2",
+    "timestamp": "2026-04-03T04:39:15.667999",
+    "dataset": "small",
+    "vm_type": "Standard_E32s_v3",
+    "num_nodes": 1,
+    "storage_type": "nvme",
+    "reuse_run": 0,
+    "cluster_create_s": 0,
+    "db_download_s": 84.0,
+    "job_submit_s": 109.0,
+    "blast_total_s": 15.0,
+    "blast_phase1_io_s": 0,
+    "blast_phase2_cpu_s": 0,
+    "blast_phase3_write_s": 0,
+    "results_upload_s": 0,
+    "total_elapsed_s": 383.0510365962982,
+    "num_threads": 32,
+    "blast_options": "-task blastx-fast -evalue 0.01 -outfmt 7",
+    "estimated_cost_usd": 0.214508580493927,
+    "pods_succeeded": 1,
+    "pods_failed": 0,
+    "num_batches": 1,
+    "disk_read_iops_avg": 91.705,
+    "disk_read_iops_max": 91.705,
+    "disk_read_mbps_avg": 285.7798640346527,
+    "disk_read_mbps_max": 285.7798640346527,
+    "disk_write_iops_avg": 0,
+    "disk_write_mbps_avg": 0,
+    "disk_latency_ms_avg": 0,
+    "cpu_percent_avg": 2.56,
+    "cpu_percent_max": 2.56,
+    "memory_used_gb_avg": 7.26318359375,
+    "memory_used_gb_max": 7.48876953125,
+    "network_in_mbps": 0,
+    "network_out_mbps": 0,
+    "metrics_timeseries": {
+      "start": "2026-04-03T04:39:15Z",
+      "end": "2026-04-03T04:47:46Z",
+      "raw": "{\n  \"cost\": 168,\n  \"interval\": \"PT1M\",\n  \"namespace\": \"Microsoft.Compute/virtualMachineScaleSets\",\n  \"resourceregion\": \"koreacentral\",\n  \"timespan\": \"2026-04-03T04:39:15Z/2026-04-03T04:47:46Z\",\n  \"value\": [\n    {\n      \"displayDescription\": \"The number of bytes received on all network interfaces by the Virtual Machine(s) (Incoming Traffic)\",\n      \"errorCode\": \"Success\",\n      \"id\": \"/subscriptions/b052302c-4c8d-49a4-aa2f-9d60a7301a80/resourceGroups/MC_rg-elb-koc_elb-bench-b2_koreacentral/providers/Microsoft.Compute/virtualMachineScaleSets/aks-nodepool1-38596693-vmss/providers/Microsoft.Insights/metrics/Network In Total\",\n      \"name\": {\n        \"localizedValue\": \"Network In Total\",\n        \"value\": \"Network In Total\"\n      },\n      \"resourceGroup\": \"MC_rg-elb-koc_elb-bench-b2_koreacentral\",\n      \"timeseries\": [\n        {\n          \"data\": [\n            {\n              \"timeStamp\": \"2026-04-03T04:39:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:40:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:41:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:42:00Z\"\n            },\n            {\n              \"average\": 6205650.0,\n              \"maximum\": 6205650.0,\n              \"timeStamp\": \"2026-04-03T04:43:00Z\",\n              \"total\": 6205650.0\n            },\n            {\n              \"average\": 78514457.0,\n              \"maximum\": 78514457.0,\n              \"timeStamp\": \"2026-04-03T04:44:00Z\",\n              \"total\": 78514457.0\n            },\n            {\n              \"average\": 217740999.0,\n              \"maximum\": 217740999.0,\n              \"timeStamp\": \"2026-04-03T04:45:00Z\",\n              \"total\": 217740999.0\n            },\n            {\n              \"average\": 1221995609.0,\n              \"maximum\": 1221995609.0,\n              \"timeStamp\": \"2026-04-03T04:46:00Z\",\n              \"total\": 1221995609.0\n            }\n          ],\n          \"metadatavalues\": []\n        }\n      ],\n      \"type\": \"Microsoft.Insights/metrics\",\n      \"unit\": \"Bytes\"\n    },\n    {\n      \"displayDescription\": \"The number of bytes out on all network interfaces by the Virtual Machine(s) (Outgoing Traffic)\",\n      \"errorCode\": \"Success\",\n      \"id\": \"/subscriptions/b052302c-4c8d-49a4-aa2f-9d60a7301a80/resourceGroups/MC_rg-elb-koc_elb-bench-b2_koreacentral/providers/Microsoft.Compute/virtualMachineScaleSets/aks-nodepool1-38596693-vmss/providers/Microsoft.Insights/metrics/Network Out Total\",\n      \"name\": {\n        \"localizedValue\": \"Network Out Total\",\n        \"value\": \"Network Out Total\"\n      },\n      \"resourceGroup\": \"MC_rg-elb-koc_elb-bench-b2_koreacentral\",\n      \"timeseries\": [\n        {\n          \"data\": [\n            {\n              \"timeStamp\": \"2026-04-03T04:39:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:40:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:41:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:42:00Z\"\n            },\n            {\n              \"average\": 487646.0,\n              \"maximum\": 487646.0,\n              \"timeStamp\": \"2026-04-03T04:43:00Z\",\n              \"total\": 487646.0\n            },\n            {\n              \"average\": 4462303.0,\n              \"maximum\": 4462303.0,\n              \"timeStamp\": \"2026-04-03T04:44:00Z\",\n              \"total\": 4462303.0\n            },\n            {\n              \"average\": 6623776.0,\n              \"maximum\": 6623776.0,\n              \"timeStamp\": \"2026-04-03T04:45:00Z\",\n              \"total\": 6623776.0\n            },\n            {\n              \"average\": 3728938.0,\n              \"maximum\": 3728938.0,\n              \"timeStamp\": \"2026-04-03T04:46:00Z\",\n              \"total\": 3728938.0\n            }\n          ],\n          \"metadatavalues\": []\n        }\n      ],\n      \"type\": \"Microsoft.Insights/metrics\",\n      \"unit\": \"Bytes\"\n    },\n    {\n      \"displayDescription\": \"The percentage of allocated compute units that are currently in use by the Virtual Machine(s)\",\n      \"errorCode\": \"Success\",\n      \"id\": \"/subscriptions/b052302c-4c8d-49a4-aa2f-9d60a7301a80/resourceGroups/MC_rg-elb-koc_elb-bench-b2_koreacentral/providers/Microsoft.Compute/virtualMachineScaleSets/aks-nodepool1-38596693-vmss/providers/Microsoft.Insights/metrics/Percentage CPU\",\n      \"name\": {\n        \"localizedValue\": \"Percentage CPU\",\n        \"value\": \"Percentage CPU\"\n      },\n      \"resourceGroup\": \"MC_rg-elb-koc_elb-bench-b2_koreacentral\",\n      \"timeseries\": [\n        {\n          \"data\": [\n            {\n              \"timeStamp\": \"2026-04-03T04:39:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:40:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:41:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:42:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:43:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:44:00Z\"\n            },\n            {\n              \"average\": 2.56,\n              \"maximum\": 4.41,\n              \"timeStamp\": \"2026-04-03T04:45:00Z\",\n              \"total\": 5.12\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:46:00Z\"\n            }\n          ],\n          \"metadatavalues\": []\n        }\n      ],\n      \"type\": \"Microsoft.Insights/metrics\",\n      \"unit\": \"Percent\"\n    },\n    {\n      \"displayDescription\": \"Amount of physical memory, in bytes, immediately available for allocation to a process or for system use in the Virtual Machine\",\n      \"errorCode\": \"Success\",\n      \"id\": \"/subscriptions/b052302c-4c8d-49a4-aa2f-9d60a7301a80/resourceGroups/MC_rg-elb-koc_elb-bench-b2_koreacentral/providers/Microsoft.Compute/virtualMachineScaleSets/aks-nodepool1-38596693-vmss/providers/Microsoft.Insights/metrics/Available Memory Bytes\",\n      \"name\": {\n        \"localizedValue\": \"Available Memory Bytes\",\n        \"value\": \"Available Memory Bytes\"\n      },\n      \"resourceGroup\": \"MC_rg-elb-koc_elb-bench-b2_koreacentral\",\n      \"timeseries\": [\n        {\n          \"data\": [\n            {\n              \"timeStamp\": \"2026-04-03T04:39:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:40:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:41:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:42:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:43:00Z\"\n            },\n            {\n              \"average\": 267321344000.0,\n              \"maximum\": 267345985536.0,\n              \"timeStamp\": \"2026-04-03T04:44:00Z\",\n              \"total\": 534642688000.0\n            },\n            {\n              \"average\": 266836901888.0,\n              \"maximum\": 267089084416.0,\n              \"timeStamp\": \"2026-04-03T04:45:00Z\",\n              \"total\": 533673803776.0\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:46:00Z\"\n            }\n          ],\n          \"metadatavalues\": []\n        }\n      ],\n      \"type\": \"Microsoft.Insights/metrics\",\n      \"unit\": \"Bytes\"\n    },\n    {\n      \"displayDescription\": \"Bytes read from disk during monitoring period\",\n      \"errorCode\": \"Success\",\n      \"id\": \"/subscriptions/b052302c-4c8d-49a4-aa2f-9d60a7301a80/resourceGroups/MC_rg-elb-koc_elb-bench-b2_koreacentral/providers/Microsoft.Compute/virtualMachineScaleSets/aks-nodepool1-38596693-vmss/providers/Microsoft.Insights/metrics/Disk Read Bytes\",\n      \"name\": {\n        \"localizedValue\": \"Disk Read Bytes\",\n        \"value\": \"Disk Read Bytes\"\n      },\n      \"resourceGroup\": \"MC_rg-elb-koc_elb-bench-b2_koreacentral\",\n      \"timeseries\": [\n        {\n          \"data\": [\n            {\n              \"timeStamp\": \"2026-04-03T04:39:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:40:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:41:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:42:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:43:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:44:00Z\"\n            },\n            {\n              \"average\": 299661906.71,\n              \"maximum\": 299661906.71,\n              \"timeStamp\": \"2026-04-03T04:45:00Z\",\n              \"total\": 299661906.71\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:46:00Z\"\n            }\n          ],\n          \"metadatavalues\": []\n        }\n      ],\n      \"type\": \"Microsoft.Insights/metrics\",\n      \"unit\": \"Bytes\"\n    },\n    {\n      \"displayDescription\": \"Bytes written to disk during monitoring period\",\n      \"errorCode\": \"Success\",\n      \"id\": \"/subscriptions/b052302c-4c8d-49a4-aa2f-9d60a7301a80/resourceGroups/MC_rg-elb-koc_elb-bench-b2_koreacentral/providers/Microsoft.Compute/virtualMachineScaleSets/aks-nodepool1-38596693-vmss/providers/Microsoft.Insights/metrics/Disk Write Bytes\",\n      \"name\": {\n        \"localizedValue\": \"Disk Write Bytes\",\n        \"value\": \"Disk Write Bytes\"\n      },\n      \"resourceGroup\": \"MC_rg-elb-koc_elb-bench-b2_koreacentral\",\n      \"timeseries\": [\n        {\n          \"data\": [\n            {\n              \"timeStamp\": \"2026-04-03T04:39:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:40:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:41:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:42:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:43:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:44:00Z\"\n            },\n            {\n              \"average\": 5783353079.45,\n              \"maximum\": 5783353079.45,\n              \"timeStamp\": \"2026-04-03T04:45:00Z\",\n              \"total\": 5783353079.45\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:46:00Z\"\n            }\n          ],\n          \"metadatavalues\": []\n        }\n      ],\n      \"type\": \"Microsoft.Insights/metrics\",\n      \"unit\": \"Bytes\"\n    },\n    {\n      \"displayDescription\": \"Disk Read IOPS\",\n      \"errorCode\": \"Success\",\n      \"id\": \"/subscriptions/b052302c-4c8d-49a4-aa2f-9d60a7301a80/resourceGroups/MC_rg-elb-koc_elb-bench-b2_koreacentral/providers/Microsoft.Compute/virtualMachineScaleSets/aks-nodepool1-38596693-vmss/providers/Microsoft.Insights/metrics/Disk Read Operations/Sec\",\n      \"name\": {\n        \"localizedValue\": \"Disk Read Operations/Sec\",\n        \"value\": \"Disk Read Operations/Sec\"\n      },\n      \"resourceGroup\": \"MC_rg-elb-koc_elb-bench-b2_koreacentral\",\n      \"timeseries\": [\n        {\n          \"data\": [\n            {\n              \"timeStamp\": \"2026-04-03T04:39:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:40:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:41:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:42:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:43:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:44:00Z\"\n            },\n            {\n              \"average\": 91.705,\n              \"maximum\": 174.15,\n              \"timeStamp\": \"2026-04-03T04:45:00Z\",\n              \"total\": 183.41\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:46:00Z\"\n            }\n          ],\n          \"metadatavalues\": []\n        }\n      ],\n      \"type\": \"Microsoft.Insights/metrics\",\n      \"unit\": \"CountPerSecond\"\n    },\n    {\n      \"displayDescription\": \"Disk Write IOPS\",\n      \"errorCode\": \"Success\",\n      \"id\": \"/subscriptions/b052302c-4c8d-49a4-aa2f-9d60a7301a80/resourceGroups/MC_rg-elb-koc_elb-bench-b2_koreacentral/providers/Microsoft.Compute/virtualMachineScaleSets/aks-nodepool1-38596693-vmss/providers/Microsoft.Insights/metrics/Disk Write Operations/Sec\",\n      \"name\": {\n        \"localizedValue\": \"Disk Write Operations/Sec\",\n        \"value\": \"Disk Write Operations/Sec\"\n      },\n      \"resourceGroup\": \"MC_rg-elb-koc_elb-bench-b2_koreacentral\",\n      \"timeseries\": [\n        {\n          \"data\": [\n            {\n              \"timeStamp\": \"2026-04-03T04:39:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:40:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:41:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:42:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:43:00Z\"\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:44:00Z\"\n            },\n            {\n              \"average\": 146.65,\n              \"maximum\": 179.61,\n              \"timeStamp\": \"2026-04-03T04:45:00Z\",\n              \"total\": 293.3\n            },\n            {\n              \"timeStamp\": \"2026-04-03T04:46:00Z\"\n            }\n          ],\n          \"metadatavalues\": []\n        }\n      ],\n      \"type\": \"Microsoft.Insights/metrics\",\n      \"unit\": \"CountPerSecond\"\n    }\n  ]\n}",
+      "Network In Total": {
+        "timestamps": [
+          "2026-04-03T04:39:00Z",
+          "2026-04-03T04:40:00Z",
+          "2026-04-03T04:41:00Z",
+          "2026-04-03T04:42:00Z",
+          "2026-04-03T04:43:00Z",
+          "2026-04-03T04:44:00Z",
+          "2026-04-03T04:45:00Z",
+          "2026-04-03T04:46:00Z"
+        ],
+        "average": [
+          0,
+          0,
+          0,
+          0,
+          6205650.0,
+          78514457.0,
+          217740999.0,
+          1221995609.0
+        ],
+        "maximum": [
+          0,
+          0,
+          0,
+          0,
+          6205650.0,
+          78514457.0,
+          217740999.0,
+          1221995609.0
+        ]
+      },
+      "Network Out Total": {
+        "timestamps": [
+          "2026-04-03T04:39:00Z",
+          "2026-04-03T04:40:00Z",
+          "2026-04-03T04:41:00Z",
+          "2026-04-03T04:42:00Z",
+          "2026-04-03T04:43:00Z",
+          "2026-04-03T04:44:00Z",
+          "2026-04-03T04:45:00Z",
+          "2026-04-03T04:46:00Z"
+        ],
+        "average": [
+          0,
+          0,
+          0,
+          0,
+          487646.0,
+          4462303.0,
+          6623776.0,
+          3728938.0
+        ],
+        "maximum": [
+          0,
+          0,
+          0,
+          0,
+          487646.0,
+          4462303.0,
+          6623776.0,
+          3728938.0
+        ]
+      },
+      "Percentage CPU": {
+        "timestamps": [
+          "2026-04-03T04:39:00Z",
+          "2026-04-03T04:40:00Z",
+          "2026-04-03T04:41:00Z",
+          "2026-04-03T04:42:00Z",
+          "2026-04-03T04:43:00Z",
+          "2026-04-03T04:44:00Z",
+          "2026-04-03T04:45:00Z",
+          "2026-04-03T04:46:00Z"
+        ],
+        "average": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          2.56,
+          0
+        ],
+        "maximum": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          4.41,
+          0
+        ]
+      },
+      "Available Memory Bytes": {
+        "timestamps": [
+          "2026-04-03T04:39:00Z",
+          "2026-04-03T04:40:00Z",
+          "2026-04-03T04:41:00Z",
+          "2026-04-03T04:42:00Z",
+          "2026-04-03T04:43:00Z",
+          "2026-04-03T04:44:00Z",
+          "2026-04-03T04:45:00Z",
+          "2026-04-03T04:46:00Z"
+        ],
+        "average": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          267321344000.0,
+          266836901888.0,
+          0
+        ],
+        "maximum": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          267345985536.0,
+          267089084416.0,
+          0
+        ]
+      },
+      "Disk Read Bytes": {
+        "timestamps": [
+          "2026-04-03T04:39:00Z",
+          "2026-04-03T04:40:00Z",
+          "2026-04-03T04:41:00Z",
+          "2026-04-03T04:42:00Z",
+          "2026-04-03T04:43:00Z",
+          "2026-04-03T04:44:00Z",
+          "2026-04-03T04:45:00Z",
+          "2026-04-03T04:46:00Z"
+        ],
+        "average": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          299661906.71,
+          0
+        ],
+        "maximum": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          299661906.71,
+          0
+        ]
+      },
+      "Disk Write Bytes": {
+        "timestamps": [
+          "2026-04-03T04:39:00Z",
+          "2026-04-03T04:40:00Z",
+          "2026-04-03T04:41:00Z",
+          "2026-04-03T04:42:00Z",
+          "2026-04-03T04:43:00Z",
+          "2026-04-03T04:44:00Z",
+          "2026-04-03T04:45:00Z",
+          "2026-04-03T04:46:00Z"
+        ],
+        "average": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          5783353079.45,
+          0
+        ],
+        "maximum": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          5783353079.45,
+          0
+        ]
+      },
+      "Disk Read Operations/Sec": {
+        "timestamps": [
+          "2026-04-03T04:39:00Z",
+          "2026-04-03T04:40:00Z",
+          "2026-04-03T04:41:00Z",
+          "2026-04-03T04:42:00Z",
+          "2026-04-03T04:43:00Z",
+          "2026-04-03T04:44:00Z",
+          "2026-04-03T04:45:00Z",
+          "2026-04-03T04:46:00Z"
+        ],
+        "average": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          91.705,
+          0
+        ],
+        "maximum": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          174.15,
+          0
+        ]
+      },
+      "Disk Write Operations/Sec": {
+        "timestamps": [
+          "2026-04-03T04:39:00Z",
+          "2026-04-03T04:40:00Z",
+          "2026-04-03T04:41:00Z",
+          "2026-04-03T04:42:00Z",
+          "2026-04-03T04:43:00Z",
+          "2026-04-03T04:44:00Z",
+          "2026-04-03T04:45:00Z",
+          "2026-04-03T04:46:00Z"
+        ],
+        "average": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          146.65,
+          0
+        ],
+        "maximum": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          179.61,
+          0
+        ]
+      }
+    },
+    "status": "success",
+    "error": ""
+  }
+]
