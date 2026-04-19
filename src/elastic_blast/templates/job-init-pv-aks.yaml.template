@@ -53,6 +53,7 @@ spec:
         volumeMounts:
         - name: blastdb
           mountPath: /blast/queries
+          subPath: queries
           readOnly: false
         command: ["run.sh", "-i", "${INPUT_QUERY}", "-o", "${ELB_RESULTS}", "-b", "${BATCH_LEN}", "-c", "${COPY_ONLY}", "-q", "/blast/queries/"]
       restartPolicy: Never

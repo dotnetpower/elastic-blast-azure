@@ -59,3 +59,7 @@ done
 
 end=$(date +%s)
 echo "RUNTIME download-partitions $((end - start)) seconds"
+
+# Clean up azcopy background processes to ensure container exits cleanly
+pkill -f azcopy 2>/dev/null || true
+rm -rf /root/.azcopy 2>/dev/null || true

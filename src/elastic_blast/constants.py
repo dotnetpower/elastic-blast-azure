@@ -331,6 +331,7 @@ CFG_CLUSTER_BID_PERCENTAGE = 'bid-percentage'
 CFG_CLUSTER_EXP_USE_LOCAL_SSD = 'exp-use-local-ssd'
 CFG_CLUSTER_ENABLE_STACKDRIVER = 'enable-stackdriver'
 CFG_CLUSTER_REUSE = 'reuse'
+CFG_CLUSTER_STORAGE_CLASS = 'storage-class'
 
 # Blast
 CFG_BLAST_PROGRAM = 'program'

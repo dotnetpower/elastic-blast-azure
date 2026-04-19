@@ -40,6 +40,13 @@ AZURE_HPC_MACHINES = {
     'Standard_L48s_v3': {'cpu': 48, 'memory': 384},   # 48 vCPU, 384 GB RAM, 5.7TB NVMe
     'Standard_L64s_v3': {'cpu': 64, 'memory': 512},   # 64 vCPU, 512 GB RAM, 7.6TB NVMe
     'Standard_L80s_v3': {'cpu': 80, 'memory': 640},   # 80 vCPU, 640 GB RAM, 9.6TB NVMe
+    # L-series v3 AMD (storage-optimized, NVMe, AMD EPYC)
+    'Standard_L8as_v3': {'cpu': 8, 'memory': 64},     # 8 vCPU, 64 GB RAM, 1.9TB NVMe
+    'Standard_L16as_v3': {'cpu': 16, 'memory': 128},   # 16 vCPU, 128 GB RAM, 3.8TB NVMe
+    'Standard_L32as_v3': {'cpu': 32, 'memory': 256},   # 32 vCPU, 256 GB RAM, 3.8TB NVMe
+    'Standard_L48as_v3': {'cpu': 48, 'memory': 384},   # 48 vCPU, 384 GB RAM, 5.7TB NVMe
+    'Standard_L64as_v3': {'cpu': 64, 'memory': 512},   # 64 vCPU, 512 GB RAM, 7.6TB NVMe
+    'Standard_L80as_v3': {'cpu': 80, 'memory': 640},   # 80 vCPU, 640 GB RAM, 9.6TB NVMe
 }
 
 MIN_PROCESSORS = 8

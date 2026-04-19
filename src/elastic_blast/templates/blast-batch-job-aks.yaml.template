@@ -84,7 +84,7 @@ spec:
         - name: ELB_DB_MOL_TYPE
           value: "${ELB_DB_MOL_TYPE}"
         - name: QUERY_DIR
-          value: "/blast/blastdb"
+          value: "/blast/blastdb/queries"
         - name: RESULTS_DIR
           value: "/blast/blastdb/results"
         command: ["/scripts/blast-run-aks.sh"]

@@ -66,7 +66,8 @@ class TestPredict:
         s = str(p)
         assert 'BALANCED' in s
         assert '$' in s
-        assert 'hours' in s
+        assert 'Estimated time' in s
+        assert 'Pods:' in s
 
     def test_zero_query_doesnt_crash(self):
         p = predict(OptimizationProfile.BALANCED, query_size_gb=0, db_size_gb=10)

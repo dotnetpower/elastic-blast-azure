@@ -49,14 +49,17 @@ from . import azure_sdk as sdk
 class ElasticBlastAzure(ElasticBlast):
     """Azure AKS implementation of ElasticBLAST."""
 
-    # Storage class for PVC creation. Override with ELB_STORAGE_CLASS env var.
-    # Default: azureblob-nfs-premium (Azure Blob NFS)
-    # Alternative: azure-netapp-ultra (Azure NetApp Files — persistent across clusters)
+    # Storage class for PVC creation.
+    # Resolved from: (1) cfg [cluster] storage-class, (2) ELB_STORAGE_CLASS env var, (3) default
+    # Values: azureblob-nfs-premium (default), azure-netapp-ultra (ANF)
     STORAGE_CLASS = os.environ.get('ELB_STORAGE_CLASS', 'azureblob-nfs-premium')
 
     def __init__(self, cfg: ElasticBlastConfig, create=False,
                  cleanup_stack: Optional[List[Any]] = None):
         super().__init__(cfg, create, cleanup_stack)
+        # Override STORAGE_CLASS from config if set
+        if cfg.cluster.storage_class:
+            self.STORAGE_CLASS = cfg.cluster.storage_class
         self.query_files: List[str] = []
         self.cluster_initialized = False
         self.auto_shutdown = 'ELB_DISABLE_AUTO_SHUTDOWN' not in os.environ
@@ -254,10 +257,13 @@ class ElasticBlastAzure(ElasticBlast):
 
         program = cfg.blast.program
         # CPU allocation: fewer CPUs when 1 job per node, else quarter of total
+        # Cap at num_cpus - 2 to ensure request never exceeds per-node limit
         if len(query_batches) == cfg.cluster.num_nodes:
             cpu_req = cfg.cluster.num_cpus - 2
         else:
             cpu_req = ((cfg.cluster.num_nodes * cfg.cluster.num_cpus) // 4) - 2
+        cpu_req = min(cpu_req, cfg.cluster.num_cpus - 2)
+        cpu_req = max(0, cpu_req)
 
         return {
             'ELB_BLAST_PROGRAM': program,
@@ -332,16 +338,34 @@ class ElasticBlastAzure(ElasticBlast):
 
         profile = optimizer.get_profile()
         query_size_gb = query_length / 1e9 if query_length > 0 else 0.1
-        db_size_gb = float(os.environ.get('ELB_DB_SIZE_GB', '10'))
 
-        # Show all profiles comparison if running interactively
-        if os.isatty(1):  # stdout is a terminal
-            print(optimizer.predict_all_profiles(
-                query_size_gb=query_size_gb, db_size_gb=db_size_gb,
-                batch_len=self.cfg.blast.batch_len))
+        # Get actual DB size from metadata if available
+        db_size_gb = 10.0  # default
+        if self.cfg.blast.db_metadata and hasattr(self.cfg.blast.db_metadata, 'bytes_to_cache'):
+            db_size_gb = self.cfg.blast.db_metadata.bytes_to_cache / (1024 ** 3)
+        elif os.environ.get('ELB_DB_SIZE_GB'):
+            db_size_gb = float(os.environ['ELB_DB_SIZE_GB'])
 
-        pred = optimizer.apply_profile(self.cfg, profile)
-        logging.info(f'Optimization: {pred}')
+        num_batches = len(query_batches) if query_batches else None
+
+        # Show all profiles comparison
+        comparison = optimizer.predict_all_profiles(
+            query_size_gb=query_size_gb, db_size_gb=db_size_gb,
+            batch_len=self.cfg.blast.batch_len, num_batches=num_batches)
+        logging.info(comparison)
+        if os.isatty(1):
+            print(comparison)
+
+        pred = optimizer.apply_profile(self.cfg, profile,
+                                       query_size_gb=query_size_gb,
+                                       db_size_gb=db_size_gb)
+
+        # Detailed prediction log
+        logging.info(f'\n{"=" * 60}\n'
+                     f'  ElasticBLAST Execution Plan\n'
+                     f'{"=" * 60}\n'
+                     f'{pred}\n'
+                     f'{"=" * 60}')
 
     def _check_job_number_limit(self, queries: Optional[List[str]], query_length) -> None:
         """Raise if the number of jobs exceeds the Kubernetes limit."""

@@ -1,7 +1,0 @@
-ElasticBLAST Azure Benchmark Results — 2026-03-15T02:56:43.533873
-====================================================================================================
-Test   Dataset  VM               Nodes  Storage      Total(s)   Cost($)  Status  
-----------------------------------------------------------------------------------------------------
-G1     medium   Standard_E32s_v3 1      blob_nfs     459.0      0.26     success 
-G2     medium   Standard_E32s_v3 1      warm         128.0      0.07     failed  
-G4     medium   Standard_E32s_v3 1      warm         68.1       0.04     failed  

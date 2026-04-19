@@ -9,7 +9,7 @@
 #   RESULTS_DIR       - Directory containing output files
 
 # Wait for BLAST to finish (sidecar pattern)
-until [ -s "$RESULTS_DIR/BLAST_EXIT_CODE.out" ]; do
+until [ -s "$RESULTS_DIR/BLAST_EXIT_CODE-${JOB_NUM}.out" ]; do
     sleep 1
 done
 
@@ -32,4 +32,4 @@ if [ -f "$RESULT_FILE" ]; then
     azcopy cp "$RESULT_FILE" "$ELB_RESULTS/"
 fi
 
-exit "$(cat "$RESULTS_DIR/BLAST_EXIT_CODE.out")"
+exit "$(cat "$RESULTS_DIR/BLAST_EXIT_CODE-${JOB_NUM}.out")"

@@ -1,0 +1,39 @@
+{
+  "test_id": "bench-3node",
+  "timestamp": "2026-04-17T08:35:31Z",
+  "dataset": "nt_prok",
+  "vm_type": "Standard_E32s_v3",
+  "num_nodes": 3,
+  "storage_type": "local_ssd",
+  "db_size_gb": 82.2,
+  "query_file": "JAIJZY01.1.fsa_nt.gz",
+  "query_sequences": 2768,
+  "query_bases": 3302592,
+  "batch_len": 100000,
+  "num_batches": 34,
+  "blast_program": "blastn",
+  "blast_options": "-evalue 0.01 -outfmt 7",
+  "cluster_create_s": 271,
+  "db_download_s": [286, 292, 278],
+  "db_download_avg_s": 285,
+  "submit_jobs_s": 60,
+  "blast_jobs_succeeded": 34,
+  "blast_jobs_failed": 0,
+  "blast_per_job_s": [
+    39, 34, 36, 38, 34, 36, 39, 35, 36, 31, 29, 31, 36, 38, 35, 28, 28, 29, 32,
+    32, 32, 34, 33, 38, 33, 34, 36, 29, 30, 30, 32, 33, 32, 13
+  ],
+  "blast_avg_per_job_s": 32.8,
+  "blast_min_s": 13,
+  "blast_max_s": 39,
+  "blast_total_wall_clock_s": 39,
+  "node_distribution": {
+    "node_0": { "jobs": 12, "avg_s": 32 },
+    "node_1": { "jobs": 12, "avg_s": 32 },
+    "node_2": { "jobs": 10, "avg_s": 35 }
+  },
+  "total_elapsed_s": 672,
+  "estimated_cost_usd": 1.13,
+  "status": "success",
+  "notes": "All 34/34 jobs completed on 3 nodes. Jobs distributed evenly (12/12/10). Per-job avg 32.8s vs 207.5s on 1 node (6.3x speedup). Wall-clock 39s vs 216s (5.5x speedup)."
+}

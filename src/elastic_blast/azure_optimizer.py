@@ -38,6 +38,9 @@ _VM_PROFILES = {
         'azcopy_concurrency': 16,
         'skip_db_verify': True,
         'min_count_zero': True,
+        'threads_per_pod': 2,       # Fewer threads = more pods/node = less oversubscription
+        'mem_limit_gb': 4,          # Minimal per-pod memory (DB in page cache)
+        'mem_request_gb': 2,
     },
     OptimizationProfile.BALANCED: {
         'default_vm': 'Standard_E32s_v3',
@@ -47,6 +50,9 @@ _VM_PROFILES = {
         'azcopy_concurrency': 64,
         'skip_db_verify': True,
         'min_count_zero': True,
+        'threads_per_pod': 8,       # Balanced: 4 pods/node on 32 vCPU
+        'mem_limit_gb': 8,
+        'mem_request_gb': 4,
     },
     OptimizationProfile.PERFORMANCE: {
         'default_vm': 'Standard_E64bs_v5',
@@ -56,6 +62,9 @@ _VM_PROFILES = {
         'azcopy_concurrency': 128,
         'skip_db_verify': False,
         'min_count_zero': False,
+        'threads_per_pod': 16,      # Max threads = fewest pods = fastest per-job
+        'mem_limit_gb': 32,
+        'mem_request_gb': 16,
     },
 }
 
@@ -87,14 +96,29 @@ class Prediction:
     overhead_minutes: float
     blast_minutes: float
     db_cached_pct: float
+    # Pod details
+    num_pods: int = 0
+    threads_per_pod: int = 16
+    mem_limit_gb: float = 254
+    mem_request_gb: float = 0.5
+    pods_per_node: int = 0
+    cpu_utilization_pct: float = 0
+    batch_len: int = 100000
+    db_size_gb: float = 0
+    query_size_gb: float = 0
 
     def __str__(self) -> str:
         spot_label = ' (Spot)' if self.use_spot else ''
         return (
             f'  Profile: {self.profile.upper()}\n'
             f'  VM: {self.vm_type}{spot_label} x {self.num_nodes} nodes\n'
-            f'  DB RAM cache: {self.db_cached_pct:.0f}%\n'
-            f'  Estimated time: {self.estimated_hours:.1f} hours '
+            f'  DB: {self.db_size_gb:.1f} GB  |  Query: {self.query_size_gb:.2f} GB  |  DB cache: {self.db_cached_pct:.0f}%\n'
+            f'  Pods: {self.num_pods} (batch-len={self.batch_len:,})  |  '
+            f'{self.threads_per_pod} threads/pod  |  '
+            f'mem: {self.mem_request_gb:.0f}G req / {self.mem_limit_gb:.0f}G limit\n'
+            f'  Per node: ~{self.pods_per_node} pods  |  '
+            f'CPU utilization: ~{self.cpu_utilization_pct:.0f}%\n'
+            f'  Estimated time: {self.estimated_hours:.1f}h '
             f'(overhead {self.overhead_minutes:.0f}min + BLAST {self.blast_minutes:.0f}min)\n'
             f'  Estimated cost: ${self.estimated_cost:.2f}'
         )
@@ -114,6 +138,7 @@ def predict(profile: OptimizationProfile, *,
             query_size_gb: float,
             db_size_gb: float,
             batch_len: int = 100000,
+            num_batches: Optional[int] = None,
             num_nodes: Optional[int] = None,
             vm_type: Optional[str] = None) -> Prediction:
     """Predict execution time and cost for a given profile and workload.
@@ -123,6 +148,7 @@ def predict(profile: OptimizationProfile, *,
         query_size_gb: total query size in GB
         db_size_gb: BLAST database size in GB
         batch_len: batch size for query splitting
+        num_batches: actual number of batches (overrides calculation from query_size_gb)
         num_nodes: override node count (None = auto)
         vm_type: override VM type (None = auto from profile)
     """
@@ -133,12 +159,15 @@ def predict(profile: OptimizationProfile, *,
         vm_type = cfg['large_db_vm'] if db_size_gb > 100 else cfg['default_vm']
     vcpu, ram_gb, hourly = _VM_SPECS.get(vm_type, (32, 256, 2.0))
 
+    # Calculate batch count
+    if not num_batches or num_batches <= 0:
+        num_batches = max(1, int(query_size_gb * 1024 * 1024 / batch_len))
+
     # Auto-select node count
     if not num_nodes:
         # Heuristic: enough nodes to hold DB in RAM across cluster
         min_nodes_for_db = max(1, math.ceil(db_size_gb / (ram_gb * cfg['vmtouch_pct'])))
         # Heuristic: enough nodes for parallelism (1 node per ~20 batches)
-        num_batches = max(1, int(query_size_gb * 1024 * 1024 / batch_len))
         min_nodes_for_queries = max(1, math.ceil(num_batches / 20))
         # Performance: allow more nodes (1 per 5 batches)
         if profile == OptimizationProfile.PERFORMANCE:
@@ -163,12 +192,19 @@ def predict(profile: OptimizationProfile, *,
     phase3_per_batch = 1
     batch_time = phase1_per_batch + phase2_per_batch + phase3_per_batch
 
-    num_batches = max(1, int(query_size_gb * 1024 * 1024 / batch_len))
-    blast_minutes = (num_batches * batch_time) / num_nodes
+    num_batches_final = num_batches
+    blast_minutes = (num_batches_final * batch_time) / num_nodes
 
     total_hours = (overhead + blast_minutes) / 60
     price = hourly * (SPOT_DISCOUNT_FACTOR if use_spot else 1.0)
     cost = price * num_nodes * total_hours
+
+    # Pod resource details
+    threads_per_pod = cfg['threads_per_pod']
+    mem_limit_gb = cfg['mem_limit_gb']
+    mem_request_gb = cfg['mem_request_gb']
+    pods_per_node = max(1, vcpu // threads_per_pod)
+    cpu_util = min(100.0, (num_batches_final / max(num_nodes, 1) * threads_per_pod / max(vcpu, 1)) * 100)
 
     return Prediction(
         profile=profile.value,
@@ -180,28 +216,41 @@ def predict(profile: OptimizationProfile, *,
         overhead_minutes=overhead,
         blast_minutes=blast_minutes,
         db_cached_pct=db_cache_pct,
+        num_pods=num_batches_final,
+        threads_per_pod=threads_per_pod,
+        mem_limit_gb=mem_limit_gb,
+        mem_request_gb=mem_request_gb,
+        pods_per_node=pods_per_node,
+        cpu_utilization_pct=cpu_util,
+        batch_len=batch_len,
+        db_size_gb=db_size_gb,
+        query_size_gb=query_size_gb,
     )
 
 
 def predict_all_profiles(*, query_size_gb: float, db_size_gb: float,
-                          batch_len: int = 100000) -> str:
+                          batch_len: int = 100000,
+                          num_batches: Optional[int] = None) -> str:
     """Generate comparison table of all 3 profiles."""
     lines = [
         '',
         '╔══════════════════════════════════════════════════════════════════╗',
         '║           ElasticBLAST Azure — Optimization Profiles           ║',
         '╠══════════════════════════════════════════════════════════════════╣',
-        f'║  Query: {query_size_gb:.1f} GB  |  DB: {db_size_gb:.1f} GB' +
-        ' ' * max(0, 36 - len(f'{query_size_gb:.1f}') - len(f'{db_size_gb:.1f}')) + '║',
+        f'║  Query: {query_size_gb:.2f} GB  |  DB: {db_size_gb:.1f} GB  |  batch-len: {batch_len:,}' +
+        ' ' * max(0, 10 - len(f'{batch_len:,}')) + '║',
         '╠══════════════════════════════════════════════════════════════════╣',
     ]
 
     for profile in OptimizationProfile:
         p = predict(profile, query_size_gb=query_size_gb, db_size_gb=db_size_gb,
-                    batch_len=batch_len)
+                    batch_len=batch_len, num_batches=num_batches)
         spot = 'Spot' if p.use_spot else 'On-demand'
         lines.append(f'║  [{profile.value.upper():^11s}]  '
                      f'{p.vm_type} x {p.num_nodes} ({spot})')
+        lines.append(f'║    Pods: {p.num_pods} x {p.threads_per_pod}t  |  '
+                     f'~{p.pods_per_node} pods/node  |  '
+                     f'mem: {p.mem_request_gb:.0f}G/{p.mem_limit_gb:.0f}G')
         lines.append(f'║    Time: ~{p.estimated_hours:.1f}h  '
                      f'Cost: ~${p.estimated_cost:.0f}  '
                      f'DB cache: {p.db_cached_pct:.0f}%')
@@ -214,7 +263,8 @@ def predict_all_profiles(*, query_size_gb: float, db_size_gb: float,
     return '\n'.join(lines)
 
 
-def apply_profile(cfg, profile: Optional[OptimizationProfile] = None) -> Prediction:
+def apply_profile(cfg, profile: Optional[OptimizationProfile] = None,
+                   query_size_gb: float = 0, db_size_gb: float = 0) -> Prediction:
     """Apply optimization profile to ElasticBlastConfig.
 
     Modifies cfg in-place based on the profile. Returns the prediction.
@@ -225,14 +275,30 @@ def apply_profile(cfg, profile: Optional[OptimizationProfile] = None) -> Predict
 
     p_cfg = _VM_PROFILES[profile]
 
-    # Estimate sizes (use defaults if actual sizes unknown at this point)
-    query_size_gb = float(os.environ.get('ELB_QUERY_SIZE_GB', '0.1'))
-    db_size_gb = float(os.environ.get('ELB_DB_SIZE_GB', '10'))
+    # Use provided sizes or fall back to env/defaults
+    if query_size_gb <= 0:
+        query_size_gb = float(os.environ.get('ELB_QUERY_SIZE_GB', '0.1'))
+    if db_size_gb <= 0:
+        db_size_gb = float(os.environ.get('ELB_DB_SIZE_GB', '10'))
 
     pred = predict(profile, query_size_gb=query_size_gb, db_size_gb=db_size_gb,
                    batch_len=cfg.blast.batch_len,
                    num_nodes=cfg.cluster.num_nodes if cfg.cluster.num_nodes > 1 else None,
                    vm_type=cfg.cluster.machine_type if cfg.cluster.machine_type != 'Standard_E32s_v3' else None)
+
+    # Apply pod resource settings if user hasn't explicitly set them
+    from .base import MemoryStr
+    if not cfg.blast.user_provided_batch_len:
+        # Don't override user-specified batch-len
+        pass
+    if str(cfg.cluster.mem_request) == '0.5G':
+        # Default mem_request — override with profile value
+        cfg.cluster.mem_request = MemoryStr(f'{p_cfg["mem_request_gb"]}G')
+    if cfg.cluster.num_cpus == 16:
+        # Default num_cpus — override with profile threads_per_pod
+        from .constants import ELB_DFLT_AZURE_NUM_CPUS
+        if cfg.cluster.num_cpus == ELB_DFLT_AZURE_NUM_CPUS:
+            cfg.cluster.num_cpus = p_cfg['threads_per_pod']
 
     # Spot VMs: disabled for now — system pool doesn't support Spot.
     # TODO: Re-enable when user nodepool support is added.

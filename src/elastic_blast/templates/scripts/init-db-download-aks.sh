@@ -84,4 +84,12 @@ if [ -n "$ELB_TAXIDLIST" ]; then
     retry_azcopy cp "$ELB_TAXIDLIST" /blast/blastdb || exit 1
 fi
 
+# Clean up azcopy background processes to ensure container exits cleanly.
+# azcopy login --identity spawns a token refresh goroutine that keeps the
+# process alive even after the main transfer completes, preventing the
+# container from terminating in Kubernetes.
+pkill -f azcopy 2>/dev/null || true
+# Also clean up any azcopy plan/log files on the volume
+rm -rf /root/.azcopy 2>/dev/null || true
+
 exit ${exit_code:-0}

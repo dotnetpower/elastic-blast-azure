@@ -115,7 +115,14 @@ def get_persistent_disks(k8s_ctx: str, dry_run: bool = False) -> list[str]:
         p = safe_exec(cmd)
         if p.stdout:
             pds = json.loads(handle_error(p.stdout))
-            return [i['spec']['csi']['volumeHandle'].split('/')[-1] for i in pds['items']]
+            result = []
+            for i in pds['items']:
+                spec = i.get('spec', {})
+                if 'csi' in spec and 'volumeHandle' in spec['csi']:
+                    result.append(spec['csi']['volumeHandle'].split('/')[-1])
+                elif 'nfs' in spec:
+                    result.append(spec['nfs'].get('server', 'nfs-volume'))
+            return result
     return list()
 
 
@@ -994,14 +1001,30 @@ def initialize_persistent_disk(cfg: ElasticBlastConfig, query_files: list[str] =
         with open(pvc_yaml, 'w') as f:
             ref = files('elastic_blast').joinpath('templates/pvc-rwo.yaml.template')
             if cfg.cloud_provider.cloud == CSP.AZURE:
-                ref = files('elastic_blast').joinpath('templates/pvc-rwm-aks.yaml.template')
+                if getattr(cfg.cluster, 'storage_class', '') == 'azure-netapp-ultra':
+                    ref = files('elastic_blast').joinpath('templates/pvc-rwm-anf-aks.yaml.template')
+                else:
+                    ref = files('elastic_blast').joinpath('templates/pvc-rwm-aks.yaml.template')
                 
             f.write(substitute_params(ref.read_text(), subs))
-        cmd = f"kubectl --context={k8s_ctx} apply -f {pvc_yaml}"
-        if dry_run:
-            logging.info(cmd)
-        else:
-            safe_exec(cmd)
+
+        # Skip PVC creation if it already exists and is Bound (e.g., ANF static PV)
+        pvc_exists = False
+        if not dry_run:
+            try:
+                result = safe_exec(f"kubectl --context={k8s_ctx} get pvc blast-dbs-pvc-rwm -o jsonpath={{.status.phase}}")
+                if hasattr(result, 'stdout') and 'Bound' in str(result.stdout):
+                    pvc_exists = True
+                    logging.info('PVC blast-dbs-pvc-rwm already exists and is Bound, skipping creation')
+            except Exception:
+                pass
+
+        if not pvc_exists:
+            cmd = f"kubectl --context={k8s_ctx} apply -f {pvc_yaml}"
+            if dry_run:
+                logging.info(cmd)
+            else:
+                safe_exec(cmd)
 
         start = timer()
         job_init_pv = pathlib.Path(os.path.join(d, 'job-init-pv.yaml'))
