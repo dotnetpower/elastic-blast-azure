@@ -256,13 +256,14 @@ mem-limit = 4G
 
 ### Datasets
 
-| Item     | Detail                                                                             |
-| -------- | ---------------------------------------------------------------------------------- |
-| Large DB | nt_prok (82 GB, 29 volumes, prokaryotic nucleotide)                                |
-| Small DB | 260_part_aa (~2 GB, 1 volume, nucleotide)                                          |
-| Query    | gut_bacteria_query.fa.gz (3,054 seqs: 60 × 16S rRNA + 2,994 × E. coli K12 contigs) |
-| BLAST    | blastn -evalue 0.01 -outfmt 7 -num_threads 8                                       |
-| Batches  | batch-len=100,000 → 31 batches                                                     |
+| Item      | Detail                                                                                          |
+| --------- | ----------------------------------------------------------------------------------------------- |
+| Large DB  | nt_prok (82 GB, 29 volumes, prokaryotic nucleotide)                                             |
+| Small DB  | 260_part_aa (~2 GB, 1 volume, nucleotide)                                                       |
+| Query     | gut_bacteria_query.fa.gz (3,054 seqs: 60 × 16S rRNA + 2,994 × E. coli K12 contigs)              |
+| BLAST     | blastn -evalue 0.01 -outfmt 7 -num_threads 8                                                    |
+| Batches   | batch-len=100,000 → 31 batches                                                                  |
+| DB source | Pre-staged from NCBI S3 (`s3://ncbi-blast-databases`) to Azure Blob via azcopy (102s, 860 MB/s) |
 
 ### Tests Executed
 
@@ -352,6 +353,17 @@ This is not a storage or scaling problem — it is a **query distribution proble
 **Camacho et al. (2023)** [2] described the ElasticBLAST architecture for GCP and AWS, demonstrating that cloud-based BLAST distribution achieves near-linear scaling on Google Kubernetes Engine. Our work extends this to Azure AKS and provides the first systematic comparison of Azure-specific storage backends. The key difference is that GCP's persistent disk architecture does not suffer from the NFS protocol bottleneck we identified on Azure, because GCP uses CSI-based persistent disks rather than NFS mounts.
 
 **Tsai (2021)** [3] benchmarked BLAST on Azure HPC VMs (HB-series, 120 cores per node) for single-node performance, achieving 15-minute wall clock times for the `nt` database. Our multi-node AKS approach achieves comparable performance (6.9 min median for 82 GB nt_prok) with commodity E32s_v3 VMs at lower cost, demonstrating that horizontal scaling on general-purpose VMs can match or exceed specialized HPC hardware for embarrassingly parallel workloads.
+
+| Dimension      | Tsai 2021 (Single VM)      | This Work (AKS)                        |
+| -------------- | -------------------------- | -------------------------------------- |
+| Platform       | Standalone BLAST on HPC VM | Distributed ElasticBLAST on AKS        |
+| DB sizes       | 122 GB (nt), 1.2 TB        | 2 GB, **82 GB** (nt_prok)              |
+| VM type        | HB120rs_v3 (120 cores)     | E32s_v3 (32 vCPU) × 1-5 nodes          |
+| Storage        | NVMe, ANF, Premium Disk    | Blob NFS, Local SSD, NVMe, ANF         |
+| Best time      | ~15 min (single node)      | **6.9 min** (3 nodes)                  |
+| Cost/run       | ~$0.90                     | **$0.70**                              |
+| Scale-out      | N/A (single VM)            | 2.3-4.4x at 3 nodes                    |
+| NFS bottleneck | Observed (5-30% CPU)       | **Confirmed (9% vmtouch improvement)** |
 
 **Key differentiators of this work**:
 
@@ -530,6 +542,26 @@ With the configuration above and nt_prok (82 GB):
 - **Estimated cost**: ~$0.70 (3 × E32s_v3 × 7 min × $2.016/hr)
 
 > **Note**: batch-000 may run significantly longer (up to 30-40 minutes) due to 16S rRNA sequences with high hit rates. This is a query complexity issue, not a system performance issue. Shuffling query sequences before submission can mitigate this.
+
+---
+
+## 12. Conclusion
+
+This study presents the first systematic storage and scaling benchmark of ElasticBLAST on Azure Kubernetes Service, evaluating 5 storage backends and up to 5-node configurations with an 82 GB prokaryotic nucleotide database.
+
+**Key contributions:**
+
+1. **Storage I/O path dominates performance, not storage speed.** Local SSD (hostPath) is 2.8x faster than Blob NFS. Azure NetApp Files Ultra and vmtouch RAM caching both fail to close this gap (only 10% and 9% improvement, respectively), confirming that the NFS protocol client stack — not the underlying storage medium — is the bottleneck for large-database BLAST workloads on AKS.
+
+2. **Horizontal scaling on commodity VMs is cost-effective.** Three E32s_v3 nodes ($2.016/hr each) achieve 6.9-minute wall-clock completion at $0.70/run — both faster and cheaper than a single node (26.8 min, $0.90). This is comparable to Tsai's (2021) 15-minute result on a single 120-core HPC VM at $0.90, suggesting that general-purpose VMs with embarrassingly parallel job distribution can match specialized HPC hardware.
+
+3. **Query complexity drives tail latency.** A single batch containing 16S rRNA sequences with high database hit rates runs 2-10x longer than median, becoming the wall-clock bottleneck in multi-node configurations. Query shuffling before batch splitting would mitigate this.
+
+4. **Pod memory limits significantly affect scheduling.** Reducing `mem-limit` from the default 254G to 4G yields 19% faster completion by enabling immediate scheduling of all 31 pods instead of serial queuing.
+
+5. **Seven production bugs were discovered and fixed**, including an NFS-specific race condition on shared exit-code files, incorrect memory defaults causing OOM kills, and a false-failure detection bug in the job submission script.
+
+**Practical recommendation:** For databases exceeding 10 GB on Azure AKS, use Local SSD mode (`exp-use-local-ssd = true`) with 3 nodes and `mem-limit = 4G`. This configuration achieves the best cost-performance balance at $0.70/run with ~7-minute completion.
 
 ---
 
