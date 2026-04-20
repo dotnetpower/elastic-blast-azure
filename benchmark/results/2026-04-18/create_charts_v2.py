@@ -108,16 +108,26 @@ perfs = [679, 292, 259, 1066, 244, 1916]
 colors_scatter = [C_SSD, C_SSD, C_SSD, C_NVME, C_NVME, C_NFS]
 markers = ['o', 's', 'D', 'o', 's', '^']
 
+# Per-point label offsets: (x_offset_pts, y_offset_pts) — all above, left-aligned at marker center
+label_offsets = {
+    'SSD 1N':  (0, 12),
+    'SSD 3N':  (0, 12),
+    'SSD 5N':  (0, 12),
+    'NVMe 1N': (0, 12),
+    'NVMe 3N': (0, 12),
+    'NFS 1N':  (0, 12),
+}
+
 for i, (c, p, col, m, label) in enumerate(zip(costs, perfs, colors_scatter, markers, configs)):
     ax.scatter(c, p, c=col, marker=m, s=120, zorder=5, edgecolors='black', linewidth=0.5)
-    offset_x = 0.05 if i != 1 else -0.15
-    offset_y = 30 if i != 4 else -60
-    ax.annotate(label, (c, p), textcoords="offset points", xytext=(15, offset_y),
-                fontsize=9, color=col)
+    ox, oy = label_offsets[label]
+    ax.annotate(label, (c, p), textcoords="offset points", xytext=(ox, oy),
+                fontsize=9, color=col, ha='left')
 
 # Highlight best
 ax.scatter([0.70], [292], c='none', s=250, edgecolors='green', linewidth=2, zorder=6)
-ax.annotate('Best value', xy=(0.70, 292), xytext=(0.3, 100),
+ax.annotate('Best value', xy=(0.70, 292), xytext=(-65, -30),
+            textcoords="offset points",
             fontsize=9, color='green', fontweight='bold',
             arrowprops=dict(arrowstyle='->', color='green', lw=1.5))
 
@@ -125,7 +135,7 @@ ax.set_xlabel('Estimated Cost per Run (USD)')
 ax.set_ylabel('Median Per-Job Time (seconds)')
 ax.set_title('Fig 3. Cost-Performance Tradeoff — nt_prok 82 GB')
 ax.set_xlim(0, 2.5)
-ax.set_ylim(0, 2100)
+ax.set_ylim(0, 2200)
 
 # Legend
 from matplotlib.lines import Line2D
@@ -134,7 +144,7 @@ legend_elements = [
     Line2D([0], [0], marker='o', color='w', markerfacecolor=C_NVME, markersize=10, label='NVMe'),
     Line2D([0], [0], marker='^', color='w', markerfacecolor=C_NFS, markersize=10, label='Blob NFS'),
 ]
-ax.legend(handles=legend_elements, loc='upper right')
+ax.legend(handles=legend_elements, loc='upper left')
 save(fig, 'fig3-cost-performance')
 
 
