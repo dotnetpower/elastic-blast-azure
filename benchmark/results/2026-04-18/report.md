@@ -1,10 +1,10 @@
 # ElasticBLAST Azure Performance Benchmark Report
 
-> Date: 2026-04-18 ~ 2026-04-19
-> Author: Moon Hyuk Choi (moonchoi@microsoft.com)
-> Region: Korea Central
-> ElasticBLAST: 1.5.0 (BLAST+ 2.17.0)
-> Cost basis: Azure pay-as-you-go (standard) pricing
+> **Date**: 2026-04-18 ~ 2026-04-19  
+> **Author**: Moon Hyuk Choi (moonchoi@microsoft.com)  
+> **Region**: Korea Central  
+> **ElasticBLAST**: 1.5.0 (BLAST+ 2.17.0)  
+> **Cost basis**: Azure pay-as-you-go (standard) pricing
 
 ---
 
