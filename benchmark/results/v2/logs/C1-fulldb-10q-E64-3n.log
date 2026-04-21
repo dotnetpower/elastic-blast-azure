@@ -1,0 +1,82 @@
+INFO: Scanning...
+INFO: Login with AzCliCreds succeeded
+INFO: Authenticating to destination using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+
+Job f8e2899c-e196-a44f-56d2-ce105848a6d3 has started
+Log file is located at: /home/moonchoi/.azcopy/f8e2899c-e196-a44f-56d2-ce105848a6d3.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0.1148
+
+
+Job f8e2899c-e196-a44f-56d2-ce105848a6d3 summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Total Number of Bytes Transferred: 28788
+Final Job Status: Completed
+
+INFO: Scanning...
+INFO: Login with AzCliCreds succeeded
+INFO: Authenticating to destination using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+
+Job f8a91cb3-255c-2e48-7042-ed471b8198ef has started
+Log file is located at: /home/moonchoi/.azcopy/f8a91cb3-255c-2e48-7042-ed471b8198ef.log
+
+0.0 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0
+
+
+Job f8a91cb3-255c-2e48-7042-ed471b8198ef summary
+Elapsed Time (Minutes): 0.0667
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Total Number of Bytes Transferred: 5
+Final Job Status: Completed
+
+INFO: Scanning...
+INFO: Login with AzCliCreds succeeded
+INFO: Authenticating to destination using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+
+Job d5db4721-c450-3d46-5e24-cd0b7c4cd316 has started
+Log file is located at: /home/moonchoi/.azcopy/d5db4721-c450-3d46-5e24-cd0b7c4cd316.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0.0135
+
+
+Job d5db4721-c450-3d46-5e24-cd0b7c4cd316 summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Total Number of Bytes Transferred: 3387
+Final Job Status: Completed
+
+[33m[1/5] Writing configuration to https://stgelb.blob.core.windows.net/results/v2/C1-fulldb-10q-E64-3n/job-b829965bb3c44eddbefbaa54d536db13/metadata/elastic-blast-config.json[0m
+[33m get_query_mode: fsize=39191 min_fsize_to_split_on_client=20000000[0m
+[33m Splitting queries into batches[0m
+[33m Upload workfiles[0m

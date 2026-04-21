@@ -1,0 +1,4 @@
+test,status,elapsed_s
+C1-fulldb-10q-E64-2n,PASS,2763
+C2-fulldb-300q-E64-2n,FAIL,7287
+C3-fulldb-1000q-E64-2n,FAIL,7282

@@ -1,0 +1,9 @@
+WARNING: get_latest_dir failed (not needed for custom DB URLs): This request is not authorized to perform this operation.
+RequestId:a714a696-801e-0043-12e1-d06d3b000000
+Time:2026-04-20T16:17:35.3298722Z
+ErrorCode:AuthorizationFailure
+Content: <?xml version="1.0" encoding="utf-8"?><Error><Code>AuthorizationFailure</Code><Message>This request is not authorized to perform this operation.
+RequestId:a714a696-801e-0043-12e1-d06d3b000000
+Time:2026-04-20T16:17:35.3298722Z</Message></Error>
+WARNING: The BLAST database at https://stgelb.blob.core.windows.net/blast-db/core_nt/core_nt does not have a metadata file. We recommend creating and providing a BLAST database metadata file. Benefits include better elastic-blast performance and error checking. Please, see https://www.ncbi.nlm.nih.gov/books/NBK569839/#_usrman_BLAST_feat_BLAST_database_metadat_ and https://blast.ncbi.nlm.nih.gov/doc/elastic-blast/tutorials/create-blastdb-metadata.html for more information and instructions.
+ERROR: Query input https://stgelb.blob.core.windows.net/queries/pathogen-1000.fa is not readable or does not exist

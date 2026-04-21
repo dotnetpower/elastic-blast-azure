@@ -1,0 +1,87 @@
+INFO: Scanning...
+INFO: Login with AzCliCreds succeeded
+INFO: Authenticating to destination using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+
+Job 915cf590-358f-554e-5e32-d637525eb081 has started
+Log file is located at: /home/moonchoi/.azcopy/915cf590-358f-554e-5e32-d637525eb081.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0.1151
+
+
+Job 915cf590-358f-554e-5e32-d637525eb081 summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Total Number of Bytes Transferred: 28791
+Final Job Status: Completed
+
+INFO: Scanning...
+INFO: Login with AzCliCreds succeeded
+INFO: Authenticating to destination using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+
+Job 9cf7d9b7-d0e4-f14e-7fa3-91e6dd36b666 has started
+Log file is located at: /home/moonchoi/.azcopy/9cf7d9b7-d0e4-f14e-7fa3-91e6dd36b666.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0
+
+
+Job 9cf7d9b7-d0e4-f14e-7fa3-91e6dd36b666 summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Total Number of Bytes Transferred: 7
+Final Job Status: Completed
+
+INFO: Scanning...
+INFO: Login with AzCliCreds succeeded
+INFO: Authenticating to destination using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+
+Job 0985c2a9-015d-5940-49ba-2b4fb5344d2d has started
+Log file is located at: /home/moonchoi/.azcopy/0985c2a9-015d-5940-49ba-2b4fb5344d2d.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0.0136
+
+
+Job 0985c2a9-015d-5940-49ba-2b4fb5344d2d summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Total Number of Bytes Transferred: 3390
+Final Job Status: Completed
+
+ERROR: The command "kubectl --context=elb-v2-a apply -f /tmp/tmpjndzt1hc" returned with exit code 1
+The Job "init-ssd-0" is invalid: spec.template: Invalid value: {"labels":{"app":"setup","batch.kubernetes.io/controller-uid":"52ee05a8-18fd-4d53-9ce1-449c6c04e26c","batch.kubernetes.io/job-name":"init-ssd-0","controller-uid":"52ee05a8-18fd-4d53-9ce1-449c6c04e26c","job-name":"init-ssd-0"},"Spec":{"Volumes":[{"Name":"blastdb","HostPath":{"Path":"/workspace","Type":""},"EmptyDir":null,"GCEPersistentDisk":null,"AWSElasticBlockStore":null,"GitRepo":null,"Secret":null,"NFS":null,"ISCSI":null,"Glusterfs":null,"PersistentVolumeClaim":null,"RBD":null,"Quobyte":null,"FlexVolume":null,"Cinder":null,"CephFS":null,"Flocker":null,"DownwardAPI":null,"FC":null,"AzureFile":null,"ConfigMap":null,"VsphereVolume":null,"AzureDisk":null,"PhotonPersistentDisk":null,"Projected":null,"PortworxVolume":null,"ScaleIO":null,"StorageOS":null,"CSI":null,"Ephemeral":null,"Image":null},{"Name":"scripts","HostPath":null,"EmptyDir":null,"GCEPersistentDisk":null,"AWSElasticBlockStore":null,"GitRepo":null,"Secret":null,"NFS":null,"ISCSI":null,"Glusterfs":null,"PersistentVolumeClaim":null,"RBD":null,"Quobyte":null,"FlexVolume":null,"Cinder":null,"CephFS":null,"Flocker":null,"DownwardAPI":null,"FC":null,"AzureFile":null,"ConfigMap":{"Name":"elb-scripts","Items":null,"DefaultMode":493,"Optional":null},"VsphereVolume":null,"AzureDisk":null,"PhotonPersistentDisk":null,"Projected":null,"PortworxVolume":null,"ScaleIO":null,"StorageOS":null,"CSI":null,"Ephemeral":null,"Image":null}],"InitContainers":null,"Containers":[{"Name":"get-blastdb","Image":"elbacr.azurecr.io/ncbi/elb:1.4.0","Command":["/scripts/init-db-download-aks.sh"],"Args":null,"WorkingDir":"/blast/blastdb","Ports":null,"EnvFrom":null,"Env":[{"Name":"BLAST_USAGE_REPORT","Value":"false","ValueFrom":null},{"Name":"ELB_DB","Value":"core_nt","ValueFrom":null},{"Name":"ELB_DB_PATH","Value":"https://stgelb.blob.core.windows.net/blast-db/core_nt/*","ValueFrom":null},{"Name":"ELB_BLASTDB_SRC","Value":"NCBI","ValueFrom":null},{"Name":"ELB_DB_MOL_TYPE","Value":"nucl","ValueFrom":null},{"Name":"ELB_TAXIDLIST","Value":"","ValueFrom":null},{"Name":"ELB_SKIP_DB_VERIFY","Value":"true","ValueFrom":null},{"Name":"STARTUP_DELAY","Value":"30","ValueFrom":null}],"Resources":{"Limits":null,"Requests":null,"Claims":null},"ResizePolicy":null,"RestartPolicy":null,"RestartPolicyRules":null,"VolumeMounts":[{"Name":"blastdb","ReadOnly":false,"RecursiveReadOnly":null,"MountPath":"/blast/blastdb","SubPath":"blast","MountPropagation":null,"SubPathExpr":""},{"Name":"scripts","ReadOnly":true,"RecursiveReadOnly":null,"MountPath":"/scripts","SubPath":"","MountPropagation":null,"SubPathExpr":""}],"VolumeDevices":null,"LivenessProbe":null,"ReadinessProbe":null,"StartupProbe":null,"Lifecycle":null,"TerminationMessagePath":"/dev/termination-log","TerminationMessagePolicy":"File","ImagePullPolicy":"IfNotPresent","SecurityContext":null,"Stdin":false,"StdinOnce":false,"TTY":false},{"Name":"import-query-batches","Image":"elbacr.azurecr.io/ncbi/elasticblast-query-split:0.1.4","Command":["run.sh","-i","None","-o","https://stgelb.blob.core.windows.net/results/v2/A2-fulldb-300q-E32-1n/job-bfc74deb67544816bd4265bcf60ef11a","-b","100000","-c","1","-q","/blast/queries/"],"Args":null,"WorkingDir":"/blast/queries","Ports":null,"EnvFrom":null,"Env":null,"Resources":{"Limits":null,"Requests":null,"Claims":null},"ResizePolicy":null,"RestartPolicy":null,"RestartPolicyRules":null,"VolumeMounts":[{"Name":"blastdb","ReadOnly":false,"RecursiveReadOnly":null,"MountPath":"/blast/queries","SubPath":"queries","MountPropagation":null,"SubPathExpr":""}],"VolumeDevices":null,"LivenessProbe":null,"ReadinessProbe":null,"StartupProbe":null,"Lifecycle":null,"TerminationMessagePath":"/dev/termination-log","TerminationMessagePolicy":"File","ImagePullPolicy":"IfNotPresent","SecurityContext":null,"Stdin":false,"StdinOnce":false,"TTY":false}],"EphemeralContainers":null,"RestartPolicy":"Never","TerminationGracePeriodSeconds":30,"ActiveDeadlineSeconds":null,"DNSPolicy":"ClusterFirst","NodeSelector":{"ordinal":"0"},"ServiceAccountName":"","AutomountServiceAccountToken":null,"NodeName":"","SecurityContext":{"HostNetwork":false,"HostPID":false,"HostIPC":false,"ShareProcessNamespace":null,"HostUsers":null,"SELinuxOptions":null,"WindowsOptions":null,"RunAsUser":null,"RunAsGroup":null,"RunAsNonRoot":null,"SupplementalGroups":null,"SupplementalGroupsPolicy":null,"FSGroup":null,"FSGroupChangePolicy":null,"Sysctls":null,"SeccompProfile":null,"AppArmorProfile":null,"SELinuxChangePolicy":null},"ImagePullSecrets":null,"Hostname":"","Subdomain":"","SetHostnameAsFQDN":null,"Affinity":null,"SchedulerName":"default-scheduler","Tolerations":null,"HostAliases":null,"PriorityClassName":"","Priority":null,"PreemptionPolicy":null,"DNSConfig":null,"ReadinessGates":null,"RuntimeClassName":null,"Overhead":null,"EnableServiceLinks":null,"TopologySpreadConstraints":null,"OS":null,"SchedulingGates":null,"ResourceClaims":null,"Resources":null,"HostnameOverride":null}}: field is immutable
+
+daemonset.apps/create-workspace unchanged
+
+[33m[1/5] Writing configuration to https://stgelb.blob.core.windows.net/results/v2/A2-fulldb-300q-E32-1n/job-bfc74deb67544816bd4265bcf60ef11a/metadata/elastic-blast-config.json[0m
+[33m get_query_mode: fsize=1177280 min_fsize_to_split_on_client=20000000[0m
+[33m Splitting queries into batches[0m
+[33m Upload workfiles[0m

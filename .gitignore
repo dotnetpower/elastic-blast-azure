@@ -52,3 +52,6 @@ docker-openapi/app/elastic-blast.ini
 
 # Internal Korean reference docs (local only)
 docs/improvement-plan-ko.md
+
+# Private benchmark data (may contain customer info)
+benchmark/private/
