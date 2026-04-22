@@ -304,6 +304,8 @@ With sharding, download time (196s) now dominates total wall clock (83%), while 
 
 **Implication**: Further optimization should focus on reducing download time — via persistent nodes (`reuse=true`), DB caching DaemonSets, or Azure NetApp Files pre-mounting.
 
+**Download method optimization**: The current shard download calls `azcopy cp` per file (72+ sequential invocations), achieving only 1.5 Gbps throughput. In contrast, the full-DB reference download uses a single wildcard `azcopy cp ".../*"` call, which azcopy parallelizes internally to achieve 15.1 Gbps. Switching shard downloads to the same wildcard pattern is expected to reduce download time from 196s to **~20s**, bringing total cold wall clock from 236s to **~60s** (BLAST 40s + download 20s). This is a code-level fix (one-line change in the download script), not a storage tier change — Standard_LRS already provides sufficient bandwidth.
+
 ### 6.3 Shard 09 Imbalance
 
 Shard 09 (2 volumes, 5 GB, 6s BLAST) completes 33x faster than shard 03 (9 volumes, 27 GB, 40s). This is expected from the volume distribution (83 ÷ 10 = 8.3 → 8 shards of 9 volumes + 2 shards of... actually 9 shards of 9 + 1 of 2). For production use, a more balanced distribution (e.g., 8 shards of 10 + 1 of 3) or sequence-count-based partitioning would reduce this skew.
