@@ -16,16 +16,20 @@ This benchmark evaluates ElasticBLAST on Azure AKS with the NCBI `core_nt` datab
 
 The principal finding is that **database scan time completely dominates execution**, making query count irrelevant to performance — 10 queries and 300 queries produce identical per-batch BLAST times (~57 min on E64s_v3). Multi-node scale-out delivers **5.2-5.8x speedup** (57 min → 10 min) even for single-batch workloads, confirming super-linear scaling observed in v1 with an even larger database. However, database download overhead (~28 min/node for 269 GB) represents a significant fixed cost, suggesting that **persistent pre-loaded clusters** are essential for production pathogen detection services requiring sub-minute response times.
 
+> **Scope note.** This report covers Axis 1 (SKU scale-up) and Axis 2 (query-based tuning) of `BENCHMARK-PLAN-V2.md` **partially** (27% and 36% coverage respectively). **Axis 3 (multi-request service — reuse, concurrent, autoscale) was not executed.** The warm-cluster / service-mode recommendations are therefore _derived from cold-run data_, not empirically validated. See Section 9 for full scope reconciliation.
+
 ---
 
 ## TL;DR — Customer Recommendations
 
-| Scenario                               | Config                   | BLAST Time  | Wall Clock         | Cost/Run |
-| -------------------------------------- | ------------------------ | ----------- | ------------------ | -------- |
-| **Single pathogen check (10 queries)** | E64s_v3 × 2N, Local SSD  | **~10 min** | ~40 min (cold)     | ~$5.40   |
-| **Full panel (300 queries)**           | E64s_v3 × 2N, Local SSD  | **~10 min** | ~40 min (cold)     | ~$5.40   |
-| **Service mode (warm cluster)**        | E64s_v3 × 2N, reuse=true | **~10 min** | **~10 min** (warm) | ~$1.35   |
-| **Cost-sensitive**                     | E64s_v3 × 1N, Local SSD  | ~57 min     | ~85 min            | ~$5.70   |
+| Scenario                               | Config                   | BLAST Time  | Wall Clock       | Cost/Run |
+| -------------------------------------- | ------------------------ | ----------- | ---------------- | -------- |
+| **Single pathogen check (10 queries)** | E64s_v3 × 2N, Local SSD  | **~10 min** | ~40 min (cold)   | ~$5.40   |
+| **Full panel (300 queries)**           | E64s_v3 × 2N, Local SSD  | **~10 min** | ~40 min (cold)   | ~$5.40   |
+| **Service mode (warm cluster)** †      | E64s_v3 × 2N, reuse=true | ~10 min †   | ~10 min † (warm) | ~$1.35 † |
+| **Cost-sensitive**                     | E64s_v3 × 1N, Local SSD  | ~57 min     | ~85 min          | ~$5.70   |
+
+> † **Estimated, not measured.** Warm-cluster numbers are derived from C1-E64-2N BLAST time (9.8 min) × hourly VM cost, assuming `reuse=true` works cleanly. Empirical validation (Axis 3 of the v2 plan) is pending — see Section 9.1 and Bug #2 (reuse hang).
 
 **Key insight**: Query count (10 vs 300) does NOT affect performance. The 269 GB database scan is the sole bottleneck. Multi-node scaling reduces this from 57 min to 10 min.
 
@@ -51,6 +55,7 @@ The principal finding is that **database scan time completely dominates executio
 | A1 (E64s) | 1     | 57.3 min   | 1.0x     | 269 GB       |
 | C1 (E64s) | 3     | 10.9 min   | **5.2x** | 807 GB       |
 | C1 (E64s) | 2     | 9.8 min    | **5.8x** | 538 GB       |
+| D1 (E48s) | 3     | 10.9 min   | 5.2x     | 807 GB       |
 
 Even with only 1 query batch (no query-level parallelism), multi-node execution achieves **super-linear speedup**. This is because distributing the workload across nodes reduces per-node CPU contention and memory pressure when scanning the 269 GB database.
 
@@ -218,6 +223,7 @@ Since query count does not affect BLAST time (Finding 1), all scenarios produce 
 | A2-E64-1n   | core_nt | 300     | E64s_v3 | 1     | (reuse)  | **57.3 min** | 53.8-60.2   | 93 min     | PASS   |
 | C1-E64-3n   | core_nt | 10      | E64s_v3 | 3     | 29.7 min | **10.9 min** | —           | 47 min     | PASS   |
 | C1-E64-2n   | core_nt | 10      | E64s_v3 | 2     | 30.1 min | **9.8 min**  | —           | 46 min     | PASS   |
+| D1-E48-3n   | core_nt | 10      | E48s_v3 | 3     | 34.0 min | **10.9 min** | —           | 45 min     | PASS   |
 
 \*A1-E32-1n: initial test run on E32s_v3 (before systematic Phase A)
 
@@ -294,6 +300,30 @@ On a single E64s_v3 node (432 GB RAM), loading a 269 GB database leaves only 163
 
 With 2 nodes, each node handles ~6 batches with the full 269 GB DB cached in its 432 GB RAM, eliminating page cache pressure. This explains the >100% scaling efficiency.
 
+### Hypothesis Test: Cheaper VM × More Nodes (D1: E48s × 3N)
+
+To test whether a cheaper VM with more nodes could outperform E64s × 2N on both speed and cost, we ran **D1: E48s_v3 × 3N** (10 queries, core_nt). Hypothesis: 3×48=144 vCPU > 2×64=128 vCPU with lower hourly rate could deliver faster and cheaper execution.
+
+| Dimension           | C1-E64-2N (baseline) | D1-E48-3N            | Winner    |
+| ------------------- | -------------------- | -------------------- | --------- |
+| Total vCPU          | 128                  | 144                  | D1 (+12%) |
+| RAM/node            | 432 GB               | 384 GB               | C1        |
+| VM hourly (×nodes)  | $4.03 × 2 = $8.06/hr | $3.02 × 3 = $9.06/hr | C1        |
+| init-ssd (max/node) | 30.1 min             | 34.0 min             | **C1**    |
+| BLAST time          | **9.8 min**          | 10.9 min             | **C1**    |
+| Wall clock          | 46 min               | 45 min               | ~tie      |
+| Cold cost/run       | ~$6.18               | ~$6.80               | **C1**    |
+| Warm cost/run       | **~$1.34**           | ~$1.65               | **C1**    |
+
+**Hypothesis REJECTED**. E64s × 2N wins on both speed AND cost. Reasons:
+
+1. **Per-node DB download scales with node count**: 3 nodes download 269 GB × 3 = 807 GB (vs 2 × 269 = 538 GB), adding 4 min to init-ssd
+2. **BLAST time identical (~10 min)**: Both configs eliminate the single-node memory pressure; extra vCPU on D1 is wasted since there's only 1 batch per node
+3. **Hourly cost higher**: 3×E48s ($9.06/hr) > 2×E64s ($8.06/hr) despite lower per-VM rate
+4. **Lower RAM headroom**: E48s_v3 has 384 GB (vs 432 GB) — closer to the 269 GB DB size, less page cache margin
+
+**Takeaway**: For this workload, **fewer larger nodes beat more smaller nodes**. The super-linear speedup (Finding 2) comes from eliminating single-node memory contention, not from adding more CPU. Once the DB fits comfortably in per-node RAM, additional nodes add DB-download overhead without speeding up BLAST.
+
 ### Production Architecture Recommendation
 
 For the customer's pathogen detection service, the optimal architecture is:
@@ -315,6 +345,8 @@ For the customer's pathogen detection service, the optimal architecture is:
 └─────────────────────────────────────────────┘
 ```
 
+> **Note**: This architecture is the _target_ state, not an empirically validated one. Actual service readiness depends on (a) fixing the `submit-jobs` reuse hang (Bug #2), and (b) completing Axis 3 tests: warm-submit E2E, concurrent submit, autoscale. Until then, numbers in this block are extrapolations.
+
 ---
 
 ## 8. Bugs Discovered
@@ -333,22 +365,117 @@ For the customer's pathogen detection service, the optimal architecture is:
 
 ## 9. Limitations
 
-1. **Single run per test**: No statistical repetition. Results are single measurements.
-2. **Reuse bug prevented C2/C3 tests**: Multi-query scale-out with 2-3 nodes was not measurable due to ElasticBLAST's cluster reuse bug. However, Finding 1 (query count irrelevant) implies C2/C3 would produce identical BLAST times to C1.
-3. **No taxonomy subset test**: The planned taxonomy-based DB subset test (virus + plasmodium only, ~25 GB) was not executed. This could reduce BLAST time by 10x.
-4. **E32s vs E64s anomaly**: The E32s_v3 single-batch result (25 min) being faster than E64s_v3 (57 min) needs further investigation with controlled experiments.
-5. **No I/O profiling**: Memory pressure hypothesis for super-linear scaling is inferred, not directly measured.
+### 9.1 Scope vs. v2 Benchmark Plan (BENCHMARK-PLAN-V2.md)
+
+The v2 plan defined a **3-axis benchmark** to prove ElasticBLAST Azure production readiness for a near-real-time pathogen detection service. Actual execution covered only Axis 1/2 partially; **Axis 3 (multi-user service) — the core of v2 — was not executed.**
+
+| Axis                              | Planned Tests                                         | Executed                       | Coverage |
+| --------------------------------- | ----------------------------------------------------- | ------------------------------ | -------- |
+| **Axis 1: SKU Scale-Up**          | 11 tests (E32/E48/E64/E96/L32/L64/HB120 × {10q,300q}) | 3 (E64-10q, E64-300q, E48-10q) | **27%**  |
+| **Axis 2: Query-Based Tuning**    | 11 tests (10/50/100/300/1000/3054 q × {1N,3N,5N})     | 4 (10q×{1N,2N,3N}, 300q×1N)    | **36%**  |
+| **Axis 3: Multi-Request Service** | 6 tests (reuse, seq×5, con×3, con×10, burst)          | **0**                          | **0%**   |
+
+**Axis 1 gaps** (8 SKU benchmarks missing):
+
+- **L-series (NVMe)**: L32as_v3, L64as_v3 — highest per-node I/O throughput, critical for DB-bound workloads. Plan assumed NVMe ≥ E-series Local SSD; untested.
+- **HB120rs_v3 (HPC)**: 120 vCPU, Tsai 2021 reference point. Never run.
+- **E48s_v3 × 300q**: D1 tested 10q only; multi-batch behavior on E48s not measured.
+- **E96s_v3**: CPU scale-up ceiling not probed.
+- **Repeated runs**: Plan required 5 iterations/test for statistical confidence; 1 run each was taken.
+
+**Axis 2 gaps** (7 query-scale benchmarks missing):
+
+- `pathogen-50`, `pathogen-100`, `pathogen-1000`, `gut-3054` query sets: never generated or run.
+- 5-node scaling: blocked by ESv3 quota (5×64=320 > 200).
+- **No `recommend_config()` implementation** in `azure_optimizer.py` — planned deliverable unmet.
+
+**Axis 3 gaps** (entire axis = 0%, the v2 _raison d'être_):
+
+- **A3-reuse** (`reuse=true` 2nd-submit E2E): **Not measured.** The "$1.34/run warm" claim in TL;DR is _derived arithmetically_ (10 min × $8.06/hr ÷ 60 min/hr), not observed.
+- **A3-seq5** (5 sequential requests throughput): not measured.
+- **A3-con3 / A3-con10** (concurrent submit feasibility): not tested. Plan notes "ElasticBLAST may not support concurrent submit on same cluster" — unverified assumption remains unverified.
+- **A3-burst** (autoscale 3→5→10 nodes): not tested.
+- **Queue worker** (Azure Queue Storage → elastic-blast submit): planned as new development, not built.
+
+### 9.2 What's Validated vs. What's Estimated
+
+| Claim                                           | Source            | Status        |
+| ----------------------------------------------- | ----------------- | ------------- |
+| Query count (10 vs 300) is irrelevant           | A1 vs A2 measured | **Validated** |
+| E64s × 2N: BLAST ≈ 9.8 min (cold, 10q)          | C1-E64-2N run     | **Validated** |
+| E64s × 3N: BLAST ≈ 10.9 min (cold, 10q)         | C1-E64-3N run     | **Validated** |
+| E48s × 3N: BLAST ≈ 10.9 min (cold, 10q)         | D1 run            | **Validated** |
+| Super-linear speedup (>100% efficiency)         | A1 vs C1 ratio    | **Validated** |
+| DB download ≈ 28-34 min/node for 269 GB         | init-ssd job logs | **Validated** |
+| Warm cluster E2E ≈ 10 min (reuse=true, 2nd run) | Derived           | **Estimated** |
+| Warm cluster cost ≈ $1.34/run                   | Derived from est. | **Estimated** |
+| Concurrent request feasibility                  | —                 | **Unknown**   |
+| Autoscale response < 5 min                      | —                 | **Unknown**   |
+| L-series / HB-series SKU performance            | —                 | **Unknown**   |
+| Query-scale → config recommendation matrix      | Axis 2 partial    | **Unknown**   |
+
+### 9.3 Methodological Limitations
+
+1. **Single run per test**: No statistical repetition. No variance/confidence intervals reported.
+2. **Reuse bug (Bug #2)**: `submit-jobs` hangs on 2nd run on same cluster. This is itself the blocker for Axis 3 — a chicken-and-egg problem that must be fixed before warm-cluster claims can be empirically validated.
+3. **E32s vs E64s anomaly**: E32s_v3 single-batch (25 min) < E64s_v3 (57 min) is counterintuitive and unresolved (ran at different times under different conditions).
+4. **No I/O profiling**: The super-linear-speedup hypothesis (per-node memory pressure) is _inferred_ from timing, not measured via `/proc/diskstats`, `vmstat`, or Azure Monitor disk metrics.
+5. **No taxonomy-subset test**: Planned virus+plasmodium subset (~25 GB, ~10x smaller than core_nt) not executed.
+6. **Scope drift from v1 plan**: v2 switched DB from `nt_prok` (82 GB) to `core_nt` (269 GB) and query set to `pathogen-*`, so direct v1/v2 numeric comparisons are indicative only.
 
 ---
 
-## 10. Future Work
+## 10. Future Work — v2 3-Axis Completion Roadmap
 
-1. **Fix cluster reuse bug**: Investigate why `submit-jobs` hangs on 2nd run. This blocks the production `reuse=true` architecture.
-2. **Taxonomy subset DB**: Create virus + plasmodium subset (~25 GB) and benchmark. Expected: 10x faster than full core_nt.
-3. **E32s vs E64s controlled test**: Run single-batch-only test on both SKUs with identical conditions to resolve the performance anomaly.
-4. **Warm cluster latency**: Measure end-to-end latency with pre-loaded DB (`reuse=true`, skip init-ssd).
-5. **DB sharding**: Test 10-shard distribution across nodes to reduce per-node DB size from 269 GB to 27 GB.
-6. **Concurrent requests**: Test multiple simultaneous `elastic-blast submit` on a warm cluster.
+The highest-value next steps are ordered by impact on unresolved claims.
+
+### 10.1 Priority 1 — Unblock Axis 3 (production-mode validation)
+
+| #   | Task                                       | Depends on | Est. Cost | Blocks                              |
+| --- | ------------------------------------------ | ---------- | --------- | ----------------------------------- |
+| P1  | **Fix reuse `submit-jobs` hang** (Bug #2)  | —          | $0        | All Axis 3; TL;DR warm-cluster row  |
+| P2  | **A3-reuse**: cold+warm E2E 측정 (10q)     | P1         | ~$4       | $1.34/run claim, Section 7 estimate |
+| P3  | **A3-seq5**: 5 sequential warm requests    | P1         | ~$6       | Service throughput number           |
+| P4  | **A3-con3**: concurrent submit feasibility | P1         | ~$3       | Axis 3 assumption unknown           |
+| P5  | **A3-burst**: KEDA/HPA autoscale 3→5→10    | P1, P4     | ~$15      | Service-level scalability           |
+
+### 10.2 Priority 2 — Complete Axis 1 SKU Comparison
+
+| #   | Task                   | SKU                   | Quota                  | Est. Cost |
+| --- | ---------------------- | --------------------- | ---------------------- | --------- |
+| S1  | A1-L32-10 + A1-L32-300 | L32as_v3 (NVMe)       | 100 LSv3 vCPU ✓        | ~$3       |
+| S2  | A1-L64-10 + A1-L64-300 | L64as_v3 (NVMe×2×CPU) | 100 LSv3 → 64 used, OK | ~$4       |
+| S3  | A1-HB-10 + A1-HB-300   | HB120rs_v3 (HPC)      | 0 (need quota req)     | ~$4       |
+| S4  | A1-E96-10              | E96s_v3               | 200 ESv3 ✓             | ~$2       |
+| S5  | A1-E48-300             | E48s_v3               | 200 ESv3 ✓             | ~$2       |
+
+### 10.3 Priority 3 — Complete Axis 2 Query Scaling
+
+| #   | Task                                                   | Preconditions         | Est. Cost |
+| --- | ------------------------------------------------------ | --------------------- | --------- |
+| Q1  | Generate pathogen-50/100/1000 fasta                    | Python script in plan | $0        |
+| Q2  | A2-{50,100,1000}-{1N,3N}                               | best SKU from Axis 1  | ~$10      |
+| Q3  | Implement `recommend_config()` in `azure_optimizer.py` | Q2 analysis           | $0        |
+
+### 10.4 Priority 4 — Scientific Depth
+
+1. **E32s vs E64s controlled replay**: run both SKUs simultaneously with identical config to resolve the 25-min vs 57-min anomaly.
+2. **I/O profiling during BLAST**: `/proc/diskstats` + `vmstat` + Azure Monitor disk metrics → direct evidence for super-linear-speedup hypothesis.
+3. **Taxonomy-subset DB**: 25 GB virus+plasmodium subset; expected 10x speedup.
+4. **DB sharding (partitioned mode)**: 10-shard × N-node layout → per-node DB 27 GB instead of 269 GB.
+5. **Statistical repetition**: 5 runs/test per v2 plan; report medians + 95% CI.
+
+### 10.5 Estimated Total Cost to Complete v2
+
+| Tier               | Tests   | Cost     |
+| ------------------ | ------- | -------- |
+| P1-P5 (Axis 3)     | 5 tests | ~$28     |
+| S1-S5 (Axis 1)     | 5 tests | ~$15     |
+| Q1-Q3 (Axis 2)     | 6 tests | ~$10     |
+| Priority 4 (depth) | ~8 runs | ~$20     |
+| **Total**          | —       | **~$73** |
+
+Well within the original v2 budget of $200/day.
 
 ---
 
@@ -400,11 +527,16 @@ init-pv = 90
 
 ### Expected Results
 
-- **DB download**: ~28 min/node (first run only)
-- **BLAST execution**: ~10 min (2 nodes)
-- **Wall clock** (cold): ~46 min
-- **Wall clock** (warm, reuse): ~10 min
-- **Cost**: ~$6.18 (cold) or ~$1.34 (warm)
+| Phase                           | Time         | Source        |
+| ------------------------------- | ------------ | ------------- |
+| DB download (first run only)    | ~28 min/node | Measured      |
+| BLAST execution (2 nodes, 10q)  | ~10 min      | Measured      |
+| Wall clock (cold)               | ~46 min      | Measured      |
+| Wall clock (warm, `reuse=true`) | ~10 min †    | **Estimated** |
+| Cost (cold)                     | ~$6.18       | Derived       |
+| Cost (warm)                     | ~$1.34 †     | **Estimated** |
+
+> † Warm numbers are arithmetic extrapolations (10 min × $8.06/hr). Empirical warm-cluster measurement (Axis 3 of v2 plan) is pending. See Section 9.
 
 ---
 
@@ -422,7 +554,7 @@ This benchmark establishes the first performance baseline for ElasticBLAST on Az
 
 4. **Seven bugs were discovered**, including init-ssd timeout issues, cluster reuse failures, and storage access configuration problems. The cluster reuse bug (submit-jobs hanging on 2nd run) remains open and blocks the production warm-cluster architecture.
 
-**Practical recommendation**: For the customer's pathogen detection service against core_nt, use **E64s_v3 × 2 nodes with `reuse=true`**. This achieves 10-minute BLAST execution at $1.34/run. Once the cluster reuse bug is fixed, this configuration enables near-real-time pathogen detection with a persistent AKS cluster.
+**Practical recommendation**: For the customer's pathogen detection service against core_nt, use **E64s_v3 × 2 nodes with `reuse=true`**. Cold-run target is 10-minute BLAST at ~$6.18/run; warm-run target is 10-minute E2E at ~$1.34/run. **However, warm-run numbers remain extrapolations until the cluster reuse bug (Bug #2) is fixed and Axis 3 of the v2 plan is executed** (see Section 10.1). Until then, the safest production stance is to provision 2×E64s_v3 and rebuild per-request (cold mode, ~$6.18/run), and plan a follow-up validation sprint to unlock the ~$1.34/run warm-cluster regime.
 
 ---
 

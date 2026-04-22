@@ -52,12 +52,23 @@ class TestDbAlreadyLoaded:
         assert elb._db_already_loaded() is False
 
     def test_returns_false_for_local_ssd(self):
-        """Local SSD mode returns False (can't verify without running a pod)."""
+        """Local SSD mode: returns False when create-workspace DaemonSet is absent."""
         cfg = _make_cfg(reuse=True, dry_run=False, use_local_ssd=True)
         elb = ElasticBlastAzure(cfg)
-        # Mock _get_k8s_ctx to avoid actual cluster connection
-        with patch.object(elb, '_get_k8s_ctx', return_value='test-ctx'):
+        # Mock _kubectl to simulate DaemonSet not found (raises exception)
+        with patch.object(elb, '_get_k8s_ctx', return_value='test-ctx'), \
+             patch('elastic_blast.azure.safe_exec', side_effect=Exception('not found')):
             assert elb._db_already_loaded() is False
+
+    def test_returns_true_for_local_ssd_with_daemonset(self):
+        """Local SSD mode: returns True when create-workspace DaemonSet exists."""
+        cfg = _make_cfg(reuse=True, dry_run=False, use_local_ssd=True)
+        elb = ElasticBlastAzure(cfg)
+        mock_proc = MagicMock()
+        mock_proc.stdout = b'2'
+        with patch.object(elb, '_get_k8s_ctx', return_value='test-ctx'), \
+             patch('elastic_blast.azure.safe_exec', return_value=mock_proc):
+            assert elb._db_already_loaded() is True
 
     def test_returns_true_when_pvc_bound_and_init_succeeded(self):
         """Returns True when PVC is Bound and init-pv job succeeded."""
@@ -218,6 +229,9 @@ class TestInitializeClusterReuse:
         mocker.patch('elastic_blast.azure.check_cluster',
                      return_value=AKS_PROVISIONING_STATE.SUCCEEDED.value)
         mocker.patch.object(elb, '_db_already_loaded', return_value=True)
+        mocker.patch.object(elb, '_get_k8s_ctx', return_value='test-ctx')
+        mocker.patch.object(elb, '_cleanup_stale_jobs')
+        mocker.patch('elastic_blast.azure.kubernetes.create_scripts_configmap')
         mock_upload = mocker.patch.object(elb, '_upload_queries_only')
         mock_start = mocker.patch('elastic_blast.azure.start_cluster')
         mock_storage = mocker.patch('elastic_blast.azure.kubernetes.initialize_storage')

@@ -1,0 +1,1993 @@
+=== Shard 3: Download ===
+INFO: Login with identity succeeded.
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 20de7f0f-f1c8-1940-5bc4-d898871b02a8 has started
+Log file is located at: /root/.azcopy/20de7f0f-f1c8-1940-5bc4-d898871b02a8.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0.0004
+
+
+Job 20de7f0f-f1c8-1940-5bc4-d898871b02a8 summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 99
+Final Job Status: Completed
+
+Volumes: core_nt.27 core_nt.28 core_nt.29 core_nt.30 core_nt.31 core_nt.32 core_nt.33 core_nt.34 core_nt.35
+  Downloading core_nt.27...
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 072d55b7-6dd5-7c40-6d31-f0b2ad7e82de has started
+Log file is located at: /root/.azcopy/072d55b7-6dd5-7c40-6d31-f0b2ad7e82de.log
+
+19.5 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 11996.2619100.0 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total,                                   100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 
+
+
+Job 072d55b7-6dd5-7c40-6d31-f0b2ad7e82de summary
+Elapsed Time (Minutes): 0.1
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 2999993671
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 2f71f850-1723-664f-468f-91be46ce59c2 has started
+Log file is located at: /root/.azcopy/2f71f850-1723-664f-468f-91be46ce59c2.log
+
+100.0 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 1178.0302100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total,                                   
+
+
+Job 2f71f850-1723-664f-468f-91be46ce59c2 summary
+Elapsed Time (Minutes): 0.0667
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 294576128
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 45dba0ab-8a9d-2e4e-6470-5bc4aae859b8 has started
+Log file is located at: /root/.azcopy/45dba0ab-8a9d-2e4e-6470-5bc4aae859b8.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 72.5506
+
+
+Job 45dba0ab-8a9d-2e4e-6470-5bc4aae859b8 summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 18146984
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 9f6ca570-51da-a046-40ff-6d52bde13a8d has started
+Log file is located at: /root/.azcopy/9f6ca570-51da-a046-40ff-6d52bde13a8d.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 53.0162
+
+
+Job 9f6ca570-51da-a046-40ff-6d52bde13a8d summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 13263240
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 2456e56f-23d7-424c-7443-e456298e3316 has started
+Log file is located at: /root/.azcopy/2456e56f-23d7-424c-7443-e456298e3316.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0.2073
+
+
+Job 2456e56f-23d7-424c-7443-e456298e3316 summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 51860
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 99c50e7b-6332-124d-776f-d53a0c01b1d0 has started
+Log file is located at: /root/.azcopy/99c50e7b-6332-124d-776f-d53a0c01b1d0.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 24.189
+
+
+Job 99c50e7b-6332-124d-776f-d53a0c01b1d0 summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 6048988
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+
+Cannot perform copy due to error: The specified file was not found.
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+
+Cannot perform copy due to error: The specified file was not found.
+  Downloading core_nt.28...
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 36cb165d-3c62-d042-6ae4-4ced2d3015f0 has started
+Log file is located at: /root/.azcopy/36cb165d-3c62-d042-6ae4-4ced2d3015f0.log
+
+10.5 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 11989.6501100.0 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total,                                   100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 
+
+
+Job 36cb165d-3c62-d042-6ae4-4ced2d3015f0 summary
+Elapsed Time (Minutes): 0.1001
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 2999999663
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 0fbef2e6-4e5c-e44e-61a3-2ab824b8fbf0 has started
+Log file is located at: /root/.azcopy/0fbef2e6-4e5c-e44e-61a3-2ab824b8fbf0.log
+
+100.0 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 1144.1624100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total,                                   
+
+
+Job 0fbef2e6-4e5c-e44e-61a3-2ab824b8fbf0 summary
+Elapsed Time (Minutes): 0.0667
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 286219111
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 9710fcf5-f548-8142-7004-b2f98d8da9f0 has started
+Log file is located at: /root/.azcopy/9710fcf5-f548-8142-7004-b2f98d8da9f0.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 70.8743
+
+
+Job 9710fcf5-f548-8142-7004-b2f98d8da9f0 summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 17726792
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 11772d03-017e-f34d-6435-2286a91ce27d has started
+Log file is located at: /root/.azcopy/11772d03-017e-f34d-6435-2286a91ce27d.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 51.5198
+
+
+Job 11772d03-017e-f34d-6435-2286a91ce27d summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 12882992
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 8f1dd5a2-f3b7-a74b-7ab5-3a3b964ba493 has started
+Log file is located at: /root/.azcopy/8f1dd5a2-f3b7-a74b-7ab5-3a3b964ba493.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0.2014
+
+
+Job 8f1dd5a2-f3b7-a74b-7ab5-3a3b964ba493 summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 50372
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 28d311eb-0c67-ad46-46c2-304a401e56a9 has started
+Log file is located at: /root/.azcopy/28d311eb-0c67-ad46-46c2-304a401e56a9.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 23.6278
+
+
+Job 28d311eb-0c67-ad46-46c2-304a401e56a9 summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 5908924
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+
+Cannot perform copy due to error: The specified file was not found.
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+
+Cannot perform copy due to error: The specified file was not found.
+  Downloading core_nt.29...
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 030f16e9-906c-1649-7df0-510fa1141aac has started
+Log file is located at: /root/.azcopy/030f16e9-906c-1649-7df0-510fa1141aac.log
+
+1.6 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 11996.2098100.0 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total,                                  100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 
+
+
+Job 030f16e9-906c-1649-7df0-510fa1141aac summary
+Elapsed Time (Minutes): 0.1
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 2999679608
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job b76b9aea-d243-6347-5631-7c7ff3e4e61e has started
+Log file is located at: /root/.azcopy/b76b9aea-d243-6347-5631-7c7ff3e4e61e.log
+
+6.6 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 1148.7862100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total,                                 
+
+
+Job b76b9aea-d243-6347-5631-7c7ff3e4e61e summary
+Elapsed Time (Minutes): 0.0667
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 287282068
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 10853601-e592-b043-7e6f-4b3f7d24ed4d has started
+Log file is located at: /root/.azcopy/10853601-e592-b043-7e6f-4b3f7d24ed4d.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 70.5314
+
+
+Job 10853601-e592-b043-7e6f-4b3f7d24ed4d summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 17636444
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job aac950ed-ba91-5a48-43b7-ce5802783ea2 has started
+Log file is located at: /root/.azcopy/aac950ed-ba91-5a48-43b7-ce5802783ea2.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 51.7387
+
+
+Job aac950ed-ba91-5a48-43b7-ce5802783ea2 summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 12941680
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 7b16c77e-8d79-4e4e-4bf5-f4dee3d28f74 has started
+Log file is located at: /root/.azcopy/7b16c77e-8d79-4e4e-4bf5-f4dee3d28f74.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0.2023
+
+
+Job 7b16c77e-8d79-4e4e-4bf5-f4dee3d28f74 summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 50604
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 93b2fdf9-a587-3543-5637-5321d24288ea has started
+Log file is located at: /root/.azcopy/93b2fdf9-a587-3543-5637-5321d24288ea.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 23.508
+
+
+Job 93b2fdf9-a587-3543-5637-5321d24288ea summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 5878808
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+
+Cannot perform copy due to error: The specified file was not found.
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+
+Cannot perform copy due to error: The specified file was not found.
+  Downloading core_nt.30...
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 45732610-6834-c541-70ca-2457ef3f1fd9 has started
+Log file is located at: /root/.azcopy/45732610-6834-c541-70ca-2457ef3f1fd9.log
+
+10.5 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 11997.267100.0 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total,                                  100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 
+
+
+Job 45732610-6834-c541-70ca-2457ef3f1fd9 summary
+Elapsed Time (Minutes): 0.1
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 2999999423
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 9659c133-5080-d147-4b9b-3f8b71aa143f has started
+Log file is located at: /root/.azcopy/9659c133-5080-d147-4b9b-3f8b71aa143f.log
+
+10.7 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 1202.4909100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total,                                  
+
+
+Job 9659c133-5080-d147-4b9b-3f8b71aa143f summary
+Elapsed Time (Minutes): 0.0667
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 300748085
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 06b7058f-5044-ba43-5967-26219b5857df has started
+Log file is located at: /root/.azcopy/06b7058f-5044-ba43-5967-26219b5857df.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 73.2762
+
+
+Job 06b7058f-5044-ba43-5967-26219b5857df summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 18328160
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 32d00641-76a6-e547-7211-332468c6b811 has started
+Log file is located at: /root/.azcopy/32d00641-76a6-e547-7211-332468c6b811.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 54.1936
+
+
+Job 32d00641-76a6-e547-7211-332468c6b811 summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 13557640
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job f2ac946d-ed80-e542-766d-f9c096bb7dce has started
+Log file is located at: /root/.azcopy/f2ac946d-ed80-e542-766d-f9c096bb7dce.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0.2118
+
+
+Job f2ac946d-ed80-e542-766d-f9c096bb7dce summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 53004
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 6c5994b6-9af8-6045-7d43-da64aa61e039 has started
+Log file is located at: /root/.azcopy/6c5994b6-9af8-6045-7d43-da64aa61e039.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 24.4271
+
+
+Job 6c5994b6-9af8-6045-7d43-da64aa61e039 summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 6109380
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+
+Cannot perform copy due to error: The specified file was not found.
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+
+Cannot perform copy due to error: The specified file was not found.
+  Downloading core_nt.31...
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job b3ef532d-3687-6645-60e1-c557acaedf3d has started
+Log file is located at: /root/.azcopy/b3ef532d-3687-6645-60e1-c557acaedf3d.log
+
+10.3 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 11965.6589100.0 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total,                                   100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 
+
+
+Job b3ef532d-3687-6645-60e1-c557acaedf3d summary
+Elapsed Time (Minutes): 0.1
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 2992101627
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 3a8073ad-131a-f94d-5ead-2ad2ccca5904 has started
+Log file is located at: /root/.azcopy/3a8073ad-131a-f94d-5ead-2ad2ccca5904.log
+
+7.4 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 1159.0823100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total,                                 
+
+
+Job 3a8073ad-131a-f94d-5ead-2ad2ccca5904 summary
+Elapsed Time (Minutes): 0.0667
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 289832985
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job c99af98c-4e62-7f48-7a5b-acdbbd2f7cbe has started
+Log file is located at: /root/.azcopy/c99af98c-4e62-7f48-7a5b-acdbbd2f7cbe.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 70.8982
+
+
+Job c99af98c-4e62-7f48-7a5b-acdbbd2f7cbe summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 17734112
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 31b18e1f-1bb3-8e41-61b9-0f6c88867b21 has started
+Log file is located at: /root/.azcopy/31b18e1f-1bb3-8e41-61b9-0f6c88867b21.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 52.1771
+
+
+Job 31b18e1f-1bb3-8e41-61b9-0f6c88867b21 summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 13052304
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job b6570ce0-e727-1048-6033-826aaa95296b has started
+Log file is located at: /root/.azcopy/b6570ce0-e727-1048-6033-826aaa95296b.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0.204
+
+
+Job b6570ce0-e727-1048-6033-826aaa95296b summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 51036
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job d1543925-d0b6-cd48-79df-ef0cd3824c27 has started
+Log file is located at: /root/.azcopy/d1543925-d0b6-cd48-79df-ef0cd3824c27.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 23.6329
+
+
+Job d1543925-d0b6-cd48-79df-ef0cd3824c27 summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 5911364
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+
+Cannot perform copy due to error: The specified file was not found.
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+
+Cannot perform copy due to error: The specified file was not found.
+  Downloading core_nt.32...
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 88c42df2-e401-024d-78fe-5784abd249b5 has started
+Log file is located at: /root/.azcopy/88c42df2-e401-024d-78fe-5784abd249b5.log
+
+0.9 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 11914.2525100.0 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total,                                  100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 
+
+
+Job 88c42df2-e401-024d-78fe-5784abd249b5 summary
+Elapsed Time (Minutes): 0.1
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 2979216395
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 0a41aef2-d030-5748-69e9-38adef0010c0 has started
+Log file is located at: /root/.azcopy/0a41aef2-d030-5748-69e9-38adef0010c0.log
+
+100.0 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 1141.739100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total,                                  
+
+
+Job 0a41aef2-d030-5748-69e9-38adef0010c0 summary
+Elapsed Time (Minutes): 0.0667
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 285614617
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job fb2e62ec-1585-5741-630e-b3ffe94bd123 has started
+Log file is located at: /root/.azcopy/fb2e62ec-1585-5741-630e-b3ffe94bd123.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 70.0383
+
+
+Job fb2e62ec-1585-5741-630e-b3ffe94bd123 summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 17516036
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 0e76291b-ea4f-204c-654e-0afd34352636 has started
+Log file is located at: /root/.azcopy/0e76291b-ea4f-204c-654e-0afd34352636.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 51.4051
+
+
+Job 0e76291b-ea4f-204c-654e-0afd34352636 summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 12856384
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 7f6d9dd6-6942-5747-55cf-0a1177a3bc06 has started
+Log file is located at: /root/.azcopy/7f6d9dd6-6942-5747-55cf-0a1177a3bc06.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0.2009
+
+
+Job 7f6d9dd6-6942-5747-55cf-0a1177a3bc06 summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 50268
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job dad14074-25c6-9142-6a99-f17b4331a2c2 has started
+Log file is located at: /root/.azcopy/dad14074-25c6-9142-6a99-f17b4331a2c2.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 23.3378
+
+
+Job dad14074-25c6-9142-6a99-f17b4331a2c2 summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 5838672
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+
+Cannot perform copy due to error: The specified file was not found.
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+
+Cannot perform copy due to error: The specified file was not found.
+  Downloading core_nt.33...
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 6975c439-fa59-f64d-48a1-b659406d4873 has started
+Log file is located at: /root/.azcopy/6975c439-fa59-f64d-48a1-b659406d4873.log
+
+10.0 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 11921.9135100.0 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total,                                   100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 
+
+
+Job 6975c439-fa59-f64d-48a1-b659406d4873 summary
+Elapsed Time (Minutes): 0.1
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 2981083268
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 2bbad0e3-0f17-2345-44f6-c72de6d720c8 has started
+Log file is located at: /root/.azcopy/2bbad0e3-0f17-2345-44f6-c72de6d720c8.log
+
+7.8 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 1164.2392100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total,                                 
+
+
+Job 2bbad0e3-0f17-2345-44f6-c72de6d720c8 summary
+Elapsed Time (Minutes): 0.0667
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 291155133
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 930d459e-793c-2f49-6d57-e3c24e44eb7c has started
+Log file is located at: /root/.azcopy/930d459e-793c-2f49-6d57-e3c24e44eb7c.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 71.5757
+
+
+Job 930d459e-793c-2f49-6d57-e3c24e44eb7c summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 17904692
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job bc7d8196-1d25-5544-65f5-ec175bfd07c5 has started
+Log file is located at: /root/.azcopy/bc7d8196-1d25-5544-65f5-ec175bfd07c5.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 52.3549
+
+
+Job bc7d8196-1d25-5544-65f5-ec175bfd07c5 summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 13096984
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job ad4dd234-d95d-ad40-4a7e-dcc11c6464cf has started
+Log file is located at: /root/.azcopy/ad4dd234-d95d-ad40-4a7e-dcc11c6464cf.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0.2048
+
+
+Job ad4dd234-d95d-ad40-4a7e-dcc11c6464cf summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 51212
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 1061c7a9-de46-5444-6053-28ce50b3282b has started
+Log file is located at: /root/.azcopy/1061c7a9-de46-5444-6053-28ce50b3282b.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 23.8628
+
+
+Job 1061c7a9-de46-5444-6053-28ce50b3282b summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 5968224
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+
+Cannot perform copy due to error: The specified file was not found.
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+
+Cannot perform copy due to error: The specified file was not found.
+  Downloading core_nt.34...
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job fbc0daad-0eb7-d648-5d16-f809ba9e6f0b has started
+Log file is located at: /root/.azcopy/fbc0daad-0eb7-d648-5d16-f809ba9e6f0b.log
+
+1.6 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 11997.1301100.0 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total,                                  100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 
+
+
+Job fbc0daad-0eb7-d648-5d16-f809ba9e6f0b summary
+Elapsed Time (Minutes): 0.1
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 2999963973
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 1bf76539-30de-5d4d-7e19-7a0769994c57 has started
+Log file is located at: /root/.azcopy/1bf76539-30de-5d4d-7e19-7a0769994c57.log
+
+100.0 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 1181.4307100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total,                                   
+
+
+Job 1bf76539-30de-5d4d-7e19-7a0769994c57 summary
+Elapsed Time (Minutes): 0.0667
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 295452357
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 977d6dd9-20f7-ba41-48ad-19010713b469 has started
+Log file is located at: /root/.azcopy/977d6dd9-20f7-ba41-48ad-19010713b469.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 72.7484
+
+
+Job 977d6dd9-20f7-ba41-48ad-19010713b469 summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 18194324
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 1b082583-2f0e-0647-7d8b-0fe0e1a300b3 has started
+Log file is located at: /root/.azcopy/1b082583-2f0e-0647-7d8b-0fe0e1a300b3.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 53.1941
+
+
+Job 1b082583-2f0e-0647-7d8b-0fe0e1a300b3 summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 13301176
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 0e310b2a-ed36-6b4a-47f9-a1fd12c2664d has started
+Log file is located at: /root/.azcopy/0e310b2a-ed36-6b4a-47f9-a1fd12c2664d.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0.2078
+
+
+Job 0e310b2a-ed36-6b4a-47f9-a1fd12c2664d summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 52004
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job c228fb37-f905-e842-51fa-87a5f5a0f413 has started
+Log file is located at: /root/.azcopy/c228fb37-f905-e842-51fa-87a5f5a0f413.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 24.2442
+
+
+Job c228fb37-f905-e842-51fa-87a5f5a0f413 summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 6064768
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+
+Cannot perform copy due to error: The specified file was not found.
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+
+Cannot perform copy due to error: The specified file was not found.
+  Downloading core_nt.35...
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 48061e13-6f83-cd4f-75b9-2b949197ef17 has started
+Log file is located at: /root/.azcopy/48061e13-6f83-cd4f-75b9-2b949197ef17.log
+
+1.5 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 11992.9617100.0 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total,                                  100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 
+
+
+Job 48061e13-6f83-cd4f-75b9-2b949197ef17 summary
+Elapsed Time (Minutes): 0.1
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 2998898802
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 2eb15220-6c49-bd47-6633-87e1ed7f1aeb has started
+Log file is located at: /root/.azcopy/2eb15220-6c49-bd47-6633-87e1ed7f1aeb.log
+
+100.0 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 1136.2005100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total,                                   
+
+
+Job 2eb15220-6c49-bd47-6633-87e1ed7f1aeb summary
+Elapsed Time (Minutes): 0.0667
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 284133495
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 185197d1-efb0-e442-4a47-42b764e41798 has started
+Log file is located at: /root/.azcopy/185197d1-efb0-e442-4a47-42b764e41798.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 69.9455
+
+
+Job 185197d1-efb0-e442-4a47-42b764e41798 summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 17492516
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job def9c365-e1ba-7943-7306-d77ccaba7776 has started
+Log file is located at: /root/.azcopy/def9c365-e1ba-7943-7306-d77ccaba7776.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 51.127
+
+
+Job def9c365-e1ba-7943-7306-d77ccaba7776 summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 12788224
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job d848cbfe-d487-e64c-444d-0c8bc6ab7ad0 has started
+Log file is located at: /root/.azcopy/d848cbfe-d487-e64c-444d-0c8bc6ab7ad0.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0.1999
+
+
+Job d848cbfe-d487-e64c-444d-0c8bc6ab7ad0 summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 50004
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 36e6ee77-23c7-054d-66b0-0ffeb3df160d has started
+Log file is located at: /root/.azcopy/36e6ee77-23c7-054d-66b0-0ffeb3df160d.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 23.3152
+
+
+Job 36e6ee77-23c7-054d-66b0-0ffeb3df160d summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 5830832
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+
+Cannot perform copy due to error: The specified file was not found.
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+
+Cannot perform copy due to error: The specified file was not found.
+Volume paths: /workspace/blastdb/core_nt.27 /workspace/blastdb/core_nt.28 /workspace/blastdb/core_nt.29 /workspace/blastdb/core_nt.30 /workspace/blastdb/core_nt.31 /workspace/blastdb/core_nt.32 /workspace/blastdb/core_nt.33 /workspace/blastdb/core_nt.34 /workspace/blastdb/core_nt.35
+  Downloading taxdb.btd...
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 0ad3c183-015b-ca40-469d-2cbc37c59d41 has started
+Log file is located at: /root/.azcopy/0ad3c183-015b-ca40-469d-2cbc37c59d41.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 700.6987
+
+
+Job 0ad3c183-015b-ca40-469d-2cbc37c59d41 summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 175247759
+Final Job Status: Completed
+
+  Downloading taxdb.bti...
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 8840b0c3-7251-0945-61b1-3452f04864cd has started
+Log file is located at: /root/.azcopy/8840b0c3-7251-0945-61b1-3452f04864cd.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 73.155
+
+
+Job 8840b0c3-7251-0945-61b1-3452f04864cd summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 18294288
+Final Job Status: Completed
+
+  Downloading core_nt.ndb...
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job eae22bfe-aa67-c54f-622a-5040f646b6db has started
+Log file is located at: /root/.azcopy/eae22bfe-aa67-c54f-622a-5040f646b6db.log
+
+0.0 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 25757.193876.3 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total,                                   91.6 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 2364.0872100.0 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total,                                  100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 
+
+
+Job eae22bfe-aa67-c54f-622a-5040f646b6db summary
+Elapsed Time (Minutes): 0.1667
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 7033520128
+Final Job Status: Completed
+
+  Downloading core_nt.ntf...
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 7b3092b5-d291-3642-46af-176c457c4c42 has started
+Log file is located at: /root/.azcopy/7b3092b5-d291-3642-46af-176c457c4c42.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 772.8084
+
+
+Job 7b3092b5-d291-3642-46af-176c457c4c42 summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 193339392
+Final Job Status: Completed
+
+  Downloading core_nt.nto...
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job e5a54cde-073b-b849-7006-525310df7f12 has started
+Log file is located at: /root/.azcopy/e5a54cde-073b-b849-7006-525310df7f12.log
+
+100.0 %, 0 Done, 0 Failed, 1 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 2041.1176100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total,                                   
+
+
+Job e5a54cde-073b-b849-7006-525310df7f12 summary
+Elapsed Time (Minutes): 0.0667
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 510533492
+Final Job Status: Completed
+
+RUNTIME download-shard-3 195 seconds
+DB files: 9 nsq volumes
+INFO: Autologin not specified.
+INFO: Authenticating to source using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 4b5a1c61-ef1e-504d-5eb7-cba7c891937a has started
+Log file is located at: /root/.azcopy/4b5a1c61-ef1e-504d-5eb7-cba7c891937a.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0.1567
+
+
+Job 4b5a1c61-ef1e-504d-5eb7-cba7c891937a summary
+Elapsed Time (Minutes): 0.0333
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 39191
+Final Job Status: Completed
+
+Query: 10 sequences
+=== Shard 3: BLAST ===
+RUNTIME blast-shard-3 40 seconds
+HITS shard-3 6977
+INFO: Autologin not specified.
+INFO: Authenticating to destination using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job 68d65de4-df36-a14c-4342-91e3c3e83a8b has started
+Log file is located at: /root/.azcopy/68d65de4-df36-a14c-4342-91e3c3e83a8b.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0.3559
+
+
+Job 68d65de4-df36-a14c-4342-91e3c3e83a8b summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 89013
+Final Job Status: Completed
+
+INFO: Autologin not specified.
+INFO: Authenticating to destination using Azure AD
+INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+INFO: Scanning...
+
+Job f44d1444-d558-8f41-6fde-5459ff15d638 has started
+Log file is located at: /root/.azcopy/f44d1444-d558-8f41-6fde-5459ff15d638.log
+
+100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0.0002
+
+
+Job f44d1444-d558-8f41-6fde-5459ff15d638 summary
+Elapsed Time (Minutes): 0.0334
+Number of File Transfers: 1
+Number of Folder Property Transfers: 0
+Number of Symlink Transfers: 0
+Total Number of Transfers: 1
+Number of File Transfers Completed: 1
+Number of Folder Transfers Completed: 0
+Number of File Transfers Failed: 0
+Number of Folder Transfers Failed: 0
+Number of File Transfers Skipped: 0
+Number of Folder Transfers Skipped: 0
+Number of Symbolic Links Skipped: 0
+Number of Hardlinks Converted: 0
+Number of Hardlinks Skipped: 0
+Number of Special Files Skipped: 0
+Total Number of Bytes Transferred: 58
+Final Job Status: Completed
+
+
+=== SUMMARY shard-3 ===
+  Download: 195s
+  BLAST:    40s
+  Hits:     6977
+  Total:    237s
+SHARD_COMPLETE 3

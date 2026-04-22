@@ -1,11 +1,65 @@
 # ElasticBLAST Azure Benchmark Plan v2 — Production Readiness
 
 > **Created**: 2026-04-20
+> **Last updated**: 2026-04-22
 > **Author**: Moon Hyuk Choi (moonchoi@microsoft.com)
 > **Budget**: $200/day max
 > **Region**: Korea Central
 > **Baseline**: [Benchmark v1 Report](results/2026-04-18/report.md) (storage + scaling, completed 2026-04-18)
 > **Customer context**: Pathogen detection service — 3 pathogens (SARS-CoV-2, MPXV, P. falciparum), 1-300 queries/request, multi-user
+
+---
+
+## 0. Execution Status (2026-04-22)
+
+> This section tracks real progress against the plan. See [results/v2/report.md §9](results/v2/report.md#9-limitations) for full scope reconciliation.
+
+### Axis Coverage
+
+| Axis                              | Planned | Executed | Coverage | Status       |
+| --------------------------------- | ------- | -------- | -------- | ------------ |
+| **Axis 1: SKU Scale-Up**          | 11      | 3        | **27%**  | Partial      |
+| **Axis 2: Query-Based Tuning**    | 11      | 4        | **36%**  | Partial      |
+| **Axis 3: Multi-Request Service** | 6       | **0**    | **0%**   | **Not done** |
+
+### Executed Tests
+
+| Test ID    | Axis | VM      | Nodes | Queries | BLAST Time | Date       | Result    |
+| ---------- | ---- | ------- | ----- | ------- | ---------- | ---------- | --------- |
+| A1-E32-10  | 1    | E32s_v3 | 1     | 10      | 25.1 min   | 2026-04-20 | PASS      |
+| A1-E64-10  | 1    | E64s_v3 | 1     | 10      | 57.3 min   | 2026-04-20 | PASS      |
+| A2-E64-300 | 2    | E64s_v3 | 1     | 300     | 57.3 min   | 2026-04-20 | PASS      |
+| C1-E64-3N  | 2    | E64s_v3 | 3     | 10      | 10.9 min   | 2026-04-20 | PASS      |
+| C1-E64-2N  | 2    | E64s_v3 | 2     | 10      | 9.8 min    | 2026-04-20 | PASS      |
+| D1-E48-3N  | 1    | E48s_v3 | 3     | 10      | 10.9 min   | 2026-04-21 | PASS      |
+| C2-E64-\*  | 2    | E64s_v3 | 2,3   | 300     | —          | 2026-04-20 | FAIL (#2) |
+| C3-E64-\*  | 2    | E64s_v3 | 2,3   | 1000    | —          | 2026-04-20 | FAIL (#2) |
+
+### Critical Gaps (Axis 3 — the v2 _raison d'être_)
+
+| Test ID  | Purpose                                     | Blocker                |
+| -------- | ------------------------------------------- | ---------------------- |
+| A3-reuse | warm-cluster E2E, validates $1.34/run claim | Bug #2 (reuse hang)    |
+| A3-seq5  | sustained throughput                        | Bug #2                 |
+| A3-con3  | concurrent submit feasibility               | Unverified + Bug #2    |
+| A3-con10 | max concurrent load                         | Bug #2                 |
+| A3-burst | autoscale 3→5→10 node reaction              | Bug #2 + no KEDA setup |
+
+**Bug #2 — reuse hang**: `submit-jobs` pod hangs on the 2nd `elastic-blast submit` to a cluster where init-ssd already completed. This is the single blocker for all Axis 3 tests. **Until fixed, the warm-cluster production mode is an unvalidated extrapolation.**
+
+### Axis 1 Gaps (SKU comparison)
+
+| SKU        | Status  | Reason                                                 |
+| ---------- | ------- | ------------------------------------------------------ |
+| L32as_v3   | Not run | LSv3 quota 100 vCPU available ✓, needs new cluster     |
+| L64as_v3   | Not run | LSv3 quota 100 vCPU (exactly fits 1×64), needs cluster |
+| HB120rs_v3 | Not run | HBrsv3 quota = 0 (SKU request required)                |
+| E96s_v3    | Not run | ESv3 quota OK, not prioritized                         |
+| E48s-300q  | Not run | D1 covered 10q only                                    |
+
+### Repetition / Statistical Confidence
+
+Plan called for **5 runs per test**. Every executed test ran **1 time only**. No variance or confidence intervals can be reported.
 
 ---
 

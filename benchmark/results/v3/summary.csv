@@ -1,0 +1,5 @@
+test_id,status,exit_code,elapsed_seconds
+B2-broad-E64-1N,DRY_RUN,0,0
+B2-pathogen-E16-1N,DRY_RUN,0,0
+B2-pathogen-E64-1N,DRY_RUN,0,0
+B2-virus-E64-1N,DRY_RUN,0,0

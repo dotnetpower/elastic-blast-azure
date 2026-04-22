@@ -1,0 +1,1219 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\",\"kind\":\"Job\",\"metadata\":{\"annotations\":{},\"labels\":{\"app\":\"shard-blast\",\"shard\":\"00\"},\"name\":\"shard-blast-00\",\"namespace\":\"default\"},\"spec\":{\"activeDeadlineSeconds\":7200,\"backoffLimit\":1,\"template\":{\"metadata\":{\"labels\":{\"app\":\"shard-blast\",\"shard\":\"00\"}},\"spec\":{\"containers\":[{\"args\":[\"set -eo pipefail\\nSHARD_IDX=0\\nSHARD_NAME=core_nt_shard_00\\nDB_DIR=/workspace/blastdb\\nQUERY_DIR=/workspace/queries\\nRESULTS_DIR=/workspace/results\\nmkdir -p $DB_DIR $QUERY_DIR $RESULTS_DIR\\n\\necho \\\"=== Shard $SHARD_IDX: Download ===\\\"\\nSTART_DL=$(date +%s)\\n\\n# Auth\\nazcopy login --identity 2\\u003e/dev/null || echo \\\"azcopy login warning\\\"\\n\\n# Download manifest\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_00/core_nt_shard_00.manifest\\\"               /tmp/manifest.txt --log-level=WARNING 2\\u003e/dev/null\\nVOLUMES=$(cat /tmp/manifest.txt)\\necho \\\"Volumes: $VOLUMES\\\"\\n\\n# Download each volume\\nfor VOL in $VOLUMES; do\\n    echo \\\"  Downloading $VOL...\\\"\\n    for EXT in nsq nhr nin nnd nni nog nos not; do\\n        azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\\\" \\\"${DB_DIR}/${VOL}.${EXT}\\\"                       --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\n    done\\ndone\\n\\n# Build space-separated volume list for direct BLAST -db usage\\n# (bypasses .nal alias file entirely)\\nVOLPATHS=\\\"\\\"\\nfor VOL in $VOLUMES; do\\n    [ -n \\\"$VOLPATHS\\\" ] \\u0026\\u0026 VOLPATHS=\\\"$VOLPATHS \\\"\\n    VOLPATHS=\\\"${VOLPATHS}${DB_DIR}/${VOL}\\\"\\ndone\\necho \\\"Volume paths: $VOLPATHS\\\"\\n\\n# Download taxonomy support files\\n# core_nt.ndb (6.5 GB), .ntf (185 MB), .nto (487 MB) + taxdb\\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\\n    echo \\\"  Downloading $F...\\\"\\n    azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\\\" \\\"${DB_DIR}/${F}\\\"                   --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\ndone\\n\\nEND_DL=$(date +%s)\\nDL_TIME=$((END_DL - START_DL))\\necho \\\"RUNTIME download-shard-${SHARD_IDX} ${DL_TIME} seconds\\\"\\necho \\\"DB files: $(ls ${DB_DIR}/*.nsq 2\\u003e/dev/null | wc -l) nsq volumes\\\"\\n\\n# Download query\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/queries/pathogen-10.fa\\\" \\\"${QUERY_DIR}/query.fa\\\"               --log-level=WARNING 2\\u003e/dev/null\\necho \\\"Query: $(grep -c '^\\u003e' ${QUERY_DIR}/query.fa) sequences\\\"\\n\\necho \\\"=== Shard $SHARD_IDX: BLAST ===\\\"\\nSTART_BL=$(date +%s)\\n\\nblastn -db \\\"$VOLPATHS\\\"               -query \\\"${QUERY_DIR}/query.fa\\\"               -max_target_seqs 500 -evalue 0.05               -word_size 28 -dust yes -soft_masking true               -outfmt 7               -dbsize 978954058562               -num_threads $(nproc)               -out \\\"${RESULTS_DIR}/shard_00.out\\\" 2\\u003e\\u00261\\n\\nEND_BL=$(date +%s)\\nBL_TIME=$((END_BL - START_BL))\\nHITS=$(grep -vc '^#' \\\"${RESULTS_DIR}/shard_00.out\\\" 2\\u003e/dev/null || echo 0)\\necho \\\"RUNTIME blast-shard-${SHARD_IDX} ${BL_TIME} seconds\\\"\\necho \\\"HITS shard-${SHARD_IDX} ${HITS}\\\"\\n\\n# Compress and upload results\\ngzip -f \\\"${RESULTS_DIR}/shard_00.out\\\"\\nazcopy cp \\\"${RESULTS_DIR}/shard_00.out.gz\\\"               \\\"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_00.out.gz\\\"               --log-level=WARNING 2\\u003e/dev/null || true\\n\\n# Write timing summary\\necho \\\"{\\\\\\\"shard\\\\\\\":0,\\\\\\\"download_sec\\\\\\\":${DL_TIME},\\\\\\\"blast_sec\\\\\\\":${BL_TIME},\\\\\\\"hits\\\\\\\":${HITS}}\\\"               \\u003e \\\"${RESULTS_DIR}/timing.json\\\"\\nazcopy cp \\\"${RESULTS_DIR}/timing.json\\\"               \\\"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_00_timing.json\\\"               --log-level=WARNING 2\\u003e/dev/null || true\\n\\nTOTAL=$((END_BL - START_DL))\\necho \\\"\\\"\\necho \\\"=== SUMMARY shard-${SHARD_IDX} ===\\\"\\necho \\\"  Download: ${DL_TIME}s\\\"\\necho \\\"  BLAST:    ${BL_TIME}s\\\"\\necho \\\"  Hits:     ${HITS}\\\"\\necho \\\"  Total:    ${TOTAL}s\\\"\\necho \\\"SHARD_COMPLETE ${SHARD_IDX}\\\"\\n\"],\"command\":[\"/bin/bash\",\"-c\"],\"image\":\"elbacr.azurecr.io/ncbi/elb:1.4.0\",\"name\":\"blast\",\"resources\":{\"limits\":{\"cpu\":\"15\",\"memory\":\"110Gi\"},\"requests\":{\"cpu\":\"8\",\"memory\":\"80Gi\"}},\"volumeMounts\":[{\"mountPath\":\"/workspace\",\"name\":\"workspace\"}]}],\"nodeName\":\"aks-nodepool1-16591338-vmss000000\",\"restartPolicy\":\"Never\",\"volumes\":[{\"hostPath\":{\"path\":\"/mnt/workspace-shard-00\",\"type\":\"DirectoryOrCreate\"},\"name\":\"workspace\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-04-22T04:08:53Z",
+                "generation": 1,
+                "labels": {
+                    "app": "shard-blast",
+                    "shard": "00"
+                },
+                "name": "shard-blast-00",
+                "namespace": "default",
+                "resourceVersion": "17699",
+                "uid": "db7f5923-a5d8-4bbd-becd-a6fc416825c4"
+            },
+            "spec": {
+                "activeDeadlineSeconds": 7200,
+                "backoffLimit": 1,
+                "completionMode": "NonIndexed",
+                "completions": 1,
+                "manualSelector": false,
+                "parallelism": 1,
+                "podReplacementPolicy": "TerminatingOrFailed",
+                "selector": {
+                    "matchLabels": {
+                        "batch.kubernetes.io/controller-uid": "db7f5923-a5d8-4bbd-becd-a6fc416825c4"
+                    }
+                },
+                "suspend": false,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "shard-blast",
+                            "batch.kubernetes.io/controller-uid": "db7f5923-a5d8-4bbd-becd-a6fc416825c4",
+                            "batch.kubernetes.io/job-name": "shard-blast-00",
+                            "controller-uid": "db7f5923-a5d8-4bbd-becd-a6fc416825c4",
+                            "job-name": "shard-blast-00",
+                            "shard": "00"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "set -eo pipefail\nSHARD_IDX=0\nSHARD_NAME=core_nt_shard_00\nDB_DIR=/workspace/blastdb\nQUERY_DIR=/workspace/queries\nRESULTS_DIR=/workspace/results\nmkdir -p $DB_DIR $QUERY_DIR $RESULTS_DIR\n\necho \"=== Shard $SHARD_IDX: Download ===\"\nSTART_DL=$(date +%s)\n\n# Auth\nazcopy login --identity 2\u003e/dev/null || echo \"azcopy login warning\"\n\n# Download manifest\nazcopy cp \"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_00/core_nt_shard_00.manifest\"               /tmp/manifest.txt --log-level=WARNING 2\u003e/dev/null\nVOLUMES=$(cat /tmp/manifest.txt)\necho \"Volumes: $VOLUMES\"\n\n# Download each volume\nfor VOL in $VOLUMES; do\n    echo \"  Downloading $VOL...\"\n    for EXT in nsq nhr nin nnd nni nog nos not; do\n        azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\" \"${DB_DIR}/${VOL}.${EXT}\"                       --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\n    done\ndone\n\n# Build space-separated volume list for direct BLAST -db usage\n# (bypasses .nal alias file entirely)\nVOLPATHS=\"\"\nfor VOL in $VOLUMES; do\n    [ -n \"$VOLPATHS\" ] \u0026\u0026 VOLPATHS=\"$VOLPATHS \"\n    VOLPATHS=\"${VOLPATHS}${DB_DIR}/${VOL}\"\ndone\necho \"Volume paths: $VOLPATHS\"\n\n# Download taxonomy support files\n# core_nt.ndb (6.5 GB), .ntf (185 MB), .nto (487 MB) + taxdb\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\n    echo \"  Downloading $F...\"\n    azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\" \"${DB_DIR}/${F}\"                   --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\ndone\n\nEND_DL=$(date +%s)\nDL_TIME=$((END_DL - START_DL))\necho \"RUNTIME download-shard-${SHARD_IDX} ${DL_TIME} seconds\"\necho \"DB files: $(ls ${DB_DIR}/*.nsq 2\u003e/dev/null | wc -l) nsq volumes\"\n\n# Download query\nazcopy cp \"https://stgelb.blob.core.windows.net/queries/pathogen-10.fa\" \"${QUERY_DIR}/query.fa\"               --log-level=WARNING 2\u003e/dev/null\necho \"Query: $(grep -c '^\u003e' ${QUERY_DIR}/query.fa) sequences\"\n\necho \"=== Shard $SHARD_IDX: BLAST ===\"\nSTART_BL=$(date +%s)\n\nblastn -db \"$VOLPATHS\"               -query \"${QUERY_DIR}/query.fa\"               -max_target_seqs 500 -evalue 0.05               -word_size 28 -dust yes -soft_masking true               -outfmt 7               -dbsize 978954058562               -num_threads $(nproc)               -out \"${RESULTS_DIR}/shard_00.out\" 2\u003e\u00261\n\nEND_BL=$(date +%s)\nBL_TIME=$((END_BL - START_BL))\nHITS=$(grep -vc '^#' \"${RESULTS_DIR}/shard_00.out\" 2\u003e/dev/null || echo 0)\necho \"RUNTIME blast-shard-${SHARD_IDX} ${BL_TIME} seconds\"\necho \"HITS shard-${SHARD_IDX} ${HITS}\"\n\n# Compress and upload results\ngzip -f \"${RESULTS_DIR}/shard_00.out\"\nazcopy cp \"${RESULTS_DIR}/shard_00.out.gz\"               \"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_00.out.gz\"               --log-level=WARNING 2\u003e/dev/null || true\n\n# Write timing summary\necho \"{\\\"shard\\\":0,\\\"download_sec\\\":${DL_TIME},\\\"blast_sec\\\":${BL_TIME},\\\"hits\\\":${HITS}}\"               \u003e \"${RESULTS_DIR}/timing.json\"\nazcopy cp \"${RESULTS_DIR}/timing.json\"               \"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_00_timing.json\"               --log-level=WARNING 2\u003e/dev/null || true\n\nTOTAL=$((END_BL - START_DL))\necho \"\"\necho \"=== SUMMARY shard-${SHARD_IDX} ===\"\necho \"  Download: ${DL_TIME}s\"\necho \"  BLAST:    ${BL_TIME}s\"\necho \"  Hits:     ${HITS}\"\necho \"  Total:    ${TOTAL}s\"\necho \"SHARD_COMPLETE ${SHARD_IDX}\"\n"
+                                ],
+                                "command": [
+                                    "/bin/bash",
+                                    "-c"
+                                ],
+                                "image": "elbacr.azurecr.io/ncbi/elb:1.4.0",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "blast",
+                                "resources": {
+                                    "limits": {
+                                        "cpu": "15",
+                                        "memory": "110Gi"
+                                    },
+                                    "requests": {
+                                        "cpu": "8",
+                                        "memory": "80Gi"
+                                    }
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/workspace",
+                                        "name": "workspace"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeName": "aks-nodepool1-16591338-vmss000000",
+                        "restartPolicy": "Never",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30,
+                        "volumes": [
+                            {
+                                "hostPath": {
+                                    "path": "/mnt/workspace-shard-00",
+                                    "type": "DirectoryOrCreate"
+                                },
+                                "name": "workspace"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "completionTime": "2026-04-22T04:12:56Z",
+                "conditions": [
+                    {
+                        "lastProbeTime": "2026-04-22T04:12:56Z",
+                        "lastTransitionTime": "2026-04-22T04:12:56Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "SuccessCriteriaMet"
+                    },
+                    {
+                        "lastProbeTime": "2026-04-22T04:12:56Z",
+                        "lastTransitionTime": "2026-04-22T04:12:56Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "Complete"
+                    }
+                ],
+                "ready": 0,
+                "startTime": "2026-04-22T04:08:53Z",
+                "succeeded": 1,
+                "terminating": 0,
+                "uncountedTerminatedPods": {}
+            }
+        },
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\",\"kind\":\"Job\",\"metadata\":{\"annotations\":{},\"labels\":{\"app\":\"shard-blast\",\"shard\":\"01\"},\"name\":\"shard-blast-01\",\"namespace\":\"default\"},\"spec\":{\"activeDeadlineSeconds\":7200,\"backoffLimit\":1,\"template\":{\"metadata\":{\"labels\":{\"app\":\"shard-blast\",\"shard\":\"01\"}},\"spec\":{\"containers\":[{\"args\":[\"set -eo pipefail\\nSHARD_IDX=1\\nSHARD_NAME=core_nt_shard_01\\nDB_DIR=/workspace/blastdb\\nQUERY_DIR=/workspace/queries\\nRESULTS_DIR=/workspace/results\\nmkdir -p $DB_DIR $QUERY_DIR $RESULTS_DIR\\n\\necho \\\"=== Shard $SHARD_IDX: Download ===\\\"\\nSTART_DL=$(date +%s)\\n\\n# Auth\\nazcopy login --identity 2\\u003e/dev/null || echo \\\"azcopy login warning\\\"\\n\\n# Download manifest\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_01/core_nt_shard_01.manifest\\\"               /tmp/manifest.txt --log-level=WARNING 2\\u003e/dev/null\\nVOLUMES=$(cat /tmp/manifest.txt)\\necho \\\"Volumes: $VOLUMES\\\"\\n\\n# Download each volume\\nfor VOL in $VOLUMES; do\\n    echo \\\"  Downloading $VOL...\\\"\\n    for EXT in nsq nhr nin nnd nni nog nos not; do\\n        azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\\\" \\\"${DB_DIR}/${VOL}.${EXT}\\\"                       --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\n    done\\ndone\\n\\n# Build space-separated volume list for direct BLAST -db usage\\n# (bypasses .nal alias file entirely)\\nVOLPATHS=\\\"\\\"\\nfor VOL in $VOLUMES; do\\n    [ -n \\\"$VOLPATHS\\\" ] \\u0026\\u0026 VOLPATHS=\\\"$VOLPATHS \\\"\\n    VOLPATHS=\\\"${VOLPATHS}${DB_DIR}/${VOL}\\\"\\ndone\\necho \\\"Volume paths: $VOLPATHS\\\"\\n\\n# Download taxonomy support files\\n# core_nt.ndb (6.5 GB), .ntf (185 MB), .nto (487 MB) + taxdb\\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\\n    echo \\\"  Downloading $F...\\\"\\n    azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\\\" \\\"${DB_DIR}/${F}\\\"                   --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\ndone\\n\\nEND_DL=$(date +%s)\\nDL_TIME=$((END_DL - START_DL))\\necho \\\"RUNTIME download-shard-${SHARD_IDX} ${DL_TIME} seconds\\\"\\necho \\\"DB files: $(ls ${DB_DIR}/*.nsq 2\\u003e/dev/null | wc -l) nsq volumes\\\"\\n\\n# Download query\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/queries/pathogen-10.fa\\\" \\\"${QUERY_DIR}/query.fa\\\"               --log-level=WARNING 2\\u003e/dev/null\\necho \\\"Query: $(grep -c '^\\u003e' ${QUERY_DIR}/query.fa) sequences\\\"\\n\\necho \\\"=== Shard $SHARD_IDX: BLAST ===\\\"\\nSTART_BL=$(date +%s)\\n\\nblastn -db \\\"$VOLPATHS\\\"               -query \\\"${QUERY_DIR}/query.fa\\\"               -max_target_seqs 500 -evalue 0.05               -word_size 28 -dust yes -soft_masking true               -outfmt 7               -dbsize 978954058562               -num_threads $(nproc)               -out \\\"${RESULTS_DIR}/shard_01.out\\\" 2\\u003e\\u00261\\n\\nEND_BL=$(date +%s)\\nBL_TIME=$((END_BL - START_BL))\\nHITS=$(grep -vc '^#' \\\"${RESULTS_DIR}/shard_01.out\\\" 2\\u003e/dev/null || echo 0)\\necho \\\"RUNTIME blast-shard-${SHARD_IDX} ${BL_TIME} seconds\\\"\\necho \\\"HITS shard-${SHARD_IDX} ${HITS}\\\"\\n\\n# Compress and upload results\\ngzip -f \\\"${RESULTS_DIR}/shard_01.out\\\"\\nazcopy cp \\\"${RESULTS_DIR}/shard_01.out.gz\\\"               \\\"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_01.out.gz\\\"               --log-level=WARNING 2\\u003e/dev/null || true\\n\\n# Write timing summary\\necho \\\"{\\\\\\\"shard\\\\\\\":1,\\\\\\\"download_sec\\\\\\\":${DL_TIME},\\\\\\\"blast_sec\\\\\\\":${BL_TIME},\\\\\\\"hits\\\\\\\":${HITS}}\\\"               \\u003e \\\"${RESULTS_DIR}/timing.json\\\"\\nazcopy cp \\\"${RESULTS_DIR}/timing.json\\\"               \\\"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_01_timing.json\\\"               --log-level=WARNING 2\\u003e/dev/null || true\\n\\nTOTAL=$((END_BL - START_DL))\\necho \\\"\\\"\\necho \\\"=== SUMMARY shard-${SHARD_IDX} ===\\\"\\necho \\\"  Download: ${DL_TIME}s\\\"\\necho \\\"  BLAST:    ${BL_TIME}s\\\"\\necho \\\"  Hits:     ${HITS}\\\"\\necho \\\"  Total:    ${TOTAL}s\\\"\\necho \\\"SHARD_COMPLETE ${SHARD_IDX}\\\"\\n\"],\"command\":[\"/bin/bash\",\"-c\"],\"image\":\"elbacr.azurecr.io/ncbi/elb:1.4.0\",\"name\":\"blast\",\"resources\":{\"limits\":{\"cpu\":\"15\",\"memory\":\"110Gi\"},\"requests\":{\"cpu\":\"8\",\"memory\":\"80Gi\"}},\"volumeMounts\":[{\"mountPath\":\"/workspace\",\"name\":\"workspace\"}]}],\"nodeName\":\"aks-nodepool1-16591338-vmss000001\",\"restartPolicy\":\"Never\",\"volumes\":[{\"hostPath\":{\"path\":\"/mnt/workspace-shard-01\",\"type\":\"DirectoryOrCreate\"},\"name\":\"workspace\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-04-22T04:08:54Z",
+                "generation": 1,
+                "labels": {
+                    "app": "shard-blast",
+                    "shard": "01"
+                },
+                "name": "shard-blast-01",
+                "namespace": "default",
+                "resourceVersion": "17600",
+                "uid": "23af7014-0fea-481a-b783-0a2f1a5ca0a0"
+            },
+            "spec": {
+                "activeDeadlineSeconds": 7200,
+                "backoffLimit": 1,
+                "completionMode": "NonIndexed",
+                "completions": 1,
+                "manualSelector": false,
+                "parallelism": 1,
+                "podReplacementPolicy": "TerminatingOrFailed",
+                "selector": {
+                    "matchLabels": {
+                        "batch.kubernetes.io/controller-uid": "23af7014-0fea-481a-b783-0a2f1a5ca0a0"
+                    }
+                },
+                "suspend": false,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "shard-blast",
+                            "batch.kubernetes.io/controller-uid": "23af7014-0fea-481a-b783-0a2f1a5ca0a0",
+                            "batch.kubernetes.io/job-name": "shard-blast-01",
+                            "controller-uid": "23af7014-0fea-481a-b783-0a2f1a5ca0a0",
+                            "job-name": "shard-blast-01",
+                            "shard": "01"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "set -eo pipefail\nSHARD_IDX=1\nSHARD_NAME=core_nt_shard_01\nDB_DIR=/workspace/blastdb\nQUERY_DIR=/workspace/queries\nRESULTS_DIR=/workspace/results\nmkdir -p $DB_DIR $QUERY_DIR $RESULTS_DIR\n\necho \"=== Shard $SHARD_IDX: Download ===\"\nSTART_DL=$(date +%s)\n\n# Auth\nazcopy login --identity 2\u003e/dev/null || echo \"azcopy login warning\"\n\n# Download manifest\nazcopy cp \"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_01/core_nt_shard_01.manifest\"               /tmp/manifest.txt --log-level=WARNING 2\u003e/dev/null\nVOLUMES=$(cat /tmp/manifest.txt)\necho \"Volumes: $VOLUMES\"\n\n# Download each volume\nfor VOL in $VOLUMES; do\n    echo \"  Downloading $VOL...\"\n    for EXT in nsq nhr nin nnd nni nog nos not; do\n        azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\" \"${DB_DIR}/${VOL}.${EXT}\"                       --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\n    done\ndone\n\n# Build space-separated volume list for direct BLAST -db usage\n# (bypasses .nal alias file entirely)\nVOLPATHS=\"\"\nfor VOL in $VOLUMES; do\n    [ -n \"$VOLPATHS\" ] \u0026\u0026 VOLPATHS=\"$VOLPATHS \"\n    VOLPATHS=\"${VOLPATHS}${DB_DIR}/${VOL}\"\ndone\necho \"Volume paths: $VOLPATHS\"\n\n# Download taxonomy support files\n# core_nt.ndb (6.5 GB), .ntf (185 MB), .nto (487 MB) + taxdb\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\n    echo \"  Downloading $F...\"\n    azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\" \"${DB_DIR}/${F}\"                   --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\ndone\n\nEND_DL=$(date +%s)\nDL_TIME=$((END_DL - START_DL))\necho \"RUNTIME download-shard-${SHARD_IDX} ${DL_TIME} seconds\"\necho \"DB files: $(ls ${DB_DIR}/*.nsq 2\u003e/dev/null | wc -l) nsq volumes\"\n\n# Download query\nazcopy cp \"https://stgelb.blob.core.windows.net/queries/pathogen-10.fa\" \"${QUERY_DIR}/query.fa\"               --log-level=WARNING 2\u003e/dev/null\necho \"Query: $(grep -c '^\u003e' ${QUERY_DIR}/query.fa) sequences\"\n\necho \"=== Shard $SHARD_IDX: BLAST ===\"\nSTART_BL=$(date +%s)\n\nblastn -db \"$VOLPATHS\"               -query \"${QUERY_DIR}/query.fa\"               -max_target_seqs 500 -evalue 0.05               -word_size 28 -dust yes -soft_masking true               -outfmt 7               -dbsize 978954058562               -num_threads $(nproc)               -out \"${RESULTS_DIR}/shard_01.out\" 2\u003e\u00261\n\nEND_BL=$(date +%s)\nBL_TIME=$((END_BL - START_BL))\nHITS=$(grep -vc '^#' \"${RESULTS_DIR}/shard_01.out\" 2\u003e/dev/null || echo 0)\necho \"RUNTIME blast-shard-${SHARD_IDX} ${BL_TIME} seconds\"\necho \"HITS shard-${SHARD_IDX} ${HITS}\"\n\n# Compress and upload results\ngzip -f \"${RESULTS_DIR}/shard_01.out\"\nazcopy cp \"${RESULTS_DIR}/shard_01.out.gz\"               \"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_01.out.gz\"               --log-level=WARNING 2\u003e/dev/null || true\n\n# Write timing summary\necho \"{\\\"shard\\\":1,\\\"download_sec\\\":${DL_TIME},\\\"blast_sec\\\":${BL_TIME},\\\"hits\\\":${HITS}}\"               \u003e \"${RESULTS_DIR}/timing.json\"\nazcopy cp \"${RESULTS_DIR}/timing.json\"               \"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_01_timing.json\"               --log-level=WARNING 2\u003e/dev/null || true\n\nTOTAL=$((END_BL - START_DL))\necho \"\"\necho \"=== SUMMARY shard-${SHARD_IDX} ===\"\necho \"  Download: ${DL_TIME}s\"\necho \"  BLAST:    ${BL_TIME}s\"\necho \"  Hits:     ${HITS}\"\necho \"  Total:    ${TOTAL}s\"\necho \"SHARD_COMPLETE ${SHARD_IDX}\"\n"
+                                ],
+                                "command": [
+                                    "/bin/bash",
+                                    "-c"
+                                ],
+                                "image": "elbacr.azurecr.io/ncbi/elb:1.4.0",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "blast",
+                                "resources": {
+                                    "limits": {
+                                        "cpu": "15",
+                                        "memory": "110Gi"
+                                    },
+                                    "requests": {
+                                        "cpu": "8",
+                                        "memory": "80Gi"
+                                    }
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/workspace",
+                                        "name": "workspace"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeName": "aks-nodepool1-16591338-vmss000001",
+                        "restartPolicy": "Never",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30,
+                        "volumes": [
+                            {
+                                "hostPath": {
+                                    "path": "/mnt/workspace-shard-01",
+                                    "type": "DirectoryOrCreate"
+                                },
+                                "name": "workspace"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "completionTime": "2026-04-22T04:12:41Z",
+                "conditions": [
+                    {
+                        "lastProbeTime": "2026-04-22T04:12:41Z",
+                        "lastTransitionTime": "2026-04-22T04:12:41Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "SuccessCriteriaMet"
+                    },
+                    {
+                        "lastProbeTime": "2026-04-22T04:12:41Z",
+                        "lastTransitionTime": "2026-04-22T04:12:41Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "Complete"
+                    }
+                ],
+                "ready": 0,
+                "startTime": "2026-04-22T04:08:54Z",
+                "succeeded": 1,
+                "terminating": 0,
+                "uncountedTerminatedPods": {}
+            }
+        },
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\",\"kind\":\"Job\",\"metadata\":{\"annotations\":{},\"labels\":{\"app\":\"shard-blast\",\"shard\":\"02\"},\"name\":\"shard-blast-02\",\"namespace\":\"default\"},\"spec\":{\"activeDeadlineSeconds\":7200,\"backoffLimit\":1,\"template\":{\"metadata\":{\"labels\":{\"app\":\"shard-blast\",\"shard\":\"02\"}},\"spec\":{\"containers\":[{\"args\":[\"set -eo pipefail\\nSHARD_IDX=2\\nSHARD_NAME=core_nt_shard_02\\nDB_DIR=/workspace/blastdb\\nQUERY_DIR=/workspace/queries\\nRESULTS_DIR=/workspace/results\\nmkdir -p $DB_DIR $QUERY_DIR $RESULTS_DIR\\n\\necho \\\"=== Shard $SHARD_IDX: Download ===\\\"\\nSTART_DL=$(date +%s)\\n\\n# Auth\\nazcopy login --identity 2\\u003e/dev/null || echo \\\"azcopy login warning\\\"\\n\\n# Download manifest\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_02/core_nt_shard_02.manifest\\\"               /tmp/manifest.txt --log-level=WARNING 2\\u003e/dev/null\\nVOLUMES=$(cat /tmp/manifest.txt)\\necho \\\"Volumes: $VOLUMES\\\"\\n\\n# Download each volume\\nfor VOL in $VOLUMES; do\\n    echo \\\"  Downloading $VOL...\\\"\\n    for EXT in nsq nhr nin nnd nni nog nos not; do\\n        azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\\\" \\\"${DB_DIR}/${VOL}.${EXT}\\\"                       --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\n    done\\ndone\\n\\n# Build space-separated volume list for direct BLAST -db usage\\n# (bypasses .nal alias file entirely)\\nVOLPATHS=\\\"\\\"\\nfor VOL in $VOLUMES; do\\n    [ -n \\\"$VOLPATHS\\\" ] \\u0026\\u0026 VOLPATHS=\\\"$VOLPATHS \\\"\\n    VOLPATHS=\\\"${VOLPATHS}${DB_DIR}/${VOL}\\\"\\ndone\\necho \\\"Volume paths: $VOLPATHS\\\"\\n\\n# Download taxonomy support files\\n# core_nt.ndb (6.5 GB), .ntf (185 MB), .nto (487 MB) + taxdb\\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\\n    echo \\\"  Downloading $F...\\\"\\n    azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\\\" \\\"${DB_DIR}/${F}\\\"                   --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\ndone\\n\\nEND_DL=$(date +%s)\\nDL_TIME=$((END_DL - START_DL))\\necho \\\"RUNTIME download-shard-${SHARD_IDX} ${DL_TIME} seconds\\\"\\necho \\\"DB files: $(ls ${DB_DIR}/*.nsq 2\\u003e/dev/null | wc -l) nsq volumes\\\"\\n\\n# Download query\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/queries/pathogen-10.fa\\\" \\\"${QUERY_DIR}/query.fa\\\"               --log-level=WARNING 2\\u003e/dev/null\\necho \\\"Query: $(grep -c '^\\u003e' ${QUERY_DIR}/query.fa) sequences\\\"\\n\\necho \\\"=== Shard $SHARD_IDX: BLAST ===\\\"\\nSTART_BL=$(date +%s)\\n\\nblastn -db \\\"$VOLPATHS\\\"               -query \\\"${QUERY_DIR}/query.fa\\\"               -max_target_seqs 500 -evalue 0.05               -word_size 28 -dust yes -soft_masking true               -outfmt 7               -dbsize 978954058562               -num_threads $(nproc)               -out \\\"${RESULTS_DIR}/shard_02.out\\\" 2\\u003e\\u00261\\n\\nEND_BL=$(date +%s)\\nBL_TIME=$((END_BL - START_BL))\\nHITS=$(grep -vc '^#' \\\"${RESULTS_DIR}/shard_02.out\\\" 2\\u003e/dev/null || echo 0)\\necho \\\"RUNTIME blast-shard-${SHARD_IDX} ${BL_TIME} seconds\\\"\\necho \\\"HITS shard-${SHARD_IDX} ${HITS}\\\"\\n\\n# Compress and upload results\\ngzip -f \\\"${RESULTS_DIR}/shard_02.out\\\"\\nazcopy cp \\\"${RESULTS_DIR}/shard_02.out.gz\\\"               \\\"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_02.out.gz\\\"               --log-level=WARNING 2\\u003e/dev/null || true\\n\\n# Write timing summary\\necho \\\"{\\\\\\\"shard\\\\\\\":2,\\\\\\\"download_sec\\\\\\\":${DL_TIME},\\\\\\\"blast_sec\\\\\\\":${BL_TIME},\\\\\\\"hits\\\\\\\":${HITS}}\\\"               \\u003e \\\"${RESULTS_DIR}/timing.json\\\"\\nazcopy cp \\\"${RESULTS_DIR}/timing.json\\\"               \\\"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_02_timing.json\\\"               --log-level=WARNING 2\\u003e/dev/null || true\\n\\nTOTAL=$((END_BL - START_DL))\\necho \\\"\\\"\\necho \\\"=== SUMMARY shard-${SHARD_IDX} ===\\\"\\necho \\\"  Download: ${DL_TIME}s\\\"\\necho \\\"  BLAST:    ${BL_TIME}s\\\"\\necho \\\"  Hits:     ${HITS}\\\"\\necho \\\"  Total:    ${TOTAL}s\\\"\\necho \\\"SHARD_COMPLETE ${SHARD_IDX}\\\"\\n\"],\"command\":[\"/bin/bash\",\"-c\"],\"image\":\"elbacr.azurecr.io/ncbi/elb:1.4.0\",\"name\":\"blast\",\"resources\":{\"limits\":{\"cpu\":\"15\",\"memory\":\"110Gi\"},\"requests\":{\"cpu\":\"8\",\"memory\":\"80Gi\"}},\"volumeMounts\":[{\"mountPath\":\"/workspace\",\"name\":\"workspace\"}]}],\"nodeName\":\"aks-nodepool1-16591338-vmss000002\",\"restartPolicy\":\"Never\",\"volumes\":[{\"hostPath\":{\"path\":\"/mnt/workspace-shard-02\",\"type\":\"DirectoryOrCreate\"},\"name\":\"workspace\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-04-22T04:08:55Z",
+                "generation": 1,
+                "labels": {
+                    "app": "shard-blast",
+                    "shard": "02"
+                },
+                "name": "shard-blast-02",
+                "namespace": "default",
+                "resourceVersion": "17688",
+                "uid": "05b67a34-f6c7-481c-bb1b-cb608a3c2e46"
+            },
+            "spec": {
+                "activeDeadlineSeconds": 7200,
+                "backoffLimit": 1,
+                "completionMode": "NonIndexed",
+                "completions": 1,
+                "manualSelector": false,
+                "parallelism": 1,
+                "podReplacementPolicy": "TerminatingOrFailed",
+                "selector": {
+                    "matchLabels": {
+                        "batch.kubernetes.io/controller-uid": "05b67a34-f6c7-481c-bb1b-cb608a3c2e46"
+                    }
+                },
+                "suspend": false,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "shard-blast",
+                            "batch.kubernetes.io/controller-uid": "05b67a34-f6c7-481c-bb1b-cb608a3c2e46",
+                            "batch.kubernetes.io/job-name": "shard-blast-02",
+                            "controller-uid": "05b67a34-f6c7-481c-bb1b-cb608a3c2e46",
+                            "job-name": "shard-blast-02",
+                            "shard": "02"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "set -eo pipefail\nSHARD_IDX=2\nSHARD_NAME=core_nt_shard_02\nDB_DIR=/workspace/blastdb\nQUERY_DIR=/workspace/queries\nRESULTS_DIR=/workspace/results\nmkdir -p $DB_DIR $QUERY_DIR $RESULTS_DIR\n\necho \"=== Shard $SHARD_IDX: Download ===\"\nSTART_DL=$(date +%s)\n\n# Auth\nazcopy login --identity 2\u003e/dev/null || echo \"azcopy login warning\"\n\n# Download manifest\nazcopy cp \"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_02/core_nt_shard_02.manifest\"               /tmp/manifest.txt --log-level=WARNING 2\u003e/dev/null\nVOLUMES=$(cat /tmp/manifest.txt)\necho \"Volumes: $VOLUMES\"\n\n# Download each volume\nfor VOL in $VOLUMES; do\n    echo \"  Downloading $VOL...\"\n    for EXT in nsq nhr nin nnd nni nog nos not; do\n        azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\" \"${DB_DIR}/${VOL}.${EXT}\"                       --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\n    done\ndone\n\n# Build space-separated volume list for direct BLAST -db usage\n# (bypasses .nal alias file entirely)\nVOLPATHS=\"\"\nfor VOL in $VOLUMES; do\n    [ -n \"$VOLPATHS\" ] \u0026\u0026 VOLPATHS=\"$VOLPATHS \"\n    VOLPATHS=\"${VOLPATHS}${DB_DIR}/${VOL}\"\ndone\necho \"Volume paths: $VOLPATHS\"\n\n# Download taxonomy support files\n# core_nt.ndb (6.5 GB), .ntf (185 MB), .nto (487 MB) + taxdb\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\n    echo \"  Downloading $F...\"\n    azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\" \"${DB_DIR}/${F}\"                   --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\ndone\n\nEND_DL=$(date +%s)\nDL_TIME=$((END_DL - START_DL))\necho \"RUNTIME download-shard-${SHARD_IDX} ${DL_TIME} seconds\"\necho \"DB files: $(ls ${DB_DIR}/*.nsq 2\u003e/dev/null | wc -l) nsq volumes\"\n\n# Download query\nazcopy cp \"https://stgelb.blob.core.windows.net/queries/pathogen-10.fa\" \"${QUERY_DIR}/query.fa\"               --log-level=WARNING 2\u003e/dev/null\necho \"Query: $(grep -c '^\u003e' ${QUERY_DIR}/query.fa) sequences\"\n\necho \"=== Shard $SHARD_IDX: BLAST ===\"\nSTART_BL=$(date +%s)\n\nblastn -db \"$VOLPATHS\"               -query \"${QUERY_DIR}/query.fa\"               -max_target_seqs 500 -evalue 0.05               -word_size 28 -dust yes -soft_masking true               -outfmt 7               -dbsize 978954058562               -num_threads $(nproc)               -out \"${RESULTS_DIR}/shard_02.out\" 2\u003e\u00261\n\nEND_BL=$(date +%s)\nBL_TIME=$((END_BL - START_BL))\nHITS=$(grep -vc '^#' \"${RESULTS_DIR}/shard_02.out\" 2\u003e/dev/null || echo 0)\necho \"RUNTIME blast-shard-${SHARD_IDX} ${BL_TIME} seconds\"\necho \"HITS shard-${SHARD_IDX} ${HITS}\"\n\n# Compress and upload results\ngzip -f \"${RESULTS_DIR}/shard_02.out\"\nazcopy cp \"${RESULTS_DIR}/shard_02.out.gz\"               \"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_02.out.gz\"               --log-level=WARNING 2\u003e/dev/null || true\n\n# Write timing summary\necho \"{\\\"shard\\\":2,\\\"download_sec\\\":${DL_TIME},\\\"blast_sec\\\":${BL_TIME},\\\"hits\\\":${HITS}}\"               \u003e \"${RESULTS_DIR}/timing.json\"\nazcopy cp \"${RESULTS_DIR}/timing.json\"               \"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_02_timing.json\"               --log-level=WARNING 2\u003e/dev/null || true\n\nTOTAL=$((END_BL - START_DL))\necho \"\"\necho \"=== SUMMARY shard-${SHARD_IDX} ===\"\necho \"  Download: ${DL_TIME}s\"\necho \"  BLAST:    ${BL_TIME}s\"\necho \"  Hits:     ${HITS}\"\necho \"  Total:    ${TOTAL}s\"\necho \"SHARD_COMPLETE ${SHARD_IDX}\"\n"
+                                ],
+                                "command": [
+                                    "/bin/bash",
+                                    "-c"
+                                ],
+                                "image": "elbacr.azurecr.io/ncbi/elb:1.4.0",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "blast",
+                                "resources": {
+                                    "limits": {
+                                        "cpu": "15",
+                                        "memory": "110Gi"
+                                    },
+                                    "requests": {
+                                        "cpu": "8",
+                                        "memory": "80Gi"
+                                    }
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/workspace",
+                                        "name": "workspace"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeName": "aks-nodepool1-16591338-vmss000002",
+                        "restartPolicy": "Never",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30,
+                        "volumes": [
+                            {
+                                "hostPath": {
+                                    "path": "/mnt/workspace-shard-02",
+                                    "type": "DirectoryOrCreate"
+                                },
+                                "name": "workspace"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "completionTime": "2026-04-22T04:12:54Z",
+                "conditions": [
+                    {
+                        "lastProbeTime": "2026-04-22T04:12:54Z",
+                        "lastTransitionTime": "2026-04-22T04:12:54Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "SuccessCriteriaMet"
+                    },
+                    {
+                        "lastProbeTime": "2026-04-22T04:12:54Z",
+                        "lastTransitionTime": "2026-04-22T04:12:54Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "Complete"
+                    }
+                ],
+                "ready": 0,
+                "startTime": "2026-04-22T04:08:55Z",
+                "succeeded": 1,
+                "terminating": 0,
+                "uncountedTerminatedPods": {}
+            }
+        },
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\",\"kind\":\"Job\",\"metadata\":{\"annotations\":{},\"labels\":{\"app\":\"shard-blast\",\"shard\":\"03\"},\"name\":\"shard-blast-03\",\"namespace\":\"default\"},\"spec\":{\"activeDeadlineSeconds\":7200,\"backoffLimit\":1,\"template\":{\"metadata\":{\"labels\":{\"app\":\"shard-blast\",\"shard\":\"03\"}},\"spec\":{\"containers\":[{\"args\":[\"set -eo pipefail\\nSHARD_IDX=3\\nSHARD_NAME=core_nt_shard_03\\nDB_DIR=/workspace/blastdb\\nQUERY_DIR=/workspace/queries\\nRESULTS_DIR=/workspace/results\\nmkdir -p $DB_DIR $QUERY_DIR $RESULTS_DIR\\n\\necho \\\"=== Shard $SHARD_IDX: Download ===\\\"\\nSTART_DL=$(date +%s)\\n\\n# Auth\\nazcopy login --identity 2\\u003e/dev/null || echo \\\"azcopy login warning\\\"\\n\\n# Download manifest\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_03/core_nt_shard_03.manifest\\\"               /tmp/manifest.txt --log-level=WARNING 2\\u003e/dev/null\\nVOLUMES=$(cat /tmp/manifest.txt)\\necho \\\"Volumes: $VOLUMES\\\"\\n\\n# Download each volume\\nfor VOL in $VOLUMES; do\\n    echo \\\"  Downloading $VOL...\\\"\\n    for EXT in nsq nhr nin nnd nni nog nos not; do\\n        azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\\\" \\\"${DB_DIR}/${VOL}.${EXT}\\\"                       --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\n    done\\ndone\\n\\n# Build space-separated volume list for direct BLAST -db usage\\n# (bypasses .nal alias file entirely)\\nVOLPATHS=\\\"\\\"\\nfor VOL in $VOLUMES; do\\n    [ -n \\\"$VOLPATHS\\\" ] \\u0026\\u0026 VOLPATHS=\\\"$VOLPATHS \\\"\\n    VOLPATHS=\\\"${VOLPATHS}${DB_DIR}/${VOL}\\\"\\ndone\\necho \\\"Volume paths: $VOLPATHS\\\"\\n\\n# Download taxonomy support files\\n# core_nt.ndb (6.5 GB), .ntf (185 MB), .nto (487 MB) + taxdb\\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\\n    echo \\\"  Downloading $F...\\\"\\n    azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\\\" \\\"${DB_DIR}/${F}\\\"                   --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\ndone\\n\\nEND_DL=$(date +%s)\\nDL_TIME=$((END_DL - START_DL))\\necho \\\"RUNTIME download-shard-${SHARD_IDX} ${DL_TIME} seconds\\\"\\necho \\\"DB files: $(ls ${DB_DIR}/*.nsq 2\\u003e/dev/null | wc -l) nsq volumes\\\"\\n\\n# Download query\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/queries/pathogen-10.fa\\\" \\\"${QUERY_DIR}/query.fa\\\"               --log-level=WARNING 2\\u003e/dev/null\\necho \\\"Query: $(grep -c '^\\u003e' ${QUERY_DIR}/query.fa) sequences\\\"\\n\\necho \\\"=== Shard $SHARD_IDX: BLAST ===\\\"\\nSTART_BL=$(date +%s)\\n\\nblastn -db \\\"$VOLPATHS\\\"               -query \\\"${QUERY_DIR}/query.fa\\\"               -max_target_seqs 500 -evalue 0.05               -word_size 28 -dust yes -soft_masking true               -outfmt 7               -dbsize 978954058562               -num_threads $(nproc)               -out \\\"${RESULTS_DIR}/shard_03.out\\\" 2\\u003e\\u00261\\n\\nEND_BL=$(date +%s)\\nBL_TIME=$((END_BL - START_BL))\\nHITS=$(grep -vc '^#' \\\"${RESULTS_DIR}/shard_03.out\\\" 2\\u003e/dev/null || echo 0)\\necho \\\"RUNTIME blast-shard-${SHARD_IDX} ${BL_TIME} seconds\\\"\\necho \\\"HITS shard-${SHARD_IDX} ${HITS}\\\"\\n\\n# Compress and upload results\\ngzip -f \\\"${RESULTS_DIR}/shard_03.out\\\"\\nazcopy cp \\\"${RESULTS_DIR}/shard_03.out.gz\\\"               \\\"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_03.out.gz\\\"               --log-level=WARNING 2\\u003e/dev/null || true\\n\\n# Write timing summary\\necho \\\"{\\\\\\\"shard\\\\\\\":3,\\\\\\\"download_sec\\\\\\\":${DL_TIME},\\\\\\\"blast_sec\\\\\\\":${BL_TIME},\\\\\\\"hits\\\\\\\":${HITS}}\\\"               \\u003e \\\"${RESULTS_DIR}/timing.json\\\"\\nazcopy cp \\\"${RESULTS_DIR}/timing.json\\\"               \\\"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_03_timing.json\\\"               --log-level=WARNING 2\\u003e/dev/null || true\\n\\nTOTAL=$((END_BL - START_DL))\\necho \\\"\\\"\\necho \\\"=== SUMMARY shard-${SHARD_IDX} ===\\\"\\necho \\\"  Download: ${DL_TIME}s\\\"\\necho \\\"  BLAST:    ${BL_TIME}s\\\"\\necho \\\"  Hits:     ${HITS}\\\"\\necho \\\"  Total:    ${TOTAL}s\\\"\\necho \\\"SHARD_COMPLETE ${SHARD_IDX}\\\"\\n\"],\"command\":[\"/bin/bash\",\"-c\"],\"image\":\"elbacr.azurecr.io/ncbi/elb:1.4.0\",\"name\":\"blast\",\"resources\":{\"limits\":{\"cpu\":\"15\",\"memory\":\"110Gi\"},\"requests\":{\"cpu\":\"8\",\"memory\":\"80Gi\"}},\"volumeMounts\":[{\"mountPath\":\"/workspace\",\"name\":\"workspace\"}]}],\"nodeName\":\"aks-nodepool1-16591338-vmss000003\",\"restartPolicy\":\"Never\",\"volumes\":[{\"hostPath\":{\"path\":\"/mnt/workspace-shard-03\",\"type\":\"DirectoryOrCreate\"},\"name\":\"workspace\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-04-22T04:08:56Z",
+                "generation": 1,
+                "labels": {
+                    "app": "shard-blast",
+                    "shard": "03"
+                },
+                "name": "shard-blast-03",
+                "namespace": "default",
+                "resourceVersion": "17726",
+                "uid": "ebbe7ae6-fad2-4d26-a00a-8277653a72d8"
+            },
+            "spec": {
+                "activeDeadlineSeconds": 7200,
+                "backoffLimit": 1,
+                "completionMode": "NonIndexed",
+                "completions": 1,
+                "manualSelector": false,
+                "parallelism": 1,
+                "podReplacementPolicy": "TerminatingOrFailed",
+                "selector": {
+                    "matchLabels": {
+                        "batch.kubernetes.io/controller-uid": "ebbe7ae6-fad2-4d26-a00a-8277653a72d8"
+                    }
+                },
+                "suspend": false,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "shard-blast",
+                            "batch.kubernetes.io/controller-uid": "ebbe7ae6-fad2-4d26-a00a-8277653a72d8",
+                            "batch.kubernetes.io/job-name": "shard-blast-03",
+                            "controller-uid": "ebbe7ae6-fad2-4d26-a00a-8277653a72d8",
+                            "job-name": "shard-blast-03",
+                            "shard": "03"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "set -eo pipefail\nSHARD_IDX=3\nSHARD_NAME=core_nt_shard_03\nDB_DIR=/workspace/blastdb\nQUERY_DIR=/workspace/queries\nRESULTS_DIR=/workspace/results\nmkdir -p $DB_DIR $QUERY_DIR $RESULTS_DIR\n\necho \"=== Shard $SHARD_IDX: Download ===\"\nSTART_DL=$(date +%s)\n\n# Auth\nazcopy login --identity 2\u003e/dev/null || echo \"azcopy login warning\"\n\n# Download manifest\nazcopy cp \"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_03/core_nt_shard_03.manifest\"               /tmp/manifest.txt --log-level=WARNING 2\u003e/dev/null\nVOLUMES=$(cat /tmp/manifest.txt)\necho \"Volumes: $VOLUMES\"\n\n# Download each volume\nfor VOL in $VOLUMES; do\n    echo \"  Downloading $VOL...\"\n    for EXT in nsq nhr nin nnd nni nog nos not; do\n        azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\" \"${DB_DIR}/${VOL}.${EXT}\"                       --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\n    done\ndone\n\n# Build space-separated volume list for direct BLAST -db usage\n# (bypasses .nal alias file entirely)\nVOLPATHS=\"\"\nfor VOL in $VOLUMES; do\n    [ -n \"$VOLPATHS\" ] \u0026\u0026 VOLPATHS=\"$VOLPATHS \"\n    VOLPATHS=\"${VOLPATHS}${DB_DIR}/${VOL}\"\ndone\necho \"Volume paths: $VOLPATHS\"\n\n# Download taxonomy support files\n# core_nt.ndb (6.5 GB), .ntf (185 MB), .nto (487 MB) + taxdb\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\n    echo \"  Downloading $F...\"\n    azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\" \"${DB_DIR}/${F}\"                   --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\ndone\n\nEND_DL=$(date +%s)\nDL_TIME=$((END_DL - START_DL))\necho \"RUNTIME download-shard-${SHARD_IDX} ${DL_TIME} seconds\"\necho \"DB files: $(ls ${DB_DIR}/*.nsq 2\u003e/dev/null | wc -l) nsq volumes\"\n\n# Download query\nazcopy cp \"https://stgelb.blob.core.windows.net/queries/pathogen-10.fa\" \"${QUERY_DIR}/query.fa\"               --log-level=WARNING 2\u003e/dev/null\necho \"Query: $(grep -c '^\u003e' ${QUERY_DIR}/query.fa) sequences\"\n\necho \"=== Shard $SHARD_IDX: BLAST ===\"\nSTART_BL=$(date +%s)\n\nblastn -db \"$VOLPATHS\"               -query \"${QUERY_DIR}/query.fa\"               -max_target_seqs 500 -evalue 0.05               -word_size 28 -dust yes -soft_masking true               -outfmt 7               -dbsize 978954058562               -num_threads $(nproc)               -out \"${RESULTS_DIR}/shard_03.out\" 2\u003e\u00261\n\nEND_BL=$(date +%s)\nBL_TIME=$((END_BL - START_BL))\nHITS=$(grep -vc '^#' \"${RESULTS_DIR}/shard_03.out\" 2\u003e/dev/null || echo 0)\necho \"RUNTIME blast-shard-${SHARD_IDX} ${BL_TIME} seconds\"\necho \"HITS shard-${SHARD_IDX} ${HITS}\"\n\n# Compress and upload results\ngzip -f \"${RESULTS_DIR}/shard_03.out\"\nazcopy cp \"${RESULTS_DIR}/shard_03.out.gz\"               \"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_03.out.gz\"               --log-level=WARNING 2\u003e/dev/null || true\n\n# Write timing summary\necho \"{\\\"shard\\\":3,\\\"download_sec\\\":${DL_TIME},\\\"blast_sec\\\":${BL_TIME},\\\"hits\\\":${HITS}}\"               \u003e \"${RESULTS_DIR}/timing.json\"\nazcopy cp \"${RESULTS_DIR}/timing.json\"               \"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_03_timing.json\"               --log-level=WARNING 2\u003e/dev/null || true\n\nTOTAL=$((END_BL - START_DL))\necho \"\"\necho \"=== SUMMARY shard-${SHARD_IDX} ===\"\necho \"  Download: ${DL_TIME}s\"\necho \"  BLAST:    ${BL_TIME}s\"\necho \"  Hits:     ${HITS}\"\necho \"  Total:    ${TOTAL}s\"\necho \"SHARD_COMPLETE ${SHARD_IDX}\"\n"
+                                ],
+                                "command": [
+                                    "/bin/bash",
+                                    "-c"
+                                ],
+                                "image": "elbacr.azurecr.io/ncbi/elb:1.4.0",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "blast",
+                                "resources": {
+                                    "limits": {
+                                        "cpu": "15",
+                                        "memory": "110Gi"
+                                    },
+                                    "requests": {
+                                        "cpu": "8",
+                                        "memory": "80Gi"
+                                    }
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/workspace",
+                                        "name": "workspace"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeName": "aks-nodepool1-16591338-vmss000003",
+                        "restartPolicy": "Never",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30,
+                        "volumes": [
+                            {
+                                "hostPath": {
+                                    "path": "/mnt/workspace-shard-03",
+                                    "type": "DirectoryOrCreate"
+                                },
+                                "name": "workspace"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "completionTime": "2026-04-22T04:12:59Z",
+                "conditions": [
+                    {
+                        "lastProbeTime": "2026-04-22T04:12:59Z",
+                        "lastTransitionTime": "2026-04-22T04:12:59Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "SuccessCriteriaMet"
+                    },
+                    {
+                        "lastProbeTime": "2026-04-22T04:12:59Z",
+                        "lastTransitionTime": "2026-04-22T04:12:59Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "Complete"
+                    }
+                ],
+                "ready": 0,
+                "startTime": "2026-04-22T04:08:56Z",
+                "succeeded": 1,
+                "terminating": 0,
+                "uncountedTerminatedPods": {}
+            }
+        },
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\",\"kind\":\"Job\",\"metadata\":{\"annotations\":{},\"labels\":{\"app\":\"shard-blast\",\"shard\":\"04\"},\"name\":\"shard-blast-04\",\"namespace\":\"default\"},\"spec\":{\"activeDeadlineSeconds\":7200,\"backoffLimit\":1,\"template\":{\"metadata\":{\"labels\":{\"app\":\"shard-blast\",\"shard\":\"04\"}},\"spec\":{\"containers\":[{\"args\":[\"set -eo pipefail\\nSHARD_IDX=4\\nSHARD_NAME=core_nt_shard_04\\nDB_DIR=/workspace/blastdb\\nQUERY_DIR=/workspace/queries\\nRESULTS_DIR=/workspace/results\\nmkdir -p $DB_DIR $QUERY_DIR $RESULTS_DIR\\n\\necho \\\"=== Shard $SHARD_IDX: Download ===\\\"\\nSTART_DL=$(date +%s)\\n\\n# Auth\\nazcopy login --identity 2\\u003e/dev/null || echo \\\"azcopy login warning\\\"\\n\\n# Download manifest\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_04/core_nt_shard_04.manifest\\\"               /tmp/manifest.txt --log-level=WARNING 2\\u003e/dev/null\\nVOLUMES=$(cat /tmp/manifest.txt)\\necho \\\"Volumes: $VOLUMES\\\"\\n\\n# Download each volume\\nfor VOL in $VOLUMES; do\\n    echo \\\"  Downloading $VOL...\\\"\\n    for EXT in nsq nhr nin nnd nni nog nos not; do\\n        azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\\\" \\\"${DB_DIR}/${VOL}.${EXT}\\\"                       --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\n    done\\ndone\\n\\n# Build space-separated volume list for direct BLAST -db usage\\n# (bypasses .nal alias file entirely)\\nVOLPATHS=\\\"\\\"\\nfor VOL in $VOLUMES; do\\n    [ -n \\\"$VOLPATHS\\\" ] \\u0026\\u0026 VOLPATHS=\\\"$VOLPATHS \\\"\\n    VOLPATHS=\\\"${VOLPATHS}${DB_DIR}/${VOL}\\\"\\ndone\\necho \\\"Volume paths: $VOLPATHS\\\"\\n\\n# Download taxonomy support files\\n# core_nt.ndb (6.5 GB), .ntf (185 MB), .nto (487 MB) + taxdb\\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\\n    echo \\\"  Downloading $F...\\\"\\n    azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\\\" \\\"${DB_DIR}/${F}\\\"                   --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\ndone\\n\\nEND_DL=$(date +%s)\\nDL_TIME=$((END_DL - START_DL))\\necho \\\"RUNTIME download-shard-${SHARD_IDX} ${DL_TIME} seconds\\\"\\necho \\\"DB files: $(ls ${DB_DIR}/*.nsq 2\\u003e/dev/null | wc -l) nsq volumes\\\"\\n\\n# Download query\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/queries/pathogen-10.fa\\\" \\\"${QUERY_DIR}/query.fa\\\"               --log-level=WARNING 2\\u003e/dev/null\\necho \\\"Query: $(grep -c '^\\u003e' ${QUERY_DIR}/query.fa) sequences\\\"\\n\\necho \\\"=== Shard $SHARD_IDX: BLAST ===\\\"\\nSTART_BL=$(date +%s)\\n\\nblastn -db \\\"$VOLPATHS\\\"               -query \\\"${QUERY_DIR}/query.fa\\\"               -max_target_seqs 500 -evalue 0.05               -word_size 28 -dust yes -soft_masking true               -outfmt 7               -dbsize 978954058562               -num_threads $(nproc)               -out \\\"${RESULTS_DIR}/shard_04.out\\\" 2\\u003e\\u00261\\n\\nEND_BL=$(date +%s)\\nBL_TIME=$((END_BL - START_BL))\\nHITS=$(grep -vc '^#' \\\"${RESULTS_DIR}/shard_04.out\\\" 2\\u003e/dev/null || echo 0)\\necho \\\"RUNTIME blast-shard-${SHARD_IDX} ${BL_TIME} seconds\\\"\\necho \\\"HITS shard-${SHARD_IDX} ${HITS}\\\"\\n\\n# Compress and upload results\\ngzip -f \\\"${RESULTS_DIR}/shard_04.out\\\"\\nazcopy cp \\\"${RESULTS_DIR}/shard_04.out.gz\\\"               \\\"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_04.out.gz\\\"               --log-level=WARNING 2\\u003e/dev/null || true\\n\\n# Write timing summary\\necho \\\"{\\\\\\\"shard\\\\\\\":4,\\\\\\\"download_sec\\\\\\\":${DL_TIME},\\\\\\\"blast_sec\\\\\\\":${BL_TIME},\\\\\\\"hits\\\\\\\":${HITS}}\\\"               \\u003e \\\"${RESULTS_DIR}/timing.json\\\"\\nazcopy cp \\\"${RESULTS_DIR}/timing.json\\\"               \\\"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_04_timing.json\\\"               --log-level=WARNING 2\\u003e/dev/null || true\\n\\nTOTAL=$((END_BL - START_DL))\\necho \\\"\\\"\\necho \\\"=== SUMMARY shard-${SHARD_IDX} ===\\\"\\necho \\\"  Download: ${DL_TIME}s\\\"\\necho \\\"  BLAST:    ${BL_TIME}s\\\"\\necho \\\"  Hits:     ${HITS}\\\"\\necho \\\"  Total:    ${TOTAL}s\\\"\\necho \\\"SHARD_COMPLETE ${SHARD_IDX}\\\"\\n\"],\"command\":[\"/bin/bash\",\"-c\"],\"image\":\"elbacr.azurecr.io/ncbi/elb:1.4.0\",\"name\":\"blast\",\"resources\":{\"limits\":{\"cpu\":\"15\",\"memory\":\"110Gi\"},\"requests\":{\"cpu\":\"8\",\"memory\":\"80Gi\"}},\"volumeMounts\":[{\"mountPath\":\"/workspace\",\"name\":\"workspace\"}]}],\"nodeName\":\"aks-nodepool1-16591338-vmss000004\",\"restartPolicy\":\"Never\",\"volumes\":[{\"hostPath\":{\"path\":\"/mnt/workspace-shard-04\",\"type\":\"DirectoryOrCreate\"},\"name\":\"workspace\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-04-22T04:08:56Z",
+                "generation": 1,
+                "labels": {
+                    "app": "shard-blast",
+                    "shard": "04"
+                },
+                "name": "shard-blast-04",
+                "namespace": "default",
+                "resourceVersion": "17611",
+                "uid": "f52ef5df-812e-45b2-af32-df0d90d9e768"
+            },
+            "spec": {
+                "activeDeadlineSeconds": 7200,
+                "backoffLimit": 1,
+                "completionMode": "NonIndexed",
+                "completions": 1,
+                "manualSelector": false,
+                "parallelism": 1,
+                "podReplacementPolicy": "TerminatingOrFailed",
+                "selector": {
+                    "matchLabels": {
+                        "batch.kubernetes.io/controller-uid": "f52ef5df-812e-45b2-af32-df0d90d9e768"
+                    }
+                },
+                "suspend": false,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "shard-blast",
+                            "batch.kubernetes.io/controller-uid": "f52ef5df-812e-45b2-af32-df0d90d9e768",
+                            "batch.kubernetes.io/job-name": "shard-blast-04",
+                            "controller-uid": "f52ef5df-812e-45b2-af32-df0d90d9e768",
+                            "job-name": "shard-blast-04",
+                            "shard": "04"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "set -eo pipefail\nSHARD_IDX=4\nSHARD_NAME=core_nt_shard_04\nDB_DIR=/workspace/blastdb\nQUERY_DIR=/workspace/queries\nRESULTS_DIR=/workspace/results\nmkdir -p $DB_DIR $QUERY_DIR $RESULTS_DIR\n\necho \"=== Shard $SHARD_IDX: Download ===\"\nSTART_DL=$(date +%s)\n\n# Auth\nazcopy login --identity 2\u003e/dev/null || echo \"azcopy login warning\"\n\n# Download manifest\nazcopy cp \"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_04/core_nt_shard_04.manifest\"               /tmp/manifest.txt --log-level=WARNING 2\u003e/dev/null\nVOLUMES=$(cat /tmp/manifest.txt)\necho \"Volumes: $VOLUMES\"\n\n# Download each volume\nfor VOL in $VOLUMES; do\n    echo \"  Downloading $VOL...\"\n    for EXT in nsq nhr nin nnd nni nog nos not; do\n        azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\" \"${DB_DIR}/${VOL}.${EXT}\"                       --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\n    done\ndone\n\n# Build space-separated volume list for direct BLAST -db usage\n# (bypasses .nal alias file entirely)\nVOLPATHS=\"\"\nfor VOL in $VOLUMES; do\n    [ -n \"$VOLPATHS\" ] \u0026\u0026 VOLPATHS=\"$VOLPATHS \"\n    VOLPATHS=\"${VOLPATHS}${DB_DIR}/${VOL}\"\ndone\necho \"Volume paths: $VOLPATHS\"\n\n# Download taxonomy support files\n# core_nt.ndb (6.5 GB), .ntf (185 MB), .nto (487 MB) + taxdb\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\n    echo \"  Downloading $F...\"\n    azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\" \"${DB_DIR}/${F}\"                   --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\ndone\n\nEND_DL=$(date +%s)\nDL_TIME=$((END_DL - START_DL))\necho \"RUNTIME download-shard-${SHARD_IDX} ${DL_TIME} seconds\"\necho \"DB files: $(ls ${DB_DIR}/*.nsq 2\u003e/dev/null | wc -l) nsq volumes\"\n\n# Download query\nazcopy cp \"https://stgelb.blob.core.windows.net/queries/pathogen-10.fa\" \"${QUERY_DIR}/query.fa\"               --log-level=WARNING 2\u003e/dev/null\necho \"Query: $(grep -c '^\u003e' ${QUERY_DIR}/query.fa) sequences\"\n\necho \"=== Shard $SHARD_IDX: BLAST ===\"\nSTART_BL=$(date +%s)\n\nblastn -db \"$VOLPATHS\"               -query \"${QUERY_DIR}/query.fa\"               -max_target_seqs 500 -evalue 0.05               -word_size 28 -dust yes -soft_masking true               -outfmt 7               -dbsize 978954058562               -num_threads $(nproc)               -out \"${RESULTS_DIR}/shard_04.out\" 2\u003e\u00261\n\nEND_BL=$(date +%s)\nBL_TIME=$((END_BL - START_BL))\nHITS=$(grep -vc '^#' \"${RESULTS_DIR}/shard_04.out\" 2\u003e/dev/null || echo 0)\necho \"RUNTIME blast-shard-${SHARD_IDX} ${BL_TIME} seconds\"\necho \"HITS shard-${SHARD_IDX} ${HITS}\"\n\n# Compress and upload results\ngzip -f \"${RESULTS_DIR}/shard_04.out\"\nazcopy cp \"${RESULTS_DIR}/shard_04.out.gz\"               \"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_04.out.gz\"               --log-level=WARNING 2\u003e/dev/null || true\n\n# Write timing summary\necho \"{\\\"shard\\\":4,\\\"download_sec\\\":${DL_TIME},\\\"blast_sec\\\":${BL_TIME},\\\"hits\\\":${HITS}}\"               \u003e \"${RESULTS_DIR}/timing.json\"\nazcopy cp \"${RESULTS_DIR}/timing.json\"               \"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_04_timing.json\"               --log-level=WARNING 2\u003e/dev/null || true\n\nTOTAL=$((END_BL - START_DL))\necho \"\"\necho \"=== SUMMARY shard-${SHARD_IDX} ===\"\necho \"  Download: ${DL_TIME}s\"\necho \"  BLAST:    ${BL_TIME}s\"\necho \"  Hits:     ${HITS}\"\necho \"  Total:    ${TOTAL}s\"\necho \"SHARD_COMPLETE ${SHARD_IDX}\"\n"
+                                ],
+                                "command": [
+                                    "/bin/bash",
+                                    "-c"
+                                ],
+                                "image": "elbacr.azurecr.io/ncbi/elb:1.4.0",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "blast",
+                                "resources": {
+                                    "limits": {
+                                        "cpu": "15",
+                                        "memory": "110Gi"
+                                    },
+                                    "requests": {
+                                        "cpu": "8",
+                                        "memory": "80Gi"
+                                    }
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/workspace",
+                                        "name": "workspace"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeName": "aks-nodepool1-16591338-vmss000004",
+                        "restartPolicy": "Never",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30,
+                        "volumes": [
+                            {
+                                "hostPath": {
+                                    "path": "/mnt/workspace-shard-04",
+                                    "type": "DirectoryOrCreate"
+                                },
+                                "name": "workspace"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "completionTime": "2026-04-22T04:12:42Z",
+                "conditions": [
+                    {
+                        "lastProbeTime": "2026-04-22T04:12:42Z",
+                        "lastTransitionTime": "2026-04-22T04:12:42Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "SuccessCriteriaMet"
+                    },
+                    {
+                        "lastProbeTime": "2026-04-22T04:12:42Z",
+                        "lastTransitionTime": "2026-04-22T04:12:42Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "Complete"
+                    }
+                ],
+                "ready": 0,
+                "startTime": "2026-04-22T04:08:56Z",
+                "succeeded": 1,
+                "terminating": 0,
+                "uncountedTerminatedPods": {}
+            }
+        },
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\",\"kind\":\"Job\",\"metadata\":{\"annotations\":{},\"labels\":{\"app\":\"shard-blast\",\"shard\":\"05\"},\"name\":\"shard-blast-05\",\"namespace\":\"default\"},\"spec\":{\"activeDeadlineSeconds\":7200,\"backoffLimit\":1,\"template\":{\"metadata\":{\"labels\":{\"app\":\"shard-blast\",\"shard\":\"05\"}},\"spec\":{\"containers\":[{\"args\":[\"set -eo pipefail\\nSHARD_IDX=5\\nSHARD_NAME=core_nt_shard_05\\nDB_DIR=/workspace/blastdb\\nQUERY_DIR=/workspace/queries\\nRESULTS_DIR=/workspace/results\\nmkdir -p $DB_DIR $QUERY_DIR $RESULTS_DIR\\n\\necho \\\"=== Shard $SHARD_IDX: Download ===\\\"\\nSTART_DL=$(date +%s)\\n\\n# Auth\\nazcopy login --identity 2\\u003e/dev/null || echo \\\"azcopy login warning\\\"\\n\\n# Download manifest\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_05/core_nt_shard_05.manifest\\\"               /tmp/manifest.txt --log-level=WARNING 2\\u003e/dev/null\\nVOLUMES=$(cat /tmp/manifest.txt)\\necho \\\"Volumes: $VOLUMES\\\"\\n\\n# Download each volume\\nfor VOL in $VOLUMES; do\\n    echo \\\"  Downloading $VOL...\\\"\\n    for EXT in nsq nhr nin nnd nni nog nos not; do\\n        azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\\\" \\\"${DB_DIR}/${VOL}.${EXT}\\\"                       --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\n    done\\ndone\\n\\n# Build space-separated volume list for direct BLAST -db usage\\n# (bypasses .nal alias file entirely)\\nVOLPATHS=\\\"\\\"\\nfor VOL in $VOLUMES; do\\n    [ -n \\\"$VOLPATHS\\\" ] \\u0026\\u0026 VOLPATHS=\\\"$VOLPATHS \\\"\\n    VOLPATHS=\\\"${VOLPATHS}${DB_DIR}/${VOL}\\\"\\ndone\\necho \\\"Volume paths: $VOLPATHS\\\"\\n\\n# Download taxonomy support files\\n# core_nt.ndb (6.5 GB), .ntf (185 MB), .nto (487 MB) + taxdb\\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\\n    echo \\\"  Downloading $F...\\\"\\n    azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\\\" \\\"${DB_DIR}/${F}\\\"                   --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\ndone\\n\\nEND_DL=$(date +%s)\\nDL_TIME=$((END_DL - START_DL))\\necho \\\"RUNTIME download-shard-${SHARD_IDX} ${DL_TIME} seconds\\\"\\necho \\\"DB files: $(ls ${DB_DIR}/*.nsq 2\\u003e/dev/null | wc -l) nsq volumes\\\"\\n\\n# Download query\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/queries/pathogen-10.fa\\\" \\\"${QUERY_DIR}/query.fa\\\"               --log-level=WARNING 2\\u003e/dev/null\\necho \\\"Query: $(grep -c '^\\u003e' ${QUERY_DIR}/query.fa) sequences\\\"\\n\\necho \\\"=== Shard $SHARD_IDX: BLAST ===\\\"\\nSTART_BL=$(date +%s)\\n\\nblastn -db \\\"$VOLPATHS\\\"               -query \\\"${QUERY_DIR}/query.fa\\\"               -max_target_seqs 500 -evalue 0.05               -word_size 28 -dust yes -soft_masking true               -outfmt 7               -dbsize 978954058562               -num_threads $(nproc)               -out \\\"${RESULTS_DIR}/shard_05.out\\\" 2\\u003e\\u00261\\n\\nEND_BL=$(date +%s)\\nBL_TIME=$((END_BL - START_BL))\\nHITS=$(grep -vc '^#' \\\"${RESULTS_DIR}/shard_05.out\\\" 2\\u003e/dev/null || echo 0)\\necho \\\"RUNTIME blast-shard-${SHARD_IDX} ${BL_TIME} seconds\\\"\\necho \\\"HITS shard-${SHARD_IDX} ${HITS}\\\"\\n\\n# Compress and upload results\\ngzip -f \\\"${RESULTS_DIR}/shard_05.out\\\"\\nazcopy cp \\\"${RESULTS_DIR}/shard_05.out.gz\\\"               \\\"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_05.out.gz\\\"               --log-level=WARNING 2\\u003e/dev/null || true\\n\\n# Write timing summary\\necho \\\"{\\\\\\\"shard\\\\\\\":5,\\\\\\\"download_sec\\\\\\\":${DL_TIME},\\\\\\\"blast_sec\\\\\\\":${BL_TIME},\\\\\\\"hits\\\\\\\":${HITS}}\\\"               \\u003e \\\"${RESULTS_DIR}/timing.json\\\"\\nazcopy cp \\\"${RESULTS_DIR}/timing.json\\\"               \\\"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_05_timing.json\\\"               --log-level=WARNING 2\\u003e/dev/null || true\\n\\nTOTAL=$((END_BL - START_DL))\\necho \\\"\\\"\\necho \\\"=== SUMMARY shard-${SHARD_IDX} ===\\\"\\necho \\\"  Download: ${DL_TIME}s\\\"\\necho \\\"  BLAST:    ${BL_TIME}s\\\"\\necho \\\"  Hits:     ${HITS}\\\"\\necho \\\"  Total:    ${TOTAL}s\\\"\\necho \\\"SHARD_COMPLETE ${SHARD_IDX}\\\"\\n\"],\"command\":[\"/bin/bash\",\"-c\"],\"image\":\"elbacr.azurecr.io/ncbi/elb:1.4.0\",\"name\":\"blast\",\"resources\":{\"limits\":{\"cpu\":\"15\",\"memory\":\"110Gi\"},\"requests\":{\"cpu\":\"8\",\"memory\":\"80Gi\"}},\"volumeMounts\":[{\"mountPath\":\"/workspace\",\"name\":\"workspace\"}]}],\"nodeName\":\"aks-nodepool1-16591338-vmss000005\",\"restartPolicy\":\"Never\",\"volumes\":[{\"hostPath\":{\"path\":\"/mnt/workspace-shard-05\",\"type\":\"DirectoryOrCreate\"},\"name\":\"workspace\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-04-22T04:08:57Z",
+                "generation": 1,
+                "labels": {
+                    "app": "shard-blast",
+                    "shard": "05"
+                },
+                "name": "shard-blast-05",
+                "namespace": "default",
+                "resourceVersion": "17752",
+                "uid": "f6ca8b47-b46b-4b7e-b9e4-41c52f93cc9c"
+            },
+            "spec": {
+                "activeDeadlineSeconds": 7200,
+                "backoffLimit": 1,
+                "completionMode": "NonIndexed",
+                "completions": 1,
+                "manualSelector": false,
+                "parallelism": 1,
+                "podReplacementPolicy": "TerminatingOrFailed",
+                "selector": {
+                    "matchLabels": {
+                        "batch.kubernetes.io/controller-uid": "f6ca8b47-b46b-4b7e-b9e4-41c52f93cc9c"
+                    }
+                },
+                "suspend": false,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "shard-blast",
+                            "batch.kubernetes.io/controller-uid": "f6ca8b47-b46b-4b7e-b9e4-41c52f93cc9c",
+                            "batch.kubernetes.io/job-name": "shard-blast-05",
+                            "controller-uid": "f6ca8b47-b46b-4b7e-b9e4-41c52f93cc9c",
+                            "job-name": "shard-blast-05",
+                            "shard": "05"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "set -eo pipefail\nSHARD_IDX=5\nSHARD_NAME=core_nt_shard_05\nDB_DIR=/workspace/blastdb\nQUERY_DIR=/workspace/queries\nRESULTS_DIR=/workspace/results\nmkdir -p $DB_DIR $QUERY_DIR $RESULTS_DIR\n\necho \"=== Shard $SHARD_IDX: Download ===\"\nSTART_DL=$(date +%s)\n\n# Auth\nazcopy login --identity 2\u003e/dev/null || echo \"azcopy login warning\"\n\n# Download manifest\nazcopy cp \"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_05/core_nt_shard_05.manifest\"               /tmp/manifest.txt --log-level=WARNING 2\u003e/dev/null\nVOLUMES=$(cat /tmp/manifest.txt)\necho \"Volumes: $VOLUMES\"\n\n# Download each volume\nfor VOL in $VOLUMES; do\n    echo \"  Downloading $VOL...\"\n    for EXT in nsq nhr nin nnd nni nog nos not; do\n        azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\" \"${DB_DIR}/${VOL}.${EXT}\"                       --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\n    done\ndone\n\n# Build space-separated volume list for direct BLAST -db usage\n# (bypasses .nal alias file entirely)\nVOLPATHS=\"\"\nfor VOL in $VOLUMES; do\n    [ -n \"$VOLPATHS\" ] \u0026\u0026 VOLPATHS=\"$VOLPATHS \"\n    VOLPATHS=\"${VOLPATHS}${DB_DIR}/${VOL}\"\ndone\necho \"Volume paths: $VOLPATHS\"\n\n# Download taxonomy support files\n# core_nt.ndb (6.5 GB), .ntf (185 MB), .nto (487 MB) + taxdb\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\n    echo \"  Downloading $F...\"\n    azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\" \"${DB_DIR}/${F}\"                   --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\ndone\n\nEND_DL=$(date +%s)\nDL_TIME=$((END_DL - START_DL))\necho \"RUNTIME download-shard-${SHARD_IDX} ${DL_TIME} seconds\"\necho \"DB files: $(ls ${DB_DIR}/*.nsq 2\u003e/dev/null | wc -l) nsq volumes\"\n\n# Download query\nazcopy cp \"https://stgelb.blob.core.windows.net/queries/pathogen-10.fa\" \"${QUERY_DIR}/query.fa\"               --log-level=WARNING 2\u003e/dev/null\necho \"Query: $(grep -c '^\u003e' ${QUERY_DIR}/query.fa) sequences\"\n\necho \"=== Shard $SHARD_IDX: BLAST ===\"\nSTART_BL=$(date +%s)\n\nblastn -db \"$VOLPATHS\"               -query \"${QUERY_DIR}/query.fa\"               -max_target_seqs 500 -evalue 0.05               -word_size 28 -dust yes -soft_masking true               -outfmt 7               -dbsize 978954058562               -num_threads $(nproc)               -out \"${RESULTS_DIR}/shard_05.out\" 2\u003e\u00261\n\nEND_BL=$(date +%s)\nBL_TIME=$((END_BL - START_BL))\nHITS=$(grep -vc '^#' \"${RESULTS_DIR}/shard_05.out\" 2\u003e/dev/null || echo 0)\necho \"RUNTIME blast-shard-${SHARD_IDX} ${BL_TIME} seconds\"\necho \"HITS shard-${SHARD_IDX} ${HITS}\"\n\n# Compress and upload results\ngzip -f \"${RESULTS_DIR}/shard_05.out\"\nazcopy cp \"${RESULTS_DIR}/shard_05.out.gz\"               \"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_05.out.gz\"               --log-level=WARNING 2\u003e/dev/null || true\n\n# Write timing summary\necho \"{\\\"shard\\\":5,\\\"download_sec\\\":${DL_TIME},\\\"blast_sec\\\":${BL_TIME},\\\"hits\\\":${HITS}}\"               \u003e \"${RESULTS_DIR}/timing.json\"\nazcopy cp \"${RESULTS_DIR}/timing.json\"               \"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_05_timing.json\"               --log-level=WARNING 2\u003e/dev/null || true\n\nTOTAL=$((END_BL - START_DL))\necho \"\"\necho \"=== SUMMARY shard-${SHARD_IDX} ===\"\necho \"  Download: ${DL_TIME}s\"\necho \"  BLAST:    ${BL_TIME}s\"\necho \"  Hits:     ${HITS}\"\necho \"  Total:    ${TOTAL}s\"\necho \"SHARD_COMPLETE ${SHARD_IDX}\"\n"
+                                ],
+                                "command": [
+                                    "/bin/bash",
+                                    "-c"
+                                ],
+                                "image": "elbacr.azurecr.io/ncbi/elb:1.4.0",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "blast",
+                                "resources": {
+                                    "limits": {
+                                        "cpu": "15",
+                                        "memory": "110Gi"
+                                    },
+                                    "requests": {
+                                        "cpu": "8",
+                                        "memory": "80Gi"
+                                    }
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/workspace",
+                                        "name": "workspace"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeName": "aks-nodepool1-16591338-vmss000005",
+                        "restartPolicy": "Never",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30,
+                        "volumes": [
+                            {
+                                "hostPath": {
+                                    "path": "/mnt/workspace-shard-05",
+                                    "type": "DirectoryOrCreate"
+                                },
+                                "name": "workspace"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "completionTime": "2026-04-22T04:13:03Z",
+                "conditions": [
+                    {
+                        "lastProbeTime": "2026-04-22T04:13:03Z",
+                        "lastTransitionTime": "2026-04-22T04:13:03Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "SuccessCriteriaMet"
+                    },
+                    {
+                        "lastProbeTime": "2026-04-22T04:13:03Z",
+                        "lastTransitionTime": "2026-04-22T04:13:03Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "Complete"
+                    }
+                ],
+                "ready": 0,
+                "startTime": "2026-04-22T04:08:57Z",
+                "succeeded": 1,
+                "terminating": 0,
+                "uncountedTerminatedPods": {}
+            }
+        },
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\",\"kind\":\"Job\",\"metadata\":{\"annotations\":{},\"labels\":{\"app\":\"shard-blast\",\"shard\":\"06\"},\"name\":\"shard-blast-06\",\"namespace\":\"default\"},\"spec\":{\"activeDeadlineSeconds\":7200,\"backoffLimit\":1,\"template\":{\"metadata\":{\"labels\":{\"app\":\"shard-blast\",\"shard\":\"06\"}},\"spec\":{\"containers\":[{\"args\":[\"set -eo pipefail\\nSHARD_IDX=6\\nSHARD_NAME=core_nt_shard_06\\nDB_DIR=/workspace/blastdb\\nQUERY_DIR=/workspace/queries\\nRESULTS_DIR=/workspace/results\\nmkdir -p $DB_DIR $QUERY_DIR $RESULTS_DIR\\n\\necho \\\"=== Shard $SHARD_IDX: Download ===\\\"\\nSTART_DL=$(date +%s)\\n\\n# Auth\\nazcopy login --identity 2\\u003e/dev/null || echo \\\"azcopy login warning\\\"\\n\\n# Download manifest\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_06/core_nt_shard_06.manifest\\\"               /tmp/manifest.txt --log-level=WARNING 2\\u003e/dev/null\\nVOLUMES=$(cat /tmp/manifest.txt)\\necho \\\"Volumes: $VOLUMES\\\"\\n\\n# Download each volume\\nfor VOL in $VOLUMES; do\\n    echo \\\"  Downloading $VOL...\\\"\\n    for EXT in nsq nhr nin nnd nni nog nos not; do\\n        azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\\\" \\\"${DB_DIR}/${VOL}.${EXT}\\\"                       --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\n    done\\ndone\\n\\n# Build space-separated volume list for direct BLAST -db usage\\n# (bypasses .nal alias file entirely)\\nVOLPATHS=\\\"\\\"\\nfor VOL in $VOLUMES; do\\n    [ -n \\\"$VOLPATHS\\\" ] \\u0026\\u0026 VOLPATHS=\\\"$VOLPATHS \\\"\\n    VOLPATHS=\\\"${VOLPATHS}${DB_DIR}/${VOL}\\\"\\ndone\\necho \\\"Volume paths: $VOLPATHS\\\"\\n\\n# Download taxonomy support files\\n# core_nt.ndb (6.5 GB), .ntf (185 MB), .nto (487 MB) + taxdb\\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\\n    echo \\\"  Downloading $F...\\\"\\n    azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\\\" \\\"${DB_DIR}/${F}\\\"                   --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\ndone\\n\\nEND_DL=$(date +%s)\\nDL_TIME=$((END_DL - START_DL))\\necho \\\"RUNTIME download-shard-${SHARD_IDX} ${DL_TIME} seconds\\\"\\necho \\\"DB files: $(ls ${DB_DIR}/*.nsq 2\\u003e/dev/null | wc -l) nsq volumes\\\"\\n\\n# Download query\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/queries/pathogen-10.fa\\\" \\\"${QUERY_DIR}/query.fa\\\"               --log-level=WARNING 2\\u003e/dev/null\\necho \\\"Query: $(grep -c '^\\u003e' ${QUERY_DIR}/query.fa) sequences\\\"\\n\\necho \\\"=== Shard $SHARD_IDX: BLAST ===\\\"\\nSTART_BL=$(date +%s)\\n\\nblastn -db \\\"$VOLPATHS\\\"               -query \\\"${QUERY_DIR}/query.fa\\\"               -max_target_seqs 500 -evalue 0.05               -word_size 28 -dust yes -soft_masking true               -outfmt 7               -dbsize 978954058562               -num_threads $(nproc)               -out \\\"${RESULTS_DIR}/shard_06.out\\\" 2\\u003e\\u00261\\n\\nEND_BL=$(date +%s)\\nBL_TIME=$((END_BL - START_BL))\\nHITS=$(grep -vc '^#' \\\"${RESULTS_DIR}/shard_06.out\\\" 2\\u003e/dev/null || echo 0)\\necho \\\"RUNTIME blast-shard-${SHARD_IDX} ${BL_TIME} seconds\\\"\\necho \\\"HITS shard-${SHARD_IDX} ${HITS}\\\"\\n\\n# Compress and upload results\\ngzip -f \\\"${RESULTS_DIR}/shard_06.out\\\"\\nazcopy cp \\\"${RESULTS_DIR}/shard_06.out.gz\\\"               \\\"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_06.out.gz\\\"               --log-level=WARNING 2\\u003e/dev/null || true\\n\\n# Write timing summary\\necho \\\"{\\\\\\\"shard\\\\\\\":6,\\\\\\\"download_sec\\\\\\\":${DL_TIME},\\\\\\\"blast_sec\\\\\\\":${BL_TIME},\\\\\\\"hits\\\\\\\":${HITS}}\\\"               \\u003e \\\"${RESULTS_DIR}/timing.json\\\"\\nazcopy cp \\\"${RESULTS_DIR}/timing.json\\\"               \\\"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_06_timing.json\\\"               --log-level=WARNING 2\\u003e/dev/null || true\\n\\nTOTAL=$((END_BL - START_DL))\\necho \\\"\\\"\\necho \\\"=== SUMMARY shard-${SHARD_IDX} ===\\\"\\necho \\\"  Download: ${DL_TIME}s\\\"\\necho \\\"  BLAST:    ${BL_TIME}s\\\"\\necho \\\"  Hits:     ${HITS}\\\"\\necho \\\"  Total:    ${TOTAL}s\\\"\\necho \\\"SHARD_COMPLETE ${SHARD_IDX}\\\"\\n\"],\"command\":[\"/bin/bash\",\"-c\"],\"image\":\"elbacr.azurecr.io/ncbi/elb:1.4.0\",\"name\":\"blast\",\"resources\":{\"limits\":{\"cpu\":\"15\",\"memory\":\"110Gi\"},\"requests\":{\"cpu\":\"8\",\"memory\":\"80Gi\"}},\"volumeMounts\":[{\"mountPath\":\"/workspace\",\"name\":\"workspace\"}]}],\"nodeName\":\"aks-nodepool1-16591338-vmss000006\",\"restartPolicy\":\"Never\",\"volumes\":[{\"hostPath\":{\"path\":\"/mnt/workspace-shard-06\",\"type\":\"DirectoryOrCreate\"},\"name\":\"workspace\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-04-22T04:08:58Z",
+                "generation": 1,
+                "labels": {
+                    "app": "shard-blast",
+                    "shard": "06"
+                },
+                "name": "shard-blast-06",
+                "namespace": "default",
+                "resourceVersion": "17642",
+                "uid": "6b730783-bd0d-4cb5-b1a4-e69ffa6941c3"
+            },
+            "spec": {
+                "activeDeadlineSeconds": 7200,
+                "backoffLimit": 1,
+                "completionMode": "NonIndexed",
+                "completions": 1,
+                "manualSelector": false,
+                "parallelism": 1,
+                "podReplacementPolicy": "TerminatingOrFailed",
+                "selector": {
+                    "matchLabels": {
+                        "batch.kubernetes.io/controller-uid": "6b730783-bd0d-4cb5-b1a4-e69ffa6941c3"
+                    }
+                },
+                "suspend": false,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "shard-blast",
+                            "batch.kubernetes.io/controller-uid": "6b730783-bd0d-4cb5-b1a4-e69ffa6941c3",
+                            "batch.kubernetes.io/job-name": "shard-blast-06",
+                            "controller-uid": "6b730783-bd0d-4cb5-b1a4-e69ffa6941c3",
+                            "job-name": "shard-blast-06",
+                            "shard": "06"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "set -eo pipefail\nSHARD_IDX=6\nSHARD_NAME=core_nt_shard_06\nDB_DIR=/workspace/blastdb\nQUERY_DIR=/workspace/queries\nRESULTS_DIR=/workspace/results\nmkdir -p $DB_DIR $QUERY_DIR $RESULTS_DIR\n\necho \"=== Shard $SHARD_IDX: Download ===\"\nSTART_DL=$(date +%s)\n\n# Auth\nazcopy login --identity 2\u003e/dev/null || echo \"azcopy login warning\"\n\n# Download manifest\nazcopy cp \"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_06/core_nt_shard_06.manifest\"               /tmp/manifest.txt --log-level=WARNING 2\u003e/dev/null\nVOLUMES=$(cat /tmp/manifest.txt)\necho \"Volumes: $VOLUMES\"\n\n# Download each volume\nfor VOL in $VOLUMES; do\n    echo \"  Downloading $VOL...\"\n    for EXT in nsq nhr nin nnd nni nog nos not; do\n        azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\" \"${DB_DIR}/${VOL}.${EXT}\"                       --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\n    done\ndone\n\n# Build space-separated volume list for direct BLAST -db usage\n# (bypasses .nal alias file entirely)\nVOLPATHS=\"\"\nfor VOL in $VOLUMES; do\n    [ -n \"$VOLPATHS\" ] \u0026\u0026 VOLPATHS=\"$VOLPATHS \"\n    VOLPATHS=\"${VOLPATHS}${DB_DIR}/${VOL}\"\ndone\necho \"Volume paths: $VOLPATHS\"\n\n# Download taxonomy support files\n# core_nt.ndb (6.5 GB), .ntf (185 MB), .nto (487 MB) + taxdb\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\n    echo \"  Downloading $F...\"\n    azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\" \"${DB_DIR}/${F}\"                   --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\ndone\n\nEND_DL=$(date +%s)\nDL_TIME=$((END_DL - START_DL))\necho \"RUNTIME download-shard-${SHARD_IDX} ${DL_TIME} seconds\"\necho \"DB files: $(ls ${DB_DIR}/*.nsq 2\u003e/dev/null | wc -l) nsq volumes\"\n\n# Download query\nazcopy cp \"https://stgelb.blob.core.windows.net/queries/pathogen-10.fa\" \"${QUERY_DIR}/query.fa\"               --log-level=WARNING 2\u003e/dev/null\necho \"Query: $(grep -c '^\u003e' ${QUERY_DIR}/query.fa) sequences\"\n\necho \"=== Shard $SHARD_IDX: BLAST ===\"\nSTART_BL=$(date +%s)\n\nblastn -db \"$VOLPATHS\"               -query \"${QUERY_DIR}/query.fa\"               -max_target_seqs 500 -evalue 0.05               -word_size 28 -dust yes -soft_masking true               -outfmt 7               -dbsize 978954058562               -num_threads $(nproc)               -out \"${RESULTS_DIR}/shard_06.out\" 2\u003e\u00261\n\nEND_BL=$(date +%s)\nBL_TIME=$((END_BL - START_BL))\nHITS=$(grep -vc '^#' \"${RESULTS_DIR}/shard_06.out\" 2\u003e/dev/null || echo 0)\necho \"RUNTIME blast-shard-${SHARD_IDX} ${BL_TIME} seconds\"\necho \"HITS shard-${SHARD_IDX} ${HITS}\"\n\n# Compress and upload results\ngzip -f \"${RESULTS_DIR}/shard_06.out\"\nazcopy cp \"${RESULTS_DIR}/shard_06.out.gz\"               \"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_06.out.gz\"               --log-level=WARNING 2\u003e/dev/null || true\n\n# Write timing summary\necho \"{\\\"shard\\\":6,\\\"download_sec\\\":${DL_TIME},\\\"blast_sec\\\":${BL_TIME},\\\"hits\\\":${HITS}}\"               \u003e \"${RESULTS_DIR}/timing.json\"\nazcopy cp \"${RESULTS_DIR}/timing.json\"               \"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_06_timing.json\"               --log-level=WARNING 2\u003e/dev/null || true\n\nTOTAL=$((END_BL - START_DL))\necho \"\"\necho \"=== SUMMARY shard-${SHARD_IDX} ===\"\necho \"  Download: ${DL_TIME}s\"\necho \"  BLAST:    ${BL_TIME}s\"\necho \"  Hits:     ${HITS}\"\necho \"  Total:    ${TOTAL}s\"\necho \"SHARD_COMPLETE ${SHARD_IDX}\"\n"
+                                ],
+                                "command": [
+                                    "/bin/bash",
+                                    "-c"
+                                ],
+                                "image": "elbacr.azurecr.io/ncbi/elb:1.4.0",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "blast",
+                                "resources": {
+                                    "limits": {
+                                        "cpu": "15",
+                                        "memory": "110Gi"
+                                    },
+                                    "requests": {
+                                        "cpu": "8",
+                                        "memory": "80Gi"
+                                    }
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/workspace",
+                                        "name": "workspace"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeName": "aks-nodepool1-16591338-vmss000006",
+                        "restartPolicy": "Never",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30,
+                        "volumes": [
+                            {
+                                "hostPath": {
+                                    "path": "/mnt/workspace-shard-06",
+                                    "type": "DirectoryOrCreate"
+                                },
+                                "name": "workspace"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "completionTime": "2026-04-22T04:12:47Z",
+                "conditions": [
+                    {
+                        "lastProbeTime": "2026-04-22T04:12:47Z",
+                        "lastTransitionTime": "2026-04-22T04:12:47Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "SuccessCriteriaMet"
+                    },
+                    {
+                        "lastProbeTime": "2026-04-22T04:12:47Z",
+                        "lastTransitionTime": "2026-04-22T04:12:47Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "Complete"
+                    }
+                ],
+                "ready": 0,
+                "startTime": "2026-04-22T04:08:58Z",
+                "succeeded": 1,
+                "terminating": 0,
+                "uncountedTerminatedPods": {}
+            }
+        },
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\",\"kind\":\"Job\",\"metadata\":{\"annotations\":{},\"labels\":{\"app\":\"shard-blast\",\"shard\":\"07\"},\"name\":\"shard-blast-07\",\"namespace\":\"default\"},\"spec\":{\"activeDeadlineSeconds\":7200,\"backoffLimit\":1,\"template\":{\"metadata\":{\"labels\":{\"app\":\"shard-blast\",\"shard\":\"07\"}},\"spec\":{\"containers\":[{\"args\":[\"set -eo pipefail\\nSHARD_IDX=7\\nSHARD_NAME=core_nt_shard_07\\nDB_DIR=/workspace/blastdb\\nQUERY_DIR=/workspace/queries\\nRESULTS_DIR=/workspace/results\\nmkdir -p $DB_DIR $QUERY_DIR $RESULTS_DIR\\n\\necho \\\"=== Shard $SHARD_IDX: Download ===\\\"\\nSTART_DL=$(date +%s)\\n\\n# Auth\\nazcopy login --identity 2\\u003e/dev/null || echo \\\"azcopy login warning\\\"\\n\\n# Download manifest\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_07/core_nt_shard_07.manifest\\\"               /tmp/manifest.txt --log-level=WARNING 2\\u003e/dev/null\\nVOLUMES=$(cat /tmp/manifest.txt)\\necho \\\"Volumes: $VOLUMES\\\"\\n\\n# Download each volume\\nfor VOL in $VOLUMES; do\\n    echo \\\"  Downloading $VOL...\\\"\\n    for EXT in nsq nhr nin nnd nni nog nos not; do\\n        azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\\\" \\\"${DB_DIR}/${VOL}.${EXT}\\\"                       --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\n    done\\ndone\\n\\n# Build space-separated volume list for direct BLAST -db usage\\n# (bypasses .nal alias file entirely)\\nVOLPATHS=\\\"\\\"\\nfor VOL in $VOLUMES; do\\n    [ -n \\\"$VOLPATHS\\\" ] \\u0026\\u0026 VOLPATHS=\\\"$VOLPATHS \\\"\\n    VOLPATHS=\\\"${VOLPATHS}${DB_DIR}/${VOL}\\\"\\ndone\\necho \\\"Volume paths: $VOLPATHS\\\"\\n\\n# Download taxonomy support files\\n# core_nt.ndb (6.5 GB), .ntf (185 MB), .nto (487 MB) + taxdb\\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\\n    echo \\\"  Downloading $F...\\\"\\n    azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\\\" \\\"${DB_DIR}/${F}\\\"                   --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\ndone\\n\\nEND_DL=$(date +%s)\\nDL_TIME=$((END_DL - START_DL))\\necho \\\"RUNTIME download-shard-${SHARD_IDX} ${DL_TIME} seconds\\\"\\necho \\\"DB files: $(ls ${DB_DIR}/*.nsq 2\\u003e/dev/null | wc -l) nsq volumes\\\"\\n\\n# Download query\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/queries/pathogen-10.fa\\\" \\\"${QUERY_DIR}/query.fa\\\"               --log-level=WARNING 2\\u003e/dev/null\\necho \\\"Query: $(grep -c '^\\u003e' ${QUERY_DIR}/query.fa) sequences\\\"\\n\\necho \\\"=== Shard $SHARD_IDX: BLAST ===\\\"\\nSTART_BL=$(date +%s)\\n\\nblastn -db \\\"$VOLPATHS\\\"               -query \\\"${QUERY_DIR}/query.fa\\\"               -max_target_seqs 500 -evalue 0.05               -word_size 28 -dust yes -soft_masking true               -outfmt 7               -dbsize 978954058562               -num_threads $(nproc)               -out \\\"${RESULTS_DIR}/shard_07.out\\\" 2\\u003e\\u00261\\n\\nEND_BL=$(date +%s)\\nBL_TIME=$((END_BL - START_BL))\\nHITS=$(grep -vc '^#' \\\"${RESULTS_DIR}/shard_07.out\\\" 2\\u003e/dev/null || echo 0)\\necho \\\"RUNTIME blast-shard-${SHARD_IDX} ${BL_TIME} seconds\\\"\\necho \\\"HITS shard-${SHARD_IDX} ${HITS}\\\"\\n\\n# Compress and upload results\\ngzip -f \\\"${RESULTS_DIR}/shard_07.out\\\"\\nazcopy cp \\\"${RESULTS_DIR}/shard_07.out.gz\\\"               \\\"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_07.out.gz\\\"               --log-level=WARNING 2\\u003e/dev/null || true\\n\\n# Write timing summary\\necho \\\"{\\\\\\\"shard\\\\\\\":7,\\\\\\\"download_sec\\\\\\\":${DL_TIME},\\\\\\\"blast_sec\\\\\\\":${BL_TIME},\\\\\\\"hits\\\\\\\":${HITS}}\\\"               \\u003e \\\"${RESULTS_DIR}/timing.json\\\"\\nazcopy cp \\\"${RESULTS_DIR}/timing.json\\\"               \\\"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_07_timing.json\\\"               --log-level=WARNING 2\\u003e/dev/null || true\\n\\nTOTAL=$((END_BL - START_DL))\\necho \\\"\\\"\\necho \\\"=== SUMMARY shard-${SHARD_IDX} ===\\\"\\necho \\\"  Download: ${DL_TIME}s\\\"\\necho \\\"  BLAST:    ${BL_TIME}s\\\"\\necho \\\"  Hits:     ${HITS}\\\"\\necho \\\"  Total:    ${TOTAL}s\\\"\\necho \\\"SHARD_COMPLETE ${SHARD_IDX}\\\"\\n\"],\"command\":[\"/bin/bash\",\"-c\"],\"image\":\"elbacr.azurecr.io/ncbi/elb:1.4.0\",\"name\":\"blast\",\"resources\":{\"limits\":{\"cpu\":\"15\",\"memory\":\"110Gi\"},\"requests\":{\"cpu\":\"8\",\"memory\":\"80Gi\"}},\"volumeMounts\":[{\"mountPath\":\"/workspace\",\"name\":\"workspace\"}]}],\"nodeName\":\"aks-nodepool1-16591338-vmss000007\",\"restartPolicy\":\"Never\",\"volumes\":[{\"hostPath\":{\"path\":\"/mnt/workspace-shard-07\",\"type\":\"DirectoryOrCreate\"},\"name\":\"workspace\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-04-22T04:08:58Z",
+                "generation": 1,
+                "labels": {
+                    "app": "shard-blast",
+                    "shard": "07"
+                },
+                "name": "shard-blast-07",
+                "namespace": "default",
+                "resourceVersion": "17568",
+                "uid": "e4d582b9-51cb-478f-9c74-187ae09380df"
+            },
+            "spec": {
+                "activeDeadlineSeconds": 7200,
+                "backoffLimit": 1,
+                "completionMode": "NonIndexed",
+                "completions": 1,
+                "manualSelector": false,
+                "parallelism": 1,
+                "podReplacementPolicy": "TerminatingOrFailed",
+                "selector": {
+                    "matchLabels": {
+                        "batch.kubernetes.io/controller-uid": "e4d582b9-51cb-478f-9c74-187ae09380df"
+                    }
+                },
+                "suspend": false,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "shard-blast",
+                            "batch.kubernetes.io/controller-uid": "e4d582b9-51cb-478f-9c74-187ae09380df",
+                            "batch.kubernetes.io/job-name": "shard-blast-07",
+                            "controller-uid": "e4d582b9-51cb-478f-9c74-187ae09380df",
+                            "job-name": "shard-blast-07",
+                            "shard": "07"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "set -eo pipefail\nSHARD_IDX=7\nSHARD_NAME=core_nt_shard_07\nDB_DIR=/workspace/blastdb\nQUERY_DIR=/workspace/queries\nRESULTS_DIR=/workspace/results\nmkdir -p $DB_DIR $QUERY_DIR $RESULTS_DIR\n\necho \"=== Shard $SHARD_IDX: Download ===\"\nSTART_DL=$(date +%s)\n\n# Auth\nazcopy login --identity 2\u003e/dev/null || echo \"azcopy login warning\"\n\n# Download manifest\nazcopy cp \"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_07/core_nt_shard_07.manifest\"               /tmp/manifest.txt --log-level=WARNING 2\u003e/dev/null\nVOLUMES=$(cat /tmp/manifest.txt)\necho \"Volumes: $VOLUMES\"\n\n# Download each volume\nfor VOL in $VOLUMES; do\n    echo \"  Downloading $VOL...\"\n    for EXT in nsq nhr nin nnd nni nog nos not; do\n        azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\" \"${DB_DIR}/${VOL}.${EXT}\"                       --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\n    done\ndone\n\n# Build space-separated volume list for direct BLAST -db usage\n# (bypasses .nal alias file entirely)\nVOLPATHS=\"\"\nfor VOL in $VOLUMES; do\n    [ -n \"$VOLPATHS\" ] \u0026\u0026 VOLPATHS=\"$VOLPATHS \"\n    VOLPATHS=\"${VOLPATHS}${DB_DIR}/${VOL}\"\ndone\necho \"Volume paths: $VOLPATHS\"\n\n# Download taxonomy support files\n# core_nt.ndb (6.5 GB), .ntf (185 MB), .nto (487 MB) + taxdb\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\n    echo \"  Downloading $F...\"\n    azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\" \"${DB_DIR}/${F}\"                   --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\ndone\n\nEND_DL=$(date +%s)\nDL_TIME=$((END_DL - START_DL))\necho \"RUNTIME download-shard-${SHARD_IDX} ${DL_TIME} seconds\"\necho \"DB files: $(ls ${DB_DIR}/*.nsq 2\u003e/dev/null | wc -l) nsq volumes\"\n\n# Download query\nazcopy cp \"https://stgelb.blob.core.windows.net/queries/pathogen-10.fa\" \"${QUERY_DIR}/query.fa\"               --log-level=WARNING 2\u003e/dev/null\necho \"Query: $(grep -c '^\u003e' ${QUERY_DIR}/query.fa) sequences\"\n\necho \"=== Shard $SHARD_IDX: BLAST ===\"\nSTART_BL=$(date +%s)\n\nblastn -db \"$VOLPATHS\"               -query \"${QUERY_DIR}/query.fa\"               -max_target_seqs 500 -evalue 0.05               -word_size 28 -dust yes -soft_masking true               -outfmt 7               -dbsize 978954058562               -num_threads $(nproc)               -out \"${RESULTS_DIR}/shard_07.out\" 2\u003e\u00261\n\nEND_BL=$(date +%s)\nBL_TIME=$((END_BL - START_BL))\nHITS=$(grep -vc '^#' \"${RESULTS_DIR}/shard_07.out\" 2\u003e/dev/null || echo 0)\necho \"RUNTIME blast-shard-${SHARD_IDX} ${BL_TIME} seconds\"\necho \"HITS shard-${SHARD_IDX} ${HITS}\"\n\n# Compress and upload results\ngzip -f \"${RESULTS_DIR}/shard_07.out\"\nazcopy cp \"${RESULTS_DIR}/shard_07.out.gz\"               \"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_07.out.gz\"               --log-level=WARNING 2\u003e/dev/null || true\n\n# Write timing summary\necho \"{\\\"shard\\\":7,\\\"download_sec\\\":${DL_TIME},\\\"blast_sec\\\":${BL_TIME},\\\"hits\\\":${HITS}}\"               \u003e \"${RESULTS_DIR}/timing.json\"\nazcopy cp \"${RESULTS_DIR}/timing.json\"               \"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_07_timing.json\"               --log-level=WARNING 2\u003e/dev/null || true\n\nTOTAL=$((END_BL - START_DL))\necho \"\"\necho \"=== SUMMARY shard-${SHARD_IDX} ===\"\necho \"  Download: ${DL_TIME}s\"\necho \"  BLAST:    ${BL_TIME}s\"\necho \"  Hits:     ${HITS}\"\necho \"  Total:    ${TOTAL}s\"\necho \"SHARD_COMPLETE ${SHARD_IDX}\"\n"
+                                ],
+                                "command": [
+                                    "/bin/bash",
+                                    "-c"
+                                ],
+                                "image": "elbacr.azurecr.io/ncbi/elb:1.4.0",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "blast",
+                                "resources": {
+                                    "limits": {
+                                        "cpu": "15",
+                                        "memory": "110Gi"
+                                    },
+                                    "requests": {
+                                        "cpu": "8",
+                                        "memory": "80Gi"
+                                    }
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/workspace",
+                                        "name": "workspace"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeName": "aks-nodepool1-16591338-vmss000007",
+                        "restartPolicy": "Never",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30,
+                        "volumes": [
+                            {
+                                "hostPath": {
+                                    "path": "/mnt/workspace-shard-07",
+                                    "type": "DirectoryOrCreate"
+                                },
+                                "name": "workspace"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "completionTime": "2026-04-22T04:12:36Z",
+                "conditions": [
+                    {
+                        "lastProbeTime": "2026-04-22T04:12:36Z",
+                        "lastTransitionTime": "2026-04-22T04:12:36Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "SuccessCriteriaMet"
+                    },
+                    {
+                        "lastProbeTime": "2026-04-22T04:12:36Z",
+                        "lastTransitionTime": "2026-04-22T04:12:36Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "Complete"
+                    }
+                ],
+                "ready": 0,
+                "startTime": "2026-04-22T04:08:58Z",
+                "succeeded": 1,
+                "terminating": 0,
+                "uncountedTerminatedPods": {}
+            }
+        },
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\",\"kind\":\"Job\",\"metadata\":{\"annotations\":{},\"labels\":{\"app\":\"shard-blast\",\"shard\":\"08\"},\"name\":\"shard-blast-08\",\"namespace\":\"default\"},\"spec\":{\"activeDeadlineSeconds\":7200,\"backoffLimit\":1,\"template\":{\"metadata\":{\"labels\":{\"app\":\"shard-blast\",\"shard\":\"08\"}},\"spec\":{\"containers\":[{\"args\":[\"set -eo pipefail\\nSHARD_IDX=8\\nSHARD_NAME=core_nt_shard_08\\nDB_DIR=/workspace/blastdb\\nQUERY_DIR=/workspace/queries\\nRESULTS_DIR=/workspace/results\\nmkdir -p $DB_DIR $QUERY_DIR $RESULTS_DIR\\n\\necho \\\"=== Shard $SHARD_IDX: Download ===\\\"\\nSTART_DL=$(date +%s)\\n\\n# Auth\\nazcopy login --identity 2\\u003e/dev/null || echo \\\"azcopy login warning\\\"\\n\\n# Download manifest\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_08/core_nt_shard_08.manifest\\\"               /tmp/manifest.txt --log-level=WARNING 2\\u003e/dev/null\\nVOLUMES=$(cat /tmp/manifest.txt)\\necho \\\"Volumes: $VOLUMES\\\"\\n\\n# Download each volume\\nfor VOL in $VOLUMES; do\\n    echo \\\"  Downloading $VOL...\\\"\\n    for EXT in nsq nhr nin nnd nni nog nos not; do\\n        azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\\\" \\\"${DB_DIR}/${VOL}.${EXT}\\\"                       --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\n    done\\ndone\\n\\n# Build space-separated volume list for direct BLAST -db usage\\n# (bypasses .nal alias file entirely)\\nVOLPATHS=\\\"\\\"\\nfor VOL in $VOLUMES; do\\n    [ -n \\\"$VOLPATHS\\\" ] \\u0026\\u0026 VOLPATHS=\\\"$VOLPATHS \\\"\\n    VOLPATHS=\\\"${VOLPATHS}${DB_DIR}/${VOL}\\\"\\ndone\\necho \\\"Volume paths: $VOLPATHS\\\"\\n\\n# Download taxonomy support files\\n# core_nt.ndb (6.5 GB), .ntf (185 MB), .nto (487 MB) + taxdb\\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\\n    echo \\\"  Downloading $F...\\\"\\n    azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\\\" \\\"${DB_DIR}/${F}\\\"                   --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\ndone\\n\\nEND_DL=$(date +%s)\\nDL_TIME=$((END_DL - START_DL))\\necho \\\"RUNTIME download-shard-${SHARD_IDX} ${DL_TIME} seconds\\\"\\necho \\\"DB files: $(ls ${DB_DIR}/*.nsq 2\\u003e/dev/null | wc -l) nsq volumes\\\"\\n\\n# Download query\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/queries/pathogen-10.fa\\\" \\\"${QUERY_DIR}/query.fa\\\"               --log-level=WARNING 2\\u003e/dev/null\\necho \\\"Query: $(grep -c '^\\u003e' ${QUERY_DIR}/query.fa) sequences\\\"\\n\\necho \\\"=== Shard $SHARD_IDX: BLAST ===\\\"\\nSTART_BL=$(date +%s)\\n\\nblastn -db \\\"$VOLPATHS\\\"               -query \\\"${QUERY_DIR}/query.fa\\\"               -max_target_seqs 500 -evalue 0.05               -word_size 28 -dust yes -soft_masking true               -outfmt 7               -dbsize 978954058562               -num_threads $(nproc)               -out \\\"${RESULTS_DIR}/shard_08.out\\\" 2\\u003e\\u00261\\n\\nEND_BL=$(date +%s)\\nBL_TIME=$((END_BL - START_BL))\\nHITS=$(grep -vc '^#' \\\"${RESULTS_DIR}/shard_08.out\\\" 2\\u003e/dev/null || echo 0)\\necho \\\"RUNTIME blast-shard-${SHARD_IDX} ${BL_TIME} seconds\\\"\\necho \\\"HITS shard-${SHARD_IDX} ${HITS}\\\"\\n\\n# Compress and upload results\\ngzip -f \\\"${RESULTS_DIR}/shard_08.out\\\"\\nazcopy cp \\\"${RESULTS_DIR}/shard_08.out.gz\\\"               \\\"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_08.out.gz\\\"               --log-level=WARNING 2\\u003e/dev/null || true\\n\\n# Write timing summary\\necho \\\"{\\\\\\\"shard\\\\\\\":8,\\\\\\\"download_sec\\\\\\\":${DL_TIME},\\\\\\\"blast_sec\\\\\\\":${BL_TIME},\\\\\\\"hits\\\\\\\":${HITS}}\\\"               \\u003e \\\"${RESULTS_DIR}/timing.json\\\"\\nazcopy cp \\\"${RESULTS_DIR}/timing.json\\\"               \\\"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_08_timing.json\\\"               --log-level=WARNING 2\\u003e/dev/null || true\\n\\nTOTAL=$((END_BL - START_DL))\\necho \\\"\\\"\\necho \\\"=== SUMMARY shard-${SHARD_IDX} ===\\\"\\necho \\\"  Download: ${DL_TIME}s\\\"\\necho \\\"  BLAST:    ${BL_TIME}s\\\"\\necho \\\"  Hits:     ${HITS}\\\"\\necho \\\"  Total:    ${TOTAL}s\\\"\\necho \\\"SHARD_COMPLETE ${SHARD_IDX}\\\"\\n\"],\"command\":[\"/bin/bash\",\"-c\"],\"image\":\"elbacr.azurecr.io/ncbi/elb:1.4.0\",\"name\":\"blast\",\"resources\":{\"limits\":{\"cpu\":\"15\",\"memory\":\"110Gi\"},\"requests\":{\"cpu\":\"8\",\"memory\":\"80Gi\"}},\"volumeMounts\":[{\"mountPath\":\"/workspace\",\"name\":\"workspace\"}]}],\"nodeName\":\"aks-nodepool1-16591338-vmss000008\",\"restartPolicy\":\"Never\",\"volumes\":[{\"hostPath\":{\"path\":\"/mnt/workspace-shard-08\",\"type\":\"DirectoryOrCreate\"},\"name\":\"workspace\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-04-22T04:08:59Z",
+                "generation": 1,
+                "labels": {
+                    "app": "shard-blast",
+                    "shard": "08"
+                },
+                "name": "shard-blast-08",
+                "namespace": "default",
+                "resourceVersion": "17551",
+                "uid": "f250c160-2052-468c-9698-e5cc25be964c"
+            },
+            "spec": {
+                "activeDeadlineSeconds": 7200,
+                "backoffLimit": 1,
+                "completionMode": "NonIndexed",
+                "completions": 1,
+                "manualSelector": false,
+                "parallelism": 1,
+                "podReplacementPolicy": "TerminatingOrFailed",
+                "selector": {
+                    "matchLabels": {
+                        "batch.kubernetes.io/controller-uid": "f250c160-2052-468c-9698-e5cc25be964c"
+                    }
+                },
+                "suspend": false,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "shard-blast",
+                            "batch.kubernetes.io/controller-uid": "f250c160-2052-468c-9698-e5cc25be964c",
+                            "batch.kubernetes.io/job-name": "shard-blast-08",
+                            "controller-uid": "f250c160-2052-468c-9698-e5cc25be964c",
+                            "job-name": "shard-blast-08",
+                            "shard": "08"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "set -eo pipefail\nSHARD_IDX=8\nSHARD_NAME=core_nt_shard_08\nDB_DIR=/workspace/blastdb\nQUERY_DIR=/workspace/queries\nRESULTS_DIR=/workspace/results\nmkdir -p $DB_DIR $QUERY_DIR $RESULTS_DIR\n\necho \"=== Shard $SHARD_IDX: Download ===\"\nSTART_DL=$(date +%s)\n\n# Auth\nazcopy login --identity 2\u003e/dev/null || echo \"azcopy login warning\"\n\n# Download manifest\nazcopy cp \"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_08/core_nt_shard_08.manifest\"               /tmp/manifest.txt --log-level=WARNING 2\u003e/dev/null\nVOLUMES=$(cat /tmp/manifest.txt)\necho \"Volumes: $VOLUMES\"\n\n# Download each volume\nfor VOL in $VOLUMES; do\n    echo \"  Downloading $VOL...\"\n    for EXT in nsq nhr nin nnd nni nog nos not; do\n        azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\" \"${DB_DIR}/${VOL}.${EXT}\"                       --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\n    done\ndone\n\n# Build space-separated volume list for direct BLAST -db usage\n# (bypasses .nal alias file entirely)\nVOLPATHS=\"\"\nfor VOL in $VOLUMES; do\n    [ -n \"$VOLPATHS\" ] \u0026\u0026 VOLPATHS=\"$VOLPATHS \"\n    VOLPATHS=\"${VOLPATHS}${DB_DIR}/${VOL}\"\ndone\necho \"Volume paths: $VOLPATHS\"\n\n# Download taxonomy support files\n# core_nt.ndb (6.5 GB), .ntf (185 MB), .nto (487 MB) + taxdb\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\n    echo \"  Downloading $F...\"\n    azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\" \"${DB_DIR}/${F}\"                   --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\ndone\n\nEND_DL=$(date +%s)\nDL_TIME=$((END_DL - START_DL))\necho \"RUNTIME download-shard-${SHARD_IDX} ${DL_TIME} seconds\"\necho \"DB files: $(ls ${DB_DIR}/*.nsq 2\u003e/dev/null | wc -l) nsq volumes\"\n\n# Download query\nazcopy cp \"https://stgelb.blob.core.windows.net/queries/pathogen-10.fa\" \"${QUERY_DIR}/query.fa\"               --log-level=WARNING 2\u003e/dev/null\necho \"Query: $(grep -c '^\u003e' ${QUERY_DIR}/query.fa) sequences\"\n\necho \"=== Shard $SHARD_IDX: BLAST ===\"\nSTART_BL=$(date +%s)\n\nblastn -db \"$VOLPATHS\"               -query \"${QUERY_DIR}/query.fa\"               -max_target_seqs 500 -evalue 0.05               -word_size 28 -dust yes -soft_masking true               -outfmt 7               -dbsize 978954058562               -num_threads $(nproc)               -out \"${RESULTS_DIR}/shard_08.out\" 2\u003e\u00261\n\nEND_BL=$(date +%s)\nBL_TIME=$((END_BL - START_BL))\nHITS=$(grep -vc '^#' \"${RESULTS_DIR}/shard_08.out\" 2\u003e/dev/null || echo 0)\necho \"RUNTIME blast-shard-${SHARD_IDX} ${BL_TIME} seconds\"\necho \"HITS shard-${SHARD_IDX} ${HITS}\"\n\n# Compress and upload results\ngzip -f \"${RESULTS_DIR}/shard_08.out\"\nazcopy cp \"${RESULTS_DIR}/shard_08.out.gz\"               \"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_08.out.gz\"               --log-level=WARNING 2\u003e/dev/null || true\n\n# Write timing summary\necho \"{\\\"shard\\\":8,\\\"download_sec\\\":${DL_TIME},\\\"blast_sec\\\":${BL_TIME},\\\"hits\\\":${HITS}}\"               \u003e \"${RESULTS_DIR}/timing.json\"\nazcopy cp \"${RESULTS_DIR}/timing.json\"               \"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_08_timing.json\"               --log-level=WARNING 2\u003e/dev/null || true\n\nTOTAL=$((END_BL - START_DL))\necho \"\"\necho \"=== SUMMARY shard-${SHARD_IDX} ===\"\necho \"  Download: ${DL_TIME}s\"\necho \"  BLAST:    ${BL_TIME}s\"\necho \"  Hits:     ${HITS}\"\necho \"  Total:    ${TOTAL}s\"\necho \"SHARD_COMPLETE ${SHARD_IDX}\"\n"
+                                ],
+                                "command": [
+                                    "/bin/bash",
+                                    "-c"
+                                ],
+                                "image": "elbacr.azurecr.io/ncbi/elb:1.4.0",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "blast",
+                                "resources": {
+                                    "limits": {
+                                        "cpu": "15",
+                                        "memory": "110Gi"
+                                    },
+                                    "requests": {
+                                        "cpu": "8",
+                                        "memory": "80Gi"
+                                    }
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/workspace",
+                                        "name": "workspace"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeName": "aks-nodepool1-16591338-vmss000008",
+                        "restartPolicy": "Never",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30,
+                        "volumes": [
+                            {
+                                "hostPath": {
+                                    "path": "/mnt/workspace-shard-08",
+                                    "type": "DirectoryOrCreate"
+                                },
+                                "name": "workspace"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "completionTime": "2026-04-22T04:12:34Z",
+                "conditions": [
+                    {
+                        "lastProbeTime": "2026-04-22T04:12:34Z",
+                        "lastTransitionTime": "2026-04-22T04:12:34Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "SuccessCriteriaMet"
+                    },
+                    {
+                        "lastProbeTime": "2026-04-22T04:12:34Z",
+                        "lastTransitionTime": "2026-04-22T04:12:34Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "Complete"
+                    }
+                ],
+                "ready": 0,
+                "startTime": "2026-04-22T04:08:59Z",
+                "succeeded": 1,
+                "terminating": 0,
+                "uncountedTerminatedPods": {}
+            }
+        },
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\",\"kind\":\"Job\",\"metadata\":{\"annotations\":{},\"labels\":{\"app\":\"shard-blast\",\"shard\":\"09\"},\"name\":\"shard-blast-09\",\"namespace\":\"default\"},\"spec\":{\"activeDeadlineSeconds\":7200,\"backoffLimit\":1,\"template\":{\"metadata\":{\"labels\":{\"app\":\"shard-blast\",\"shard\":\"09\"}},\"spec\":{\"containers\":[{\"args\":[\"set -eo pipefail\\nSHARD_IDX=9\\nSHARD_NAME=core_nt_shard_09\\nDB_DIR=/workspace/blastdb\\nQUERY_DIR=/workspace/queries\\nRESULTS_DIR=/workspace/results\\nmkdir -p $DB_DIR $QUERY_DIR $RESULTS_DIR\\n\\necho \\\"=== Shard $SHARD_IDX: Download ===\\\"\\nSTART_DL=$(date +%s)\\n\\n# Auth\\nazcopy login --identity 2\\u003e/dev/null || echo \\\"azcopy login warning\\\"\\n\\n# Download manifest\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_09/core_nt_shard_09.manifest\\\"               /tmp/manifest.txt --log-level=WARNING 2\\u003e/dev/null\\nVOLUMES=$(cat /tmp/manifest.txt)\\necho \\\"Volumes: $VOLUMES\\\"\\n\\n# Download each volume\\nfor VOL in $VOLUMES; do\\n    echo \\\"  Downloading $VOL...\\\"\\n    for EXT in nsq nhr nin nnd nni nog nos not; do\\n        azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\\\" \\\"${DB_DIR}/${VOL}.${EXT}\\\"                       --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\n    done\\ndone\\n\\n# Build space-separated volume list for direct BLAST -db usage\\n# (bypasses .nal alias file entirely)\\nVOLPATHS=\\\"\\\"\\nfor VOL in $VOLUMES; do\\n    [ -n \\\"$VOLPATHS\\\" ] \\u0026\\u0026 VOLPATHS=\\\"$VOLPATHS \\\"\\n    VOLPATHS=\\\"${VOLPATHS}${DB_DIR}/${VOL}\\\"\\ndone\\necho \\\"Volume paths: $VOLPATHS\\\"\\n\\n# Download taxonomy support files\\n# core_nt.ndb (6.5 GB), .ntf (185 MB), .nto (487 MB) + taxdb\\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\\n    echo \\\"  Downloading $F...\\\"\\n    azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\\\" \\\"${DB_DIR}/${F}\\\"                   --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\ndone\\n\\nEND_DL=$(date +%s)\\nDL_TIME=$((END_DL - START_DL))\\necho \\\"RUNTIME download-shard-${SHARD_IDX} ${DL_TIME} seconds\\\"\\necho \\\"DB files: $(ls ${DB_DIR}/*.nsq 2\\u003e/dev/null | wc -l) nsq volumes\\\"\\n\\n# Download query\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/queries/pathogen-10.fa\\\" \\\"${QUERY_DIR}/query.fa\\\"               --log-level=WARNING 2\\u003e/dev/null\\necho \\\"Query: $(grep -c '^\\u003e' ${QUERY_DIR}/query.fa) sequences\\\"\\n\\necho \\\"=== Shard $SHARD_IDX: BLAST ===\\\"\\nSTART_BL=$(date +%s)\\n\\nblastn -db \\\"$VOLPATHS\\\"               -query \\\"${QUERY_DIR}/query.fa\\\"               -max_target_seqs 500 -evalue 0.05               -word_size 28 -dust yes -soft_masking true               -outfmt 7               -dbsize 978954058562               -num_threads $(nproc)               -out \\\"${RESULTS_DIR}/shard_09.out\\\" 2\\u003e\\u00261\\n\\nEND_BL=$(date +%s)\\nBL_TIME=$((END_BL - START_BL))\\nHITS=$(grep -vc '^#' \\\"${RESULTS_DIR}/shard_09.out\\\" 2\\u003e/dev/null || echo 0)\\necho \\\"RUNTIME blast-shard-${SHARD_IDX} ${BL_TIME} seconds\\\"\\necho \\\"HITS shard-${SHARD_IDX} ${HITS}\\\"\\n\\n# Compress and upload results\\ngzip -f \\\"${RESULTS_DIR}/shard_09.out\\\"\\nazcopy cp \\\"${RESULTS_DIR}/shard_09.out.gz\\\"               \\\"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_09.out.gz\\\"               --log-level=WARNING 2\\u003e/dev/null || true\\n\\n# Write timing summary\\necho \\\"{\\\\\\\"shard\\\\\\\":9,\\\\\\\"download_sec\\\\\\\":${DL_TIME},\\\\\\\"blast_sec\\\\\\\":${BL_TIME},\\\\\\\"hits\\\\\\\":${HITS}}\\\"               \\u003e \\\"${RESULTS_DIR}/timing.json\\\"\\nazcopy cp \\\"${RESULTS_DIR}/timing.json\\\"               \\\"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_09_timing.json\\\"               --log-level=WARNING 2\\u003e/dev/null || true\\n\\nTOTAL=$((END_BL - START_DL))\\necho \\\"\\\"\\necho \\\"=== SUMMARY shard-${SHARD_IDX} ===\\\"\\necho \\\"  Download: ${DL_TIME}s\\\"\\necho \\\"  BLAST:    ${BL_TIME}s\\\"\\necho \\\"  Hits:     ${HITS}\\\"\\necho \\\"  Total:    ${TOTAL}s\\\"\\necho \\\"SHARD_COMPLETE ${SHARD_IDX}\\\"\\n\"],\"command\":[\"/bin/bash\",\"-c\"],\"image\":\"elbacr.azurecr.io/ncbi/elb:1.4.0\",\"name\":\"blast\",\"resources\":{\"limits\":{\"cpu\":\"15\",\"memory\":\"110Gi\"},\"requests\":{\"cpu\":\"8\",\"memory\":\"80Gi\"}},\"volumeMounts\":[{\"mountPath\":\"/workspace\",\"name\":\"workspace\"}]}],\"nodeName\":\"aks-nodepool1-16591338-vmss000009\",\"restartPolicy\":\"Never\",\"volumes\":[{\"hostPath\":{\"path\":\"/mnt/workspace-shard-09\",\"type\":\"DirectoryOrCreate\"},\"name\":\"workspace\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-04-22T04:08:59Z",
+                "generation": 1,
+                "labels": {
+                    "app": "shard-blast",
+                    "shard": "09"
+                },
+                "name": "shard-blast-09",
+                "namespace": "default",
+                "resourceVersion": "16745",
+                "uid": "53b360f7-48f0-4bbc-9746-e656b7a1ea42"
+            },
+            "spec": {
+                "activeDeadlineSeconds": 7200,
+                "backoffLimit": 1,
+                "completionMode": "NonIndexed",
+                "completions": 1,
+                "manualSelector": false,
+                "parallelism": 1,
+                "podReplacementPolicy": "TerminatingOrFailed",
+                "selector": {
+                    "matchLabels": {
+                        "batch.kubernetes.io/controller-uid": "53b360f7-48f0-4bbc-9746-e656b7a1ea42"
+                    }
+                },
+                "suspend": false,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "shard-blast",
+                            "batch.kubernetes.io/controller-uid": "53b360f7-48f0-4bbc-9746-e656b7a1ea42",
+                            "batch.kubernetes.io/job-name": "shard-blast-09",
+                            "controller-uid": "53b360f7-48f0-4bbc-9746-e656b7a1ea42",
+                            "job-name": "shard-blast-09",
+                            "shard": "09"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "set -eo pipefail\nSHARD_IDX=9\nSHARD_NAME=core_nt_shard_09\nDB_DIR=/workspace/blastdb\nQUERY_DIR=/workspace/queries\nRESULTS_DIR=/workspace/results\nmkdir -p $DB_DIR $QUERY_DIR $RESULTS_DIR\n\necho \"=== Shard $SHARD_IDX: Download ===\"\nSTART_DL=$(date +%s)\n\n# Auth\nazcopy login --identity 2\u003e/dev/null || echo \"azcopy login warning\"\n\n# Download manifest\nazcopy cp \"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_09/core_nt_shard_09.manifest\"               /tmp/manifest.txt --log-level=WARNING 2\u003e/dev/null\nVOLUMES=$(cat /tmp/manifest.txt)\necho \"Volumes: $VOLUMES\"\n\n# Download each volume\nfor VOL in $VOLUMES; do\n    echo \"  Downloading $VOL...\"\n    for EXT in nsq nhr nin nnd nni nog nos not; do\n        azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\" \"${DB_DIR}/${VOL}.${EXT}\"                       --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\n    done\ndone\n\n# Build space-separated volume list for direct BLAST -db usage\n# (bypasses .nal alias file entirely)\nVOLPATHS=\"\"\nfor VOL in $VOLUMES; do\n    [ -n \"$VOLPATHS\" ] \u0026\u0026 VOLPATHS=\"$VOLPATHS \"\n    VOLPATHS=\"${VOLPATHS}${DB_DIR}/${VOL}\"\ndone\necho \"Volume paths: $VOLPATHS\"\n\n# Download taxonomy support files\n# core_nt.ndb (6.5 GB), .ntf (185 MB), .nto (487 MB) + taxdb\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\n    echo \"  Downloading $F...\"\n    azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\" \"${DB_DIR}/${F}\"                   --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\ndone\n\nEND_DL=$(date +%s)\nDL_TIME=$((END_DL - START_DL))\necho \"RUNTIME download-shard-${SHARD_IDX} ${DL_TIME} seconds\"\necho \"DB files: $(ls ${DB_DIR}/*.nsq 2\u003e/dev/null | wc -l) nsq volumes\"\n\n# Download query\nazcopy cp \"https://stgelb.blob.core.windows.net/queries/pathogen-10.fa\" \"${QUERY_DIR}/query.fa\"               --log-level=WARNING 2\u003e/dev/null\necho \"Query: $(grep -c '^\u003e' ${QUERY_DIR}/query.fa) sequences\"\n\necho \"=== Shard $SHARD_IDX: BLAST ===\"\nSTART_BL=$(date +%s)\n\nblastn -db \"$VOLPATHS\"               -query \"${QUERY_DIR}/query.fa\"               -max_target_seqs 500 -evalue 0.05               -word_size 28 -dust yes -soft_masking true               -outfmt 7               -dbsize 978954058562               -num_threads $(nproc)               -out \"${RESULTS_DIR}/shard_09.out\" 2\u003e\u00261\n\nEND_BL=$(date +%s)\nBL_TIME=$((END_BL - START_BL))\nHITS=$(grep -vc '^#' \"${RESULTS_DIR}/shard_09.out\" 2\u003e/dev/null || echo 0)\necho \"RUNTIME blast-shard-${SHARD_IDX} ${BL_TIME} seconds\"\necho \"HITS shard-${SHARD_IDX} ${HITS}\"\n\n# Compress and upload results\ngzip -f \"${RESULTS_DIR}/shard_09.out\"\nazcopy cp \"${RESULTS_DIR}/shard_09.out.gz\"               \"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_09.out.gz\"               --log-level=WARNING 2\u003e/dev/null || true\n\n# Write timing summary\necho \"{\\\"shard\\\":9,\\\"download_sec\\\":${DL_TIME},\\\"blast_sec\\\":${BL_TIME},\\\"hits\\\":${HITS}}\"               \u003e \"${RESULTS_DIR}/timing.json\"\nazcopy cp \"${RESULTS_DIR}/timing.json\"               \"https://stgelb.blob.core.windows.net/results/v3/B1-S10/shard_09_timing.json\"               --log-level=WARNING 2\u003e/dev/null || true\n\nTOTAL=$((END_BL - START_DL))\necho \"\"\necho \"=== SUMMARY shard-${SHARD_IDX} ===\"\necho \"  Download: ${DL_TIME}s\"\necho \"  BLAST:    ${BL_TIME}s\"\necho \"  Hits:     ${HITS}\"\necho \"  Total:    ${TOTAL}s\"\necho \"SHARD_COMPLETE ${SHARD_IDX}\"\n"
+                                ],
+                                "command": [
+                                    "/bin/bash",
+                                    "-c"
+                                ],
+                                "image": "elbacr.azurecr.io/ncbi/elb:1.4.0",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "blast",
+                                "resources": {
+                                    "limits": {
+                                        "cpu": "15",
+                                        "memory": "110Gi"
+                                    },
+                                    "requests": {
+                                        "cpu": "8",
+                                        "memory": "80Gi"
+                                    }
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/workspace",
+                                        "name": "workspace"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeName": "aks-nodepool1-16591338-vmss000009",
+                        "restartPolicy": "Never",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30,
+                        "volumes": [
+                            {
+                                "hostPath": {
+                                    "path": "/mnt/workspace-shard-09",
+                                    "type": "DirectoryOrCreate"
+                                },
+                                "name": "workspace"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "completionTime": "2026-04-22T04:10:09Z",
+                "conditions": [
+                    {
+                        "lastProbeTime": "2026-04-22T04:10:09Z",
+                        "lastTransitionTime": "2026-04-22T04:10:09Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "SuccessCriteriaMet"
+                    },
+                    {
+                        "lastProbeTime": "2026-04-22T04:10:09Z",
+                        "lastTransitionTime": "2026-04-22T04:10:09Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "Complete"
+                    }
+                ],
+                "ready": 0,
+                "startTime": "2026-04-22T04:08:59Z",
+                "succeeded": 1,
+                "terminating": 0,
+                "uncountedTerminatedPods": {}
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

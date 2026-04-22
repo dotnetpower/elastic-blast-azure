@@ -393,6 +393,9 @@ class ElasticBlastAzure(ElasticBlast):
             status = check_cluster(cfg)
             if status == AKS_PROVISIONING_STATE.SUCCEEDED.value and self._db_already_loaded():
                 logging.info('Warm cluster reuse: skipping init')
+                self._get_k8s_ctx()
+                self._cleanup_stale_jobs()
+                kubernetes.create_scripts_configmap(cfg.appstate.k8s_ctx, cfg.cluster.dry_run)
                 self._upload_queries_only(queries)
                 self.cleanup_stack.append(lambda: self._safe_collect_logs())
                 return
@@ -684,6 +687,25 @@ class ElasticBlastAzure(ElasticBlast):
 
     # -- Cleanup ------------------------------------------------------------
 
+    def _cleanup_stale_jobs(self) -> None:
+        """Delete all stale jobs before a warm-cluster 2nd submit.
+
+        Removes previous blast, submit, setup, and finalizer jobs so that
+        ``kubectl apply`` on the new submit-jobs job does not hit immutable
+        field errors from leftover resources.
+        """
+        try:
+            kubectl = self._kubectl()
+            for label in ('app=blast', 'app=submit', 'app=setup', 'app=finalizer'):
+                cmd = f'{kubectl} delete jobs -l {label} --ignore-not-found=true'
+                if self.cfg.cluster.dry_run:
+                    logging.info(cmd)
+                else:
+                    safe_exec(shlex.split(cmd))
+            logging.info('Warm reuse: stale jobs cleaned up')
+        except Exception as e:
+            logging.warning(f'Warm reuse cleanup failed: {e}')
+
     def _cleanup_jobs_only(self) -> None:
         """In reuse mode: delete BLAST/submit jobs, preserve cluster and PVCs."""
         try:
@@ -701,26 +723,49 @@ class ElasticBlastAzure(ElasticBlast):
     # -- Warm cluster -------------------------------------------------------
 
     def _db_already_loaded(self) -> bool:
-        """Check if BLAST DB is already present on the PV."""
-        if self.cfg.cluster.dry_run or self.cfg.cluster.use_local_ssd:
+        """Check if BLAST DB is already present on the cluster.
+
+        For PV mode: checks if the PVC is bound and init-pv succeeded.
+        For local-SSD mode: checks if the create-workspace DaemonSet
+        exists (it persists across runs) as a proxy for DB presence on
+        the nodes' hostPath.
+        """
+        if self.cfg.cluster.dry_run:
             return False
         try:
             kubectl = self._kubectl()
-            proc = safe_exec(shlex.split(
-                f'{kubectl} get pvc blast-dbs-pvc-rwm -o jsonpath={{.status.phase}}'))
-            if self._decode(proc.stdout).strip() != 'Bound':
-                return False
-            proc = safe_exec(shlex.split(
-                f'{kubectl} get job init-pv -o jsonpath={{.status.succeeded}}'))
-            return self._decode(proc.stdout).strip() == '1'
+            if self.cfg.cluster.use_local_ssd:
+                # Local-SSD: the create-workspace DaemonSet in kube-system
+                # persists across runs and indicates that /workspace was
+                # previously initialized with DB files.
+                proc = safe_exec(shlex.split(
+                    f'{kubectl} -n kube-system get daemonset create-workspace'
+                    f' -o jsonpath={{.status.numberReady}}'))
+                ready = self._decode(proc.stdout).strip()
+                return ready != '' and int(ready) > 0
+            else:
+                proc = safe_exec(shlex.split(
+                    f'{kubectl} get pvc blast-dbs-pvc-rwm -o jsonpath={{.status.phase}}'))
+                if self._decode(proc.stdout).strip() != 'Bound':
+                    return False
+                proc = safe_exec(shlex.split(
+                    f'{kubectl} get job init-pv -o jsonpath={{.status.succeeded}}'))
+                return self._decode(proc.stdout).strip() == '1'
         except Exception:
             return False
 
     def _upload_queries_only(self, queries: Optional[List[str]]) -> None:
-        """Warm cluster: upload queries without re-downloading DB."""
+        """Warm cluster: upload queries without re-downloading DB.
+
+        For PV mode: runs import_query_batches_only (PVC-based).
+        For local-SSD mode: skips query import here — queries are
+        uploaded to blob storage by _upload_job_template, and each
+        BLAST pod's initContainer downloads its query batch from blob.
+        """
         if self.cloud_job_submission:
             self._upload_job_template(queries)
-        kubernetes.import_query_batches_only(self.cfg)
+        if not self.cfg.cluster.use_local_ssd:
+            kubernetes.import_query_batches_only(self.cfg)
 
     def _deploy_vmtouch_daemonset(self) -> None:
         """Deploy DaemonSet to keep BLAST DB cached in RAM (80% of available)."""
