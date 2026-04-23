@@ -1,0 +1,114 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: blastn-batch-core-nt-pathogen-job-${JOB_NUM}
+  labels:
+    app: blast
+    db: core_nt_pathogen
+spec:
+  template:
+    metadata:
+      labels:
+        app: blast
+        db: core_nt_pathogen
+    spec:
+      volumes:
+      - name: blast-dbs
+        hostPath:
+          path: "/workspace"
+          type: DirectoryOrCreate
+      - name: shared-data
+        emptyDir: {}
+      - name: scripts
+        configMap:
+          name: elb-scripts
+          defaultMode: 0755
+      activeDeadlineSeconds: 604800
+      initContainers:
+      - name: import-query-batches
+        image: elbacr.azurecr.io/ncbi/elb:1.4.0
+        volumeMounts:
+        - name: shared-data
+          mountPath: /shared
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+        env:
+        - name: ELB_RESULTS
+          value: "https://stgelb.blob.core.windows.net/results/v3/b2_subset/B2-pathogen-E64-1N/job-cfc70340acf94ce9a9df92fc479f1d50"
+        - name: JOB_NUM
+          value: "${JOB_NUM}"
+        command: ["/scripts/query-download-ssd-aks.sh"]
+      containers:
+      - name: blast
+        image: elbacr.azurecr.io/ncbi/elb:1.4.0
+        workingDir: /blast/blastdb
+        resources:
+          requests:
+            memory: "4G"
+            cpu: 6
+          limits:
+            memory: "4G"
+            cpu: 8
+        volumeMounts:
+        - name: blast-dbs
+          mountPath: /blast/blastdb
+          subPath: blast
+        - name: shared-data
+          mountPath: /shared
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+        env:
+        - name: BLAST_USAGE_REPORT
+          value: "true"
+        - name: BLAST_ELB_JOB_ID
+          value: "job-cfc70340acf94ce9a9df92fc479f1d50"
+        - name: BLAST_ELB_BATCH_NUM
+          value: "${BLAST_ELB_BATCH_NUM}"
+        - name: BLAST_ELB_VERSION
+          value: "0.0"
+        - name: JOB_NUM
+          value: "${JOB_NUM}"
+        - name: ELB_BLAST_PROGRAM
+          value: "blastn"
+        - name: ELB_DB
+          value: "core_nt_pathogen"
+        - name: ELB_NUM_CPUS
+          value: "8"
+        - name: ELB_BLAST_OPTIONS
+          value: "-max_target_seqs 500 -evalue 0.05 -word_size 28 -dust yes -soft_masking true -outfmt 7"
+        - name: ELB_RESULTS
+          value: "https://stgelb.blob.core.windows.net/results/v3/b2_subset/B2-pathogen-E64-1N/job-cfc70340acf94ce9a9df92fc479f1d50"
+        - name: ELB_TIMEFMT
+          value: "%s%N"
+        - name: ELB_DB_MOL_TYPE
+          value: "nucl"
+        - name: QUERY_DIR
+          value: "/shared/requests"
+        - name: RESULTS_DIR
+          value: "/shared/results"
+        command: ["/scripts/blast-run-aks.sh"]
+      - name: results-export
+        image: elbacr.azurecr.io/ncbi/elb:1.4.0
+        volumeMounts:
+        - name: shared-data
+          mountPath: /shared
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+        env:
+        - name: JOB_NUM
+          value: "${JOB_NUM}"
+        - name: ELB_BLAST_PROGRAM
+          value: "blastn"
+        - name: ELB_DB
+          value: "core_nt_pathogen"
+        - name: ELB_RESULTS
+          value: "https://stgelb.blob.core.windows.net/results/v3/b2_subset/B2-pathogen-E64-1N/job-cfc70340acf94ce9a9df92fc479f1d50"
+        - name: RESULTS_DIR
+          value: "/shared/results"
+        command: ["/scripts/results-export-aks.sh"]
+      restartPolicy: OnFailure
+  backoffLimit: 3

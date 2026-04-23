@@ -1,0 +1,235 @@
+2026-04-22T16:44:37.948349147Z INFO: Login with identity succeeded.
+2026-04-22T16:44:38.188996803Z Waiting for jobs init-ssd-0
+2026-04-22T16:45:08.615416099Z Waiting for jobs init-ssd-0
+2026-04-22T16:45:38.917396727Z Waiting for jobs init-ssd-0
+2026-04-22T16:46:09.257938669Z Waiting for jobs init-ssd-0
+2026-04-22T16:46:39.623270786Z Waiting for jobs init-ssd-0
+2026-04-22T16:47:09.951573531Z Waiting for jobs init-ssd-0
+2026-04-22T16:47:40.437924435Z Waiting for jobs init-ssd-0
+2026-04-22T16:48:10.815867700Z Waiting for jobs init-ssd-0
+2026-04-22T16:48:41.194427052Z Waiting for jobs init-ssd-0
+2026-04-22T16:49:11.608107304Z Waiting for jobs init-ssd-0
+2026-04-22T16:49:42.037840888Z Waiting for jobs init-ssd-0
+2026-04-22T16:50:12.510514797Z Waiting for jobs init-ssd-0
+2026-04-22T16:50:43.265800459Z Waiting for jobs init-ssd-0
+2026-04-22T16:51:13.463229262Z Waiting for jobs init-ssd-0
+2026-04-22T16:51:43.625653330Z Waiting for jobs init-ssd-0
+2026-04-22T16:52:13.808674062Z Waiting for jobs init-ssd-0
+2026-04-22T16:52:43.974609453Z Waiting for jobs init-ssd-0
+2026-04-22T16:53:14.129464819Z Waiting for jobs init-ssd-0
+2026-04-22T16:53:44.303791338Z Waiting for jobs init-ssd-0
+2026-04-22T16:54:14.502544982Z Waiting for jobs init-ssd-0
+2026-04-22T16:54:44.674005258Z Waiting for jobs init-ssd-0
+2026-04-22T16:55:14.871270285Z Waiting for jobs init-ssd-0
+2026-04-22T16:55:45.406495510Z INFO: Autologin not specified.
+2026-04-22T16:55:45.406518610Z INFO: Authenticating to source using Azure AD
+2026-04-22T16:55:45.490803132Z INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+2026-04-22T16:55:45.490829532Z INFO: Scanning...
+2026-04-22T16:55:45.490832532Z 
+2026-04-22T16:55:45.490836032Z Job 5004703e-c41e-354c-7609-27a4a969ded4 has started
+2026-04-22T16:55:45.490839732Z Log file is located at: /root/.azcopy/5004703e-c41e-354c-7609-27a4a969ded4.log
+2026-04-22T16:55:45.490842432Z 
+2026-04-22T16:55:47.492703864Z 100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0.0138
+2026-04-22T16:55:47.492724464Z 
+2026-04-22T16:55:47.492727264Z 
+2026-04-22T16:55:47.492730764Z Job 5004703e-c41e-354c-7609-27a4a969ded4 summary
+2026-04-22T16:55:47.492734164Z Elapsed Time (Minutes): 0.0334
+2026-04-22T16:55:47.492737064Z Number of File Transfers: 1
+2026-04-22T16:55:47.492740464Z Number of Folder Property Transfers: 0
+2026-04-22T16:55:47.492744164Z Number of Symlink Transfers: 0
+2026-04-22T16:55:47.492747064Z Total Number of Transfers: 1
+2026-04-22T16:55:47.492750064Z Number of File Transfers Completed: 1
+2026-04-22T16:55:47.492752764Z Number of Folder Transfers Completed: 0
+2026-04-22T16:55:47.492755564Z Number of File Transfers Failed: 0
+2026-04-22T16:55:47.492758264Z Number of Folder Transfers Failed: 0
+2026-04-22T16:55:47.492761064Z Number of File Transfers Skipped: 0
+2026-04-22T16:55:47.492763864Z Number of Folder Transfers Skipped: 0
+2026-04-22T16:55:47.492766664Z Number of Symbolic Links Skipped: 0
+2026-04-22T16:55:47.492769564Z Number of Hardlinks Converted: 0
+2026-04-22T16:55:47.492772264Z Number of Hardlinks Skipped: 0
+2026-04-22T16:55:47.492774864Z Number of Special Files Skipped: 0
+2026-04-22T16:55:47.492777564Z Total Number of Bytes Transferred: 3456
+2026-04-22T16:55:47.492780364Z Final Job Status: Completed
+2026-04-22T16:55:47.492783364Z 
+2026-04-22T16:55:47.557738902Z INFO: Autologin not specified.
+2026-04-22T16:55:47.557760402Z INFO: Authenticating to source using Azure AD
+2026-04-22T16:55:47.603096660Z INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+2026-04-22T16:55:47.603128260Z INFO: Scanning...
+2026-04-22T16:55:47.603131160Z 
+2026-04-22T16:55:47.603134560Z Job 06ee80d6-6337-5547-401f-2f4a776f1626 has started
+2026-04-22T16:55:47.603138360Z Log file is located at: /root/.azcopy/06ee80d6-6337-5547-401f-2f4a776f1626.log
+2026-04-22T16:55:47.603140960Z 
+2026-04-22T16:55:49.604819775Z 100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 2-sec Throughput (Mb/s): 0.0001
+2026-04-22T16:55:49.604846075Z 
+2026-04-22T16:55:49.604849075Z 
+2026-04-22T16:55:49.604852375Z Job 06ee80d6-6337-5547-401f-2f4a776f1626 summary
+2026-04-22T16:55:49.604855975Z Elapsed Time (Minutes): 0.0334
+2026-04-22T16:55:49.604859375Z Number of File Transfers: 1
+2026-04-22T16:55:49.604862675Z Number of Folder Property Transfers: 0
+2026-04-22T16:55:49.604865475Z Number of Symlink Transfers: 0
+2026-04-22T16:55:49.604868475Z Total Number of Transfers: 1
+2026-04-22T16:55:49.604871175Z Number of File Transfers Completed: 1
+2026-04-22T16:55:49.604874075Z Number of Folder Transfers Completed: 0
+2026-04-22T16:55:49.604877275Z Number of File Transfers Failed: 0
+2026-04-22T16:55:49.604880175Z Number of Folder Transfers Failed: 0
+2026-04-22T16:55:49.604883075Z Number of File Transfers Skipped: 0
+2026-04-22T16:55:49.604886075Z Number of Folder Transfers Skipped: 0
+2026-04-22T16:55:49.604888875Z Number of Symbolic Links Skipped: 0
+2026-04-22T16:55:49.604892075Z Number of Hardlinks Converted: 0
+2026-04-22T16:55:49.604894875Z Number of Hardlinks Skipped: 0
+2026-04-22T16:55:49.604897875Z Number of Special Files Skipped: 0
+2026-04-22T16:55:49.604900775Z Total Number of Bytes Transferred: 13
+2026-04-22T16:55:49.604903475Z Final Job Status: Completed
+2026-04-22T16:55:49.604906075Z 
+2026-04-22T16:55:49.606646973Z Submitting jobs
+2026-04-22T16:55:49.610174070Z DEBUG: Job 0: jobs/0/job_000.yaml
+2026-04-22T16:55:49.610178770Z ----------------------------------------------
+2026-04-22T16:55:49.610721569Z ---
+2026-04-22T16:55:49.610725769Z apiVersion: batch/v1
+2026-04-22T16:55:49.610731869Z kind: Job
+2026-04-22T16:55:49.610734969Z metadata:
+2026-04-22T16:55:49.610738969Z   name: blastn-batch-core-nt-pathogen-job-000
+2026-04-22T16:55:49.610741869Z   labels:
+2026-04-22T16:55:49.610744569Z     app: blast
+2026-04-22T16:55:49.610747369Z     db: core_nt_pathogen
+2026-04-22T16:55:49.610750069Z spec:
+2026-04-22T16:55:49.610753169Z   template:
+2026-04-22T16:55:49.610755969Z     metadata:
+2026-04-22T16:55:49.610758669Z       labels:
+2026-04-22T16:55:49.610761469Z         app: blast
+2026-04-22T16:55:49.610764769Z         db: core_nt_pathogen
+2026-04-22T16:55:49.610767569Z     spec:
+2026-04-22T16:55:49.610770369Z       volumes:
+2026-04-22T16:55:49.610773169Z       - name: blast-dbs
+2026-04-22T16:55:49.610776069Z         hostPath:
+2026-04-22T16:55:49.610778869Z           path: "/workspace"
+2026-04-22T16:55:49.610781769Z           type: DirectoryOrCreate
+2026-04-22T16:55:49.610784469Z       - name: shared-data
+2026-04-22T16:55:49.610787069Z         emptyDir: {}
+2026-04-22T16:55:49.610789869Z       - name: scripts
+2026-04-22T16:55:49.610792469Z         configMap:
+2026-04-22T16:55:49.610795269Z           name: elb-scripts
+2026-04-22T16:55:49.610798069Z           defaultMode: 0755
+2026-04-22T16:55:49.610800969Z       activeDeadlineSeconds: 604800
+2026-04-22T16:55:49.610803669Z       initContainers:
+2026-04-22T16:55:49.610806369Z       - name: import-query-batches
+2026-04-22T16:55:49.610809169Z         image: elbacr.azurecr.io/ncbi/elb:1.4.0
+2026-04-22T16:55:49.610811869Z         volumeMounts:
+2026-04-22T16:55:49.610824069Z         - name: shared-data
+2026-04-22T16:55:49.610827269Z           mountPath: /shared
+2026-04-22T16:55:49.610830469Z         - name: scripts
+2026-04-22T16:55:49.610833269Z           mountPath: /scripts
+2026-04-22T16:55:49.610835869Z           readOnly: true
+2026-04-22T16:55:49.610838569Z         env:
+2026-04-22T16:55:49.610841269Z         - name: ELB_RESULTS
+2026-04-22T16:55:49.610844469Z           value: "https://stgelb.blob.core.windows.net/results/v3/b2_subset/B2-pathogen-E64-1N/job-cfc70340acf94ce9a9df92fc479f1d50"
+2026-04-22T16:55:49.610847269Z         - name: JOB_NUM
+2026-04-22T16:55:49.610849869Z           value: "000"
+2026-04-22T16:55:49.610853369Z         command: ["/scripts/query-download-ssd-aks.sh"]
+2026-04-22T16:55:49.610856069Z       containers:
+2026-04-22T16:55:49.610858769Z       - name: blast
+2026-04-22T16:55:49.610861669Z         image: elbacr.azurecr.io/ncbi/elb:1.4.0
+2026-04-22T16:55:49.610864569Z         workingDir: /blast/blastdb
+2026-04-22T16:55:49.610867169Z         resources:
+2026-04-22T16:55:49.610869969Z           requests:
+2026-04-22T16:55:49.610872569Z             memory: "4G"
+2026-04-22T16:55:49.610875269Z             cpu: 6
+2026-04-22T16:55:49.610878069Z           limits:
+2026-04-22T16:55:49.610880769Z             memory: "4G"
+2026-04-22T16:55:49.610883469Z             cpu: 8
+2026-04-22T16:55:49.610886169Z         volumeMounts:
+2026-04-22T16:55:49.610888869Z         - name: blast-dbs
+2026-04-22T16:55:49.610891569Z           mountPath: /blast/blastdb
+2026-04-22T16:55:49.610894169Z           subPath: blast
+2026-04-22T16:55:49.610896869Z         - name: shared-data
+2026-04-22T16:55:49.610899569Z           mountPath: /shared
+2026-04-22T16:55:49.610902169Z         - name: scripts
+2026-04-22T16:55:49.610904769Z           mountPath: /scripts
+2026-04-22T16:55:49.610907569Z           readOnly: true
+2026-04-22T16:55:49.610910269Z         env:
+2026-04-22T16:55:49.610913069Z         - name: BLAST_USAGE_REPORT
+2026-04-22T16:55:49.610915669Z           value: "true"
+2026-04-22T16:55:49.610918469Z         - name: BLAST_ELB_JOB_ID
+2026-04-22T16:55:49.610921169Z           value: "job-cfc70340acf94ce9a9df92fc479f1d50"
+2026-04-22T16:55:49.610924069Z         - name: BLAST_ELB_BATCH_NUM
+2026-04-22T16:55:49.610926769Z           value: "0"
+2026-04-22T16:55:49.610929469Z         - name: BLAST_ELB_VERSION
+2026-04-22T16:55:49.610932169Z           value: "0.0"
+2026-04-22T16:55:49.610934869Z         - name: JOB_NUM
+2026-04-22T16:55:49.610937469Z           value: "000"
+2026-04-22T16:55:49.610940169Z         - name: ELB_BLAST_PROGRAM
+2026-04-22T16:55:49.610942869Z           value: "blastn"
+2026-04-22T16:55:49.610945569Z         - name: ELB_DB
+2026-04-22T16:55:49.610948469Z           value: "core_nt_pathogen"
+2026-04-22T16:55:49.610951169Z         - name: ELB_NUM_CPUS
+2026-04-22T16:55:49.610953769Z           value: "8"
+2026-04-22T16:55:49.610956469Z         - name: ELB_BLAST_OPTIONS
+2026-04-22T16:55:49.610959869Z           value: "-max_target_seqs 500 -evalue 0.05 -word_size 28 -dust yes -soft_masking true -outfmt 7"
+2026-04-22T16:55:49.610962769Z         - name: ELB_RESULTS
+2026-04-22T16:55:49.610965669Z           value: "https://stgelb.blob.core.windows.net/results/v3/b2_subset/B2-pathogen-E64-1N/job-cfc70340acf94ce9a9df92fc479f1d50"
+2026-04-22T16:55:49.610968469Z         - name: ELB_TIMEFMT
+2026-04-22T16:55:49.610971469Z           value: "%s%N"
+2026-04-22T16:55:49.610974469Z         - name: ELB_DB_MOL_TYPE
+2026-04-22T16:55:49.610977069Z           value: "nucl"
+2026-04-22T16:55:49.610983469Z         - name: QUERY_DIR
+2026-04-22T16:55:49.610986269Z           value: "/shared/requests"
+2026-04-22T16:55:49.610988969Z         - name: RESULTS_DIR
+2026-04-22T16:55:49.610991669Z           value: "/shared/results"
+2026-04-22T16:55:49.610994369Z         command: ["/scripts/blast-run-aks.sh"]
+2026-04-22T16:55:49.610997169Z       - name: results-export
+2026-04-22T16:55:49.610999869Z         image: elbacr.azurecr.io/ncbi/elb:1.4.0
+2026-04-22T16:55:49.611002469Z         volumeMounts:
+2026-04-22T16:55:49.611005269Z         - name: shared-data
+2026-04-22T16:55:49.611007969Z           mountPath: /shared
+2026-04-22T16:55:49.611010669Z         - name: scripts
+2026-04-22T16:55:49.611013269Z           mountPath: /scripts
+2026-04-22T16:55:49.611015969Z           readOnly: true
+2026-04-22T16:55:49.611018569Z         env:
+2026-04-22T16:55:49.611021269Z         - name: JOB_NUM
+2026-04-22T16:55:49.611023869Z           value: "000"
+2026-04-22T16:55:49.611026569Z         - name: ELB_BLAST_PROGRAM
+2026-04-22T16:55:49.611029169Z           value: "blastn"
+2026-04-22T16:55:49.611031869Z         - name: ELB_DB
+2026-04-22T16:55:49.611034569Z           value: "core_nt_pathogen"
+2026-04-22T16:55:49.611037269Z         - name: ELB_RESULTS
+2026-04-22T16:55:49.611039969Z           value: "https://stgelb.blob.core.windows.net/results/v3/b2_subset/B2-pathogen-E64-1N/job-cfc70340acf94ce9a9df92fc479f1d50"
+2026-04-22T16:55:49.611042769Z         - name: RESULTS_DIR
+2026-04-22T16:55:49.611045469Z           value: "/shared/results"
+2026-04-22T16:55:49.611048169Z         command: ["/scripts/results-export-aks.sh"]
+2026-04-22T16:55:49.611050769Z       restartPolicy: OnFailure
+2026-04-22T16:55:49.611053469Z   backoffLimit: 3
+2026-04-22T16:55:49.611067769Z jobs/0/
+2026-04-22T16:55:49.611449168Z job_000.yaml
+2026-04-22T16:55:49.887729308Z 2026-04-22 16:55:49 RUNTIME submit-jobs 0.000000 seconds
+2026-04-22T16:55:49.887749408Z Submitted 1 jobs
+2026-04-22T16:55:49.888440208Z /usr/bin/cloud-job-submit-aks.sh: line 191: 1: command not found
+2026-04-22T16:55:49.909103988Z INFO: Autologin not specified.
+2026-04-22T16:55:49.909121388Z INFO: Authenticating to destination using Azure AD
+2026-04-22T16:55:49.915889382Z INFO: Any empty folders will not be processed, because source and/or destination doesn't have full folder support
+2026-04-22T16:55:49.915906682Z INFO: Scanning...
+2026-04-22T16:55:49.915915382Z 
+2026-04-22T16:55:49.915924982Z Job 2c88a575-c3a1-8144-41b6-b066080416dc has started
+2026-04-22T16:55:49.915936682Z Log file is located at: /root/.azcopy/2c88a575-c3a1-8144-41b6-b066080416dc.log
+2026-04-22T16:55:49.915944782Z 
+2026-04-22T16:55:51.917772597Z 100.0 %, 1 Done, 0 Failed, 0 Pending, 0 Skipped, 1 Total, 
+2026-04-22T16:55:51.917797097Z 
+2026-04-22T16:55:51.917800897Z 
+2026-04-22T16:55:51.917805697Z Job 2c88a575-c3a1-8144-41b6-b066080416dc summary
+2026-04-22T16:55:51.917810697Z Elapsed Time (Minutes): 0.0334
+2026-04-22T16:55:51.917815597Z Number of File Transfers: 1
+2026-04-22T16:55:51.917820197Z Number of Folder Property Transfers: 0
+2026-04-22T16:55:51.917823197Z Number of Symlink Transfers: 0
+2026-04-22T16:55:51.917825897Z Total Number of Transfers: 1
+2026-04-22T16:55:51.917829097Z Number of File Transfers Completed: 1
+2026-04-22T16:55:51.917832197Z Number of Folder Transfers Completed: 0
+2026-04-22T16:55:51.917834996Z Number of File Transfers Failed: 0
+2026-04-22T16:55:51.917837696Z Number of Folder Transfers Failed: 0
+2026-04-22T16:55:51.917840496Z Number of File Transfers Skipped: 0
+2026-04-22T16:55:51.917843196Z Number of Folder Transfers Skipped: 0
+2026-04-22T16:55:51.917855296Z Number of Symbolic Links Skipped: 0
+2026-04-22T16:55:51.917858096Z Number of Hardlinks Converted: 0
+2026-04-22T16:55:51.917860896Z Number of Hardlinks Skipped: 0
+2026-04-22T16:55:51.917863696Z Number of Special Files Skipped: 0
+2026-04-22T16:55:51.917866396Z Total Number of Bytes Transferred: 0
+2026-04-22T16:55:51.917869796Z Final Job Status: Completed
+2026-04-22T16:55:51.917872396Z 
