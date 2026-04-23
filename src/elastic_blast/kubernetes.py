@@ -880,6 +880,108 @@ def initialize_local_ssd(cfg: ElasticBlastConfig, query_files: list[str] = [], w
                 safe_exec(cmd)
 
 
+def initialize_local_ssd_sharded(cfg: ElasticBlastConfig, query_files: list[str] = [], wait=ElbExecutionMode.WAIT) -> None:
+    """Initialize local SSDs for sharded ElasticBLAST: each node downloads one shard."""
+    sas_token = cfg.azure.get_sas_token() if cfg.cloud_provider.cloud == CSP.AZURE else None
+    db, db_path, _ = get_blastdb_info(cfg.blast.db, sas_token=sas_token)
+    dry_run = cfg.cluster.dry_run
+    init_blastdb_minutes_timeout = cfg.timeouts.init_pv
+
+    num_nodes = cfg.cluster.num_nodes
+    num_shards = cfg.blast.db_partitions
+    partition_prefix = cfg.blast.db_partition_prefix
+    program = cfg.blast.program
+
+    results_bucket = cfg.cluster.results
+    if cfg.cloud_provider.cloud == CSP.AZURE:
+        results_bucket = os.path.join(results_bucket, cfg.azure.elb_job_id)
+
+    subs = {
+        'INPUT_QUERY': 'None',
+        'BATCH_LEN': str(cfg.blast.batch_len),
+        'COPY_ONLY': '1',
+        'ELB_DB': db,
+        'ELB_DB_MOL_TYPE': str(ElbSupportedPrograms().get_db_mol_type(program)),
+        'ELB_PARTITION_PREFIX': partition_prefix,
+        'ELB_RESULTS': results_bucket,
+        'NODE_ORDINAL': '0',
+        'ELB_SHARD_IDX': '00',
+        'ELB_DOCKER_IMAGE': cfg.azure.elb_docker_image,
+        'ELB_IMAGE_QS': cfg.azure.qs_docker_image,
+        'K8S_JOB_GET_BLASTDB': K8S_JOB_GET_BLASTDB,
+        'K8S_JOB_LOAD_BLASTDB_INTO_RAM': K8S_JOB_LOAD_BLASTDB_INTO_RAM,
+        'K8S_JOB_IMPORT_QUERY_BATCHES': K8S_JOB_IMPORT_QUERY_BATCHES,
+        'K8S_JOB_SUBMIT_JOBS': K8S_JOB_SUBMIT_JOBS,
+        'K8S_JOB_BLAST': K8S_JOB_BLAST,
+        'K8S_JOB_RESULTS_EXPORT': K8S_JOB_RESULTS_EXPORT,
+        'TIMEOUT': str(init_blastdb_minutes_timeout * 60),
+    }
+
+    logging.info(f'Initializing {num_shards} shards on {num_nodes} nodes (local SSD)')
+
+    job_init_template = 'job-init-ssd-shard-aks.yaml.template'
+
+    with TemporaryDirectory() as d:
+        start = timer()
+        ref = files('elastic_blast').joinpath(f'templates/{job_init_template}')
+        tmpl = ref.read_text()
+
+        for n in range(min(num_shards, num_nodes)):
+            subs['NODE_ORDINAL'] = str(n)
+            subs['ELB_SHARD_IDX'] = f'{n:02d}'
+            # Set shard-specific DB name from partition prefix
+            shard_name = os.path.basename(f'{partition_prefix}{n:02d}')
+            subs['ELB_DB'] = shard_name
+            job_file = pathlib.Path(os.path.join(d, f'job-init-ssd-shard-{n}.yaml'))
+            with job_file.open(mode='wt') as f:
+                f.write(substitute_params(tmpl, subs))
+
+        cmd = f"kubectl --context={cfg.appstate.k8s_ctx} apply -f {d}"
+        if dry_run:
+            logging.info(cmd)
+        else:
+            safe_exec(cmd)
+
+        if wait != ElbExecutionMode.WAIT:
+            return
+
+        # Wait for all init jobs to complete
+        timeout = init_blastdb_minutes_timeout * 60
+        sec2wait = 20
+        while timeout > 0:
+            cmd = f'kubectl --context={cfg.appstate.k8s_ctx} get jobs -l app=setup -o jsonpath=' \
+                '{.items[?(@.status.active)].metadata.name}{\'\\t\'}' \
+                '{.items[?(@.status.failed)].metadata.name}{\'\\t\'}' \
+                '{.items[?(@.status.succeeded)].metadata.name}'
+            if dry_run:
+                logging.info(cmd)
+                res = '\t\t' + ' '.join([f'init-ssd-{n}' for n in range(num_shards)])
+            else:
+                proc = safe_exec(cmd)
+                res = handle_error(proc.stdout)
+                logging.debug(res)
+            active, failed, succeeded = res.split('\t')
+            if failed:
+                raise RuntimeError(f'Shard init jobs failed: {failed}')
+            if not active:
+                logging.debug(f'Shard init jobs succeeded: {succeeded}')
+                break
+            time.sleep(sec2wait)
+            timeout -= sec2wait
+        if timeout < 0:
+            raise TimeoutError('Shard init jobs timed out')
+
+        end = timer()
+        logging.debug(f'RUNTIME init-sharded-storage {end - start} seconds')
+
+        if 'ELB_DONT_DELETE_SETUP_JOBS' not in os.environ:
+            cmd = f'kubectl --context={cfg.appstate.k8s_ctx} delete jobs -l app=setup'
+            if dry_run:
+                logging.info(cmd)
+            else:
+                safe_exec(cmd)
+
+
 def initialize_persistent_disk(cfg: ElasticBlastConfig, query_files: list[str] = [], wait=ElbExecutionMode.WAIT) -> None:
     """ Initialize Persistent Disk for ElasticBLAST execution
     Arguments:

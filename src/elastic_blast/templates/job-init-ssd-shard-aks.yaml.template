@@ -1,0 +1,93 @@
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: create-workspace
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: create-workspace
+  template:
+    metadata:
+      labels:
+        name: create-workspace
+    spec:
+      containers:
+      - name: create-dir
+        image: busybox
+        command:
+        - sh
+        - -c
+        - "mkdir -p /workspace && chmod 777 /workspace && sleep infinity"
+        volumeMounts:
+        - name: host-workspace
+          mountPath: /workspace
+      volumes:
+      - name: host-workspace
+        hostPath:
+          path: /workspace
+          type: DirectoryOrCreate
+      nodeSelector:
+        kubernetes.io/os: linux
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: init-ssd-${NODE_ORDINAL}
+  labels:
+    app: setup
+spec:
+  template:
+    metadata:
+      labels:
+        app: setup
+    spec:
+      volumes:
+      - name: blastdb
+        hostPath:
+          path: "/workspace"
+      - name: scripts
+        configMap:
+          name: elb-scripts
+          defaultMode: 0755
+      containers:
+      - name: ${K8S_JOB_GET_BLASTDB}
+        image: ${ELB_DOCKER_IMAGE}
+        workingDir: /blast/blastdb
+        volumeMounts:
+        - name: blastdb
+          mountPath: /blast/blastdb
+          subPath: blast
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+        env:
+        - name: BLAST_USAGE_REPORT
+          value: "false"
+        - name: ELB_SHARD_IDX
+          value: "${ELB_SHARD_IDX}"
+        - name: ELB_PARTITION_PREFIX
+          value: "${ELB_PARTITION_PREFIX}"
+        - name: ELB_DB
+          value: "${ELB_DB}"
+        - name: ELB_DB_MOL_TYPE
+          value: "${ELB_DB_MOL_TYPE}"
+        - name: STARTUP_DELAY
+          value: "30"
+        command: ["/scripts/init-db-shard-aks.sh"]
+      - name: ${K8S_JOB_IMPORT_QUERY_BATCHES}
+        image: ${ELB_IMAGE_QS}
+        workingDir: /blast/queries
+        volumeMounts:
+        - name: blastdb
+          mountPath: /blast/queries
+          subPath: queries
+          readOnly: false
+        command: ["run.sh", "-i", "${INPUT_QUERY}", "-o", "${ELB_RESULTS}", "-b", "${BATCH_LEN}", "-c", "${COPY_ONLY}", "-q", "/blast/queries/"]
+      restartPolicy: Never
+      nodeSelector:
+        ordinal: "${NODE_ORDINAL}"
+  backoffLimit: 3
+  activeDeadlineSeconds: ${TIMEOUT}

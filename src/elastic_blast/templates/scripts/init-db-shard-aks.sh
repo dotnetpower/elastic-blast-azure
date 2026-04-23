@@ -1,83 +1,108 @@
 #!/bin/bash
-# benchmark/prep_db_v3_remote.sh — Launch prep VM, build DB variants, upload to blob
+# init-db-shard-aks.sh — Download a single DB shard to local SSD
 #
-# This script creates a temporary Azure VM, installs BLAST+, downloads core_nt,
-# creates taxonomy subsets + shards, and uploads everything to Blob Storage.
-# The VM is automatically deleted when done.
+# Each shard is defined by a manifest file listing volume names.
+# This script downloads the manifest, then fetches each volume's files
+# from the main DB directory on blob storage.
 #
-# Usage:
-#   ./benchmark/prep_db_v3_remote.sh           # Full prep
-#   ./benchmark/prep_db_v3_remote.sh subset    # Subsets only
-#   ./benchmark/prep_db_v3_remote.sh shard     # Shards only
-#   ./benchmark/prep_db_v3_remote.sh status    # Check VM status
-#   ./benchmark/prep_db_v3_remote.sh ssh       # SSH into the VM
-#   ./benchmark/prep_db_v3_remote.sh cleanup   # Delete VM
-#
-# Author: Moon Hyuk Choi
+# Environment variables (set by K8s pod spec):
+#   ELB_SHARD_IDX       - Shard index (zero-padded: 00, 01, ...)
+#   ELB_PARTITION_PREFIX - Blob URL prefix for shard directories
+#   ELB_DB              - BLAST database name (shard-specific, e.g. core_nt_shard_00)
+#   ELB_DB_MOL_TYPE     - Database molecule type (nucl/prot)
+#   STARTUP_DELAY       - Optional delay in seconds
 
-set -eo pipefail
+set -o pipefail
 
-STEP="${1:-all}"
-RG="rg-elb-koc"
-STORAGE="stgelb"
-CONTAINER="blast-db"
-LOCATION="koreacentral"
-VM_NAME="elb-v3-prep"
-VM_SKU="Standard_D32s_v3"  # 32 vCPU, 128 GB RAM, ~$1.53/hr
-VM_IMAGE="Canonical:ubuntu-24_04-lts:server:latest"
-BLOB_BASE="https://${STORAGE}.blob.core.windows.net/${CONTAINER}"
-DB_NAME="core_nt"
+echo "BASH version ${BASH_VERSION}"
+echo "Shard download: idx=${ELB_SHARD_IDX} prefix=${ELB_PARTITION_PREFIX} db=${ELB_DB}"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+if [ -n "$STARTUP_DELAY" ]; then
+    echo "Waiting ${STARTUP_DELAY}s for workspace initialization"
+    sleep "$STARTUP_DELAY"
+fi
 
-log() { echo -e "${GREEN}[$(date '+%H:%M:%S')]${NC} $*"; }
-warn() { echo -e "${YELLOW}[$(date '+%H:%M:%S')] WARNING:${NC} $*"; }
-err() { echo -e "${RED}[$(date '+%H:%M:%S')] ERROR:${NC} $*" >&2; }
+start=$(date +%s)
 
-# ── Cleanup function ──
-cleanup_vm() {
-    log "Deleting prep VM and associated resources..."
-    az vm delete -g "$RG" -n "$VM_NAME" --yes --force-deletion true 2>/dev/null || true
-    for res_type in "Microsoft.Network/networkInterfaces" \
-    "Microsoft.Network/networkSecurityGroups" \
-    "Microsoft.Network/publicIPAddresses"; do
-        local res_name="${VM_NAME}"
-        case "$res_type" in
-            *networkInterfaces) res_name="${VM_NAME}VMNic" ;;
-            *networkSecurityGroups) res_name="${VM_NAME}NSG" ;;
-            *publicIPAddresses) res_name="${VM_NAME}PublicIP" ;;
-        esac
-        az resource delete -g "$RG" --resource-type "$res_type" -n "$res_name" 2>/dev/null || true
-    done
-    local disk_id
-    disk_id=$(az disk list -g "$RG" --query "[?starts_with(name,'${VM_NAME}')].id" -o tsv 2>/dev/null || true)
-    [[ -n "$disk_id" ]] && az disk delete --ids "$disk_id" --yes 2>/dev/null || true
-    az network vnet delete -g "$RG" -n "${VM_NAME}VNET" 2>/dev/null || true
-    log "Cleanup complete."
+log() {
+    local ts
+    ts=$(date +'%F %T')
+    printf '%s RUNTIME %s %f seconds\n' "$ts" "$1" "$2"
 }
 
-# ── Build the remote script ──
-build_remote_script() {
-    local step="$1"
-    cat <<'REMOTE_SCRIPT'
-#!/bin/bash
-set -eo pipefail
+azcopy login --identity || { echo "ERROR: azcopy login failed"; exit 1; }
 
-STEP="__STEP__"
-STORAGE="stgelb"
-CONTAINER="blast-db"
-BLOB_BASE="https://${STORAGE}.blob.core.windows.net/${CONTAINER}"
-DB_NAME="core_nt"
-DB_DIR="/mnt/blastdb"
-WORK_DIR="/mnt/v3_prep"
-QUERY_DIR="/mnt/queries"
+export AZCOPY_CONCURRENCY_VALUE=${AZCOPY_CONCURRENCY_VALUE:-64}
+export AZCOPY_BUFFER_GB=${AZCOPY_BUFFER_GB:-4}
 
-log() { echo -e "\033[0;32m[$(date '+%H:%M:%S')]\033[0m $*"; }
-err() { echo -e "\033[0;31m[$(date '+%H:%M:%S')] ERROR:\033[0m $*" >&2; }
+retry_azcopy() {
+    local max_attempts=3 attempt=1 wait_sec=5
+    while [ $attempt -le $max_attempts ]; do
+        if azcopy "$@"; then return 0; fi
+        echo "azcopy attempt $attempt/$max_attempts failed, retrying in ${wait_sec}s..."
+        sleep $wait_sec; wait_sec=$((wait_sec * 2)); attempt=$((attempt + 1))
+    done
+    echo "ERROR: azcopy failed after $max_attempts attempts"; return 1
+}
+
+# Step 1: Download manifest and .nal alias to get volume list
+SHARD_URL="${ELB_PARTITION_PREFIX}${ELB_SHARD_IDX}/"
+MANIFEST_URL="${SHARD_URL}${ELB_DB}.manifest"
+NAL_URL="${SHARD_URL}${ELB_DB}.nal"
+echo "Downloading manifest: ${MANIFEST_URL}"
+retry_azcopy cp "${MANIFEST_URL}" /tmp/manifest.txt --log-level=ERROR || {
+    echo "ERROR: manifest download failed"
+    exit 1
+}
+# Download .nal alias file (points BLAST to the volume files)
+retry_azcopy cp "${NAL_URL}" "./${ELB_DB}.nal" --log-level=ERROR || true
+VOLUMES=$(cat /tmp/manifest.txt)
+echo "Volumes: ${VOLUMES}"
+
+# Step 2: Derive base DB URL (strip shard part from prefix)
+# e.g. https://.../blast-db/10shards/core_nt_shard_ → https://.../blast-db/
+DB_BASE_URL=$(echo "${ELB_PARTITION_PREFIX}" | sed 's|/[^/]*/[^/]*$|/|')
+# Find the original DB name (strip shard suffix: core_nt_shard_00 → core_nt)
+ORIG_DB=$(echo "${ELB_DB}" | sed 's/_shard_[0-9]*$//')
+DB_URL="${DB_BASE_URL}${ORIG_DB}/"
+echo "DB base URL: ${DB_URL}"
+
+# Step 3: Download volume files flat using --include-pattern (single azcopy job)
+# Build semicolon-separated include pattern for all volumes + taxonomy files
+PATTERN=""
+for VOL in $VOLUMES; do
+    [ -n "$PATTERN" ] && PATTERN="${PATTERN};"
+    PATTERN="${PATTERN}${VOL}.*"
+done
+PATTERN="${PATTERN};taxdb.btd;taxdb.bti;${ORIG_DB}.ndb;${ORIG_DB}.ntf;${ORIG_DB}.nto"
+echo "Downloading with pattern: ${PATTERN}"
+
+# Use trailing /* to enable wildcard matching, --flat to prevent subdirectory creation
+retry_azcopy cp "${DB_URL}*" . \
+    --include-pattern "${PATTERN}" \
+    --block-size-mb=256 \
+    --log-level=WARNING || exit 1
+
+end=$(date +%s)
+log "download-shard-${ELB_SHARD_IDX}" $((end - start))
+
+echo "DB files downloaded: $(ls *.nsq 2>/dev/null | wc -l) .nsq files"
+echo "Total size: $(du -sh . 2>/dev/null | cut -f1)"
+
+# Build volume path string for BLAST -db (space-separated, bypasses .nal)
+VOLPATHS=""
+for VOL in $VOLUMES; do
+    [ -n "$VOLPATHS" ] && VOLPATHS="$VOLPATHS "
+    VOLPATHS="${VOLPATHS}$(pwd)/${VOL}"
+done
+echo "VOLPATHS=${VOLPATHS}" > /tmp/shard_volpaths.txt
+echo "Volume paths: ${VOLPATHS}"
+
+# Clean up azcopy processes
+pkill -f azcopy 2>/dev/null || true
+rm -rf /root/.azcopy 2>/dev/null || true
+
+exit 0
 
 # ── Install BLAST+ and azcopy ──
 install_tools() {

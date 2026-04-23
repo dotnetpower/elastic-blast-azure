@@ -46,9 +46,9 @@ COLORS = {
 
 
 def fig1_shard_blast_times():
-    """Fig 1: Per-shard BLAST execution time (bar chart)."""
+    """Fig 1: Per-shard BLAST execution time (bar chart) — ElasticBLAST results."""
     shards = [f'S{i:02d}' for i in range(10)]
-    blast_times = [38, 32, 39, 40, 33, 40, 31, 35, 35, 6]
+    blast_times = [36, 45, 39, 37, 45, 44, 34, 39, 34, 8]  # ElasticBLAST (fixed script)
     vols = [9, 9, 9, 9, 9, 9, 9, 9, 9, 2]
 
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -69,7 +69,7 @@ def fig1_shard_blast_times():
 
     ax.set_xlabel('Shard')
     ax.set_ylabel('BLAST Time (seconds)')
-    ax.set_title('Per-Shard BLAST Execution Time\n10-shard × E16s_v3, pathogen-10.fa vs core_nt (269 GB)')
+    ax.set_title('Per-Shard BLAST Execution Time (via ElasticBLAST)\n10-shard × E16s_v3, pathogen-10.fa vs core_nt (269 GB)')
     ax.set_ylim(0, 580)
 
     fig.savefig(os.path.join(OUT_DIR, 'fig1-shard-blast-times.png'))
@@ -103,35 +103,34 @@ def fig2_shard_download_times():
 
 
 def fig3_speedup_comparison():
-    """Fig 3: Speedup comparison — full DB vs sharded."""
-    configs = ['Full DB\n1×E64s\n(reference)', 'Full DB\n2×E64s\n(v2 best)', '10-Shard\n10×E16s\n(v3)']
-    blast_times = [533, 533/5.8, 40]  # 533s, ~92s (v2 2N speedup), 40s
-    wall_clocks = [533+146, 92+180, 40+196]  # blast + download
-    colors = [COLORS['gray'], COLORS['blue'], COLORS['green']]
+    """Fig 3: Speedup comparison — all strategies."""
+    configs = ['Full DB\n1×E64s\n(v2 ref)', 'B2 Subset\n1×E16s', 'B2 Subset\n1×E64s', 'B1 10-Shard\n10×E16s\n(ElasticBLAST)']
+    blast_times = [533, 516, 231, 45]
+    colors = [COLORS['gray'], COLORS['orange'], COLORS['blue'], COLORS['green']]
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
 
     # BLAST time
     bars1 = ax1.bar(configs, blast_times, color=colors, edgecolor='white', width=0.6)
     for bar, t in zip(bars1, blast_times):
         ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 10,
-                f'{t:.0f}s\n({t/60:.1f} min)', ha='center', va='bottom', fontsize=9, fontweight='bold')
+                f'{t}s\n({t/60:.1f} min)', ha='center', va='bottom', fontsize=9, fontweight='bold')
     ax1.set_ylabel('BLAST Time (seconds)')
     ax1.set_title('BLAST Execution Time')
     ax1.set_ylim(0, 650)
 
     # Speedup
-    speedups = [1.0, 533/blast_times[1], 533/40]
+    speedups = [533/t for t in blast_times]
     bars2 = ax2.bar(configs, speedups, color=colors, edgecolor='white', width=0.6)
     for bar, s in zip(bars2, speedups):
         ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.3,
                 f'{s:.1f}x', ha='center', va='bottom', fontsize=11, fontweight='bold')
     ax2.set_ylabel('Speedup vs Full DB 1N')
     ax2.set_title('Speedup Factor')
-    ax2.set_ylim(0, 16)
+    ax2.set_ylim(0, 14)
     ax2.axhline(y=1, color='gray', linestyle='-', linewidth=0.5)
 
-    fig.suptitle('DB Sharding Performance: core_nt (269 GB, 978B bases)', fontsize=14, fontweight='bold')
+    fig.suptitle('v3 Strategy Comparison: core_nt (269 GB) — All via ElasticBLAST', fontsize=14, fontweight='bold')
     fig.tight_layout(rect=[0, 0, 1, 0.93])
     fig.savefig(os.path.join(OUT_DIR, 'fig3-speedup-comparison.png'))
     plt.close(fig)
@@ -314,6 +313,74 @@ def fig8_hit_distribution():
     print('  fig8-hit-distribution.png')
 
 
+def fig9_b2_subset_comparison():
+    """Fig 9: B2 Taxonomy Subset — DB size vs BLAST time."""
+    labels = ['Full core_nt\n(E64s)', 'Pathogen\n(E64s)', 'Virus\n(E64s)', 'Pathogen\n(E16s)']
+    db_sizes = [269, 64, 60, 64]
+    blast_times = [533, 231, 231, 516]
+    colors = [COLORS['gray'], COLORS['blue'], COLORS['teal'], COLORS['orange']]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+    # DB size
+    bars1 = ax1.bar(labels, db_sizes, color=colors, edgecolor='white', width=0.6)
+    for bar, s in zip(bars1, db_sizes):
+        ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 5,
+                f'{s} GB', ha='center', va='bottom', fontsize=10, fontweight='bold')
+    ax1.set_ylabel('DB Size (GB)')
+    ax1.set_title('Database Size')
+    ax1.set_ylim(0, 320)
+
+    # BLAST time
+    bars2 = ax2.bar(labels, blast_times, color=colors, edgecolor='white', width=0.6)
+    for bar, t in zip(bars2, blast_times):
+        ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 10,
+                f'{t}s', ha='center', va='bottom', fontsize=10, fontweight='bold')
+    ax2.set_ylabel('BLAST Time (seconds)')
+    ax2.set_title('BLAST Execution Time')
+    ax2.set_ylim(0, 600)
+
+    fig.suptitle('B2: Taxonomy Subset — DB Size vs Performance', fontsize=14, fontweight='bold')
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    fig.savefig(os.path.join(OUT_DIR, 'fig9-b2-subset-comparison.png'))
+    plt.close(fig)
+    print('  fig9-b2-subset-comparison.png')
+
+
+def fig10_all_strategies():
+    """Fig 10: All v3 strategies — comprehensive comparison."""
+    labels = ['Full DB\n1×E64s\n(v2)', 'B2:Pathogen\nE16s', 'B2:Pathogen\nE64s', 'B2:Virus\nE64s', 'B1:10-shard\n10×E16s']
+    blast = [533, 516, 231, 231, 45]
+    cost = [0.76, 0.59, 1.28, 1.07, 0.66]
+    colors = [COLORS['gray'], COLORS['orange'], COLORS['blue'], COLORS['teal'], COLORS['green']]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    # BLAST time (log scale)
+    bars1 = ax1.bar(labels, blast, color=colors, edgecolor='white', width=0.65)
+    for bar, t in zip(bars1, blast):
+        ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 10,
+                f'{t}s', ha='center', va='bottom', fontsize=9, fontweight='bold')
+    ax1.set_ylabel('BLAST Time (seconds)')
+    ax1.set_title('BLAST Execution Time')
+    ax1.set_ylim(0, 600)
+
+    # Cost per run
+    bars2 = ax2.bar(labels, cost, color=colors, edgecolor='white', width=0.65)
+    for bar, c in zip(bars2, cost):
+        ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.03,
+                f'${c:.2f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
+    ax2.set_ylabel('Cost per Run (USD)')
+    ax2.set_title('Cost per Cold-Start Run')
+    ax2.set_ylim(0, 1.6)
+
+    fig.suptitle('v3 Benchmark: All Strategies via ElasticBLAST', fontsize=14, fontweight='bold')
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    fig.savefig(os.path.join(OUT_DIR, 'fig10-all-strategies.png'))
+    plt.close(fig)
+    print('  fig10-all-strategies.png')
+
+
 if __name__ == '__main__':
     print('Generating v3 benchmark charts...')
     fig1_shard_blast_times()
@@ -324,4 +391,6 @@ if __name__ == '__main__':
     fig6_correctness()
     fig7_timeline()
     fig8_hit_distribution()
+    fig9_b2_subset_comparison()
+    fig10_all_strategies()
     print(f'\nAll charts saved to {OUT_DIR}/')

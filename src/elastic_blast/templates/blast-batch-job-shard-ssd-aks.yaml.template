@@ -1,0 +1,118 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${ELB_BLAST_PROGRAM}-batch-${ELB_DB_LABEL}-job-${JOB_NUM}
+  labels:
+    app: blast
+    db: ${ELB_DB_LABEL}
+    shard: "${ELB_SHARD_IDX}"
+spec:
+  template:
+    metadata:
+      labels:
+        app: blast
+        db: ${ELB_DB_LABEL}
+        shard: "${ELB_SHARD_IDX}"
+    spec:
+      volumes:
+      - name: blast-dbs
+        hostPath:
+          path: "/workspace"
+          type: DirectoryOrCreate
+      - name: shared-data
+        emptyDir: {}
+      - name: scripts
+        configMap:
+          name: elb-scripts
+          defaultMode: 0755
+      activeDeadlineSeconds: ${ELB_BLAST_TIMEOUT}
+      initContainers:
+      - name: ${K8S_JOB_IMPORT_QUERY_BATCHES}
+        image: ${ELB_DOCKER_IMAGE}
+        volumeMounts:
+        - name: shared-data
+          mountPath: /shared
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+        env:
+        - name: ELB_RESULTS
+          value: "${ELB_RESULTS_BASE}"
+        - name: JOB_NUM
+          value: "${JOB_NUM}"
+        command: ["/scripts/query-download-ssd-aks.sh"]
+      containers:
+      - name: ${K8S_JOB_BLAST}
+        image: ${ELB_DOCKER_IMAGE}
+        workingDir: /blast/blastdb
+        resources:
+          requests:
+            memory: "${ELB_MEM_REQUEST}"
+            cpu: ${ELB_NUM_CPUS_REQ}
+          limits:
+            memory: "${ELB_MEM_LIMIT}"
+            cpu: ${ELB_NUM_CPUS}
+        volumeMounts:
+        - name: blast-dbs
+          mountPath: /blast/blastdb
+          subPath: blast
+        - name: shared-data
+          mountPath: /shared
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+        env:
+        - name: BLAST_USAGE_REPORT
+          value: "${BLAST_USAGE_REPORT}"
+        - name: BLAST_ELB_JOB_ID
+          value: "${BLAST_ELB_JOB_ID}"
+        - name: BLAST_ELB_BATCH_NUM
+          value: "${BLAST_ELB_BATCH_NUM}"
+        - name: BLAST_ELB_VERSION
+          value: "${BLAST_ELB_VERSION}"
+        - name: JOB_NUM
+          value: "${JOB_NUM}"
+        - name: ELB_BLAST_PROGRAM
+          value: "${ELB_BLAST_PROGRAM}"
+        - name: ELB_DB
+          value: "${ELB_DB}"
+        - name: ELB_NUM_CPUS
+          value: "${ELB_NUM_CPUS}"
+        - name: ELB_BLAST_OPTIONS
+          value: "${ELB_BLAST_OPTIONS}"
+        - name: ELB_RESULTS
+          value: "${ELB_RESULTS}"
+        - name: ELB_TIMEFMT
+          value: "${ELB_TIMEFMT}"
+        - name: ELB_DB_MOL_TYPE
+          value: "${ELB_DB_MOL_TYPE}"
+        - name: QUERY_DIR
+          value: "/shared/requests"
+        - name: RESULTS_DIR
+          value: "/shared/results"
+        command: ["/scripts/blast-run-aks.sh"]
+      - name: ${K8S_JOB_RESULTS_EXPORT}
+        image: ${ELB_DOCKER_IMAGE}
+        volumeMounts:
+        - name: shared-data
+          mountPath: /shared
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+        env:
+        - name: JOB_NUM
+          value: "${JOB_NUM}"
+        - name: ELB_BLAST_PROGRAM
+          value: "${ELB_BLAST_PROGRAM}"
+        - name: ELB_DB
+          value: "${ELB_DB}"
+        - name: ELB_RESULTS
+          value: "${ELB_RESULTS}"
+        - name: RESULTS_DIR
+          value: "/shared/results"
+        command: ["/scripts/results-export-aks.sh"]
+      restartPolicy: OnFailure
+      nodeSelector:
+        ordinal: "${ELB_SHARD_IDX}"
+  backoffLimit: 3

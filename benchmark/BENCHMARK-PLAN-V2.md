@@ -178,71 +178,71 @@ done
 ### Overview
 
 ```
-Axis 1: SKU Scale-Up ──────── "어떤 VM이 가장 빠른가?"
+Axis 1: SKU Scale-Up ──────── "Which VM is the fastest?"
     │
-    ▼ (최적 SKU 확정)
-Axis 2: Query-Based Tuning ── "쿼리 규모별 최적 설정은?"
+    ▼ (Optimal SKU determined)
+Axis 2: Query-Based Tuning ── "What is the optimal config per query scale?"
     │
-    ▼ (추천 매핑 확정)
-Axis 3: Multi-Request Service ─ "다수 사용자 동시 처리가 되는가?"
+    ▼ (Recommendation mapping finalized)
+Axis 3: Multi-Request Service ─ "Can it handle multiple users concurrently?"
 ```
 
 ---
 
-## 4. Axis 1: SKU Scale-Up — 단일 노드 최적 VM 식별
+## 4. Axis 1: SKU Scale-Up — Identifying the Optimal Single-Node VM
 
 ### 4.1 Objective
 
-core_nt (~300 GB) 에서 **단일 노드 성능이 가장 좋은 VM SKU**를 식별합니다.
-v1에서 확인된 결론(Local SSD > NFS)을 전제로, Local SSD 모드만 테스트합니다.
+Identify the **VM SKU with the best single-node performance** for core_nt (~300 GB).
+Based on the v1 conclusion (Local SSD > NFS), only Local SSD mode is tested.
 
 ### 4.2 VM Candidates
 
-| SKU                 | vCPU | RAM    | Temp Disk   | $/hr   | 선택 이유                            |
+| SKU                 | vCPU | RAM    | Temp Disk   | $/hr   | Selection Reason                     |
 | ------------------- | ---- | ------ | ----------- | ------ | ------------------------------------ |
 | Standard_E32s_v3    | 32   | 256 GB | 512 GB      | $2.016 | v1 baseline, **temp disk < core_nt** |
-| Standard_E48s_v3    | 48   | 384 GB | 768 GB      | $3.024 | CPU 1.5x, temp disk 수용 가능?       |
-| Standard_E64s_v3    | 64   | 432 GB | 1,024 GB    | $4.032 | CPU 2x, **core_nt 확실히 수용**      |
-| Standard_E96s_v3    | 96   | 672 GB | 1,344 GB    | $6.048 | CPU 3x, 최고 E-series                |
+| Standard_E48s_v3    | 48   | 384 GB | 768 GB      | $3.024 | CPU 1.5x, temp disk fits?            |
+| Standard_E64s_v3    | 64   | 432 GB | 1,024 GB    | $4.032 | CPU 2x, **core_nt fits easily**      |
+| Standard_E96s_v3    | 96   | 672 GB | 1,344 GB    | $6.048 | CPU 3x, top E-series                 |
 | Standard_L32as_v3   | 32   | 256 GB | 3.8 TB NVMe | $2.496 | v1 NVMe baseline                     |
 | Standard_L64as_v3   | 64   | 512 GB | 7.6 TB NVMe | $4.992 | NVMe + CPU 2x                        |
-| Standard_HB120rs_v3 | 120  | 480 GB | 2×960 GB    | $3.600 | HPC, Tsai 2021 비교                  |
+| Standard_HB120rs_v3 | 120  | 480 GB | 2×960 GB    | $3.600 | HPC, Tsai 2021 comparison            |
 
-> **중요**: E32s_v3 temp disk = 512 GB인데 core_nt ≈ 300 GB. 수용은 되지만 여유가 적음.
-> 쿼리/results 공간까지 고려하면 E48s_v3+ 또는 L-series가 안전.
+> **Important**: E32s_v3 temp disk = 512 GB while core_nt ≈ 300 GB. It fits but with little margin.
+> Considering space for queries/results, E48s_v3+ or L-series is safer.
 
 ### 4.3 Pre-check: DB Size Verification
 
-core_nt 정확한 크기를 먼저 확인해야 합니다. NCBI에서 다운로드 전 volume 수 확인:
+The exact size of core_nt must be verified first. Check volume count before downloading from NCBI:
 
 ```bash
-# S3에서 core_nt volume 목록 확인
+# Check core_nt volume list on S3
 aws s3 ls s3://ncbi-blast-databases/ --no-sign-request | grep "core_nt\." | head -20
 
-# 또는 NCBI FTP에서 확인
+# Or check on NCBI FTP
 curl -s https://ftp.ncbi.nlm.nih.gov/blast/db/ | grep "core_nt\." | head -20
 ```
 
-만약 core_nt > 500 GB이면 E32s_v3는 제외하고 E64s_v3+ / L-series만 테스트합니다.
+If core_nt > 500 GB, exclude E32s_v3 and test only E64s_v3+ / L-series.
 
 ### 4.4 Test Matrix
 
 **DB**: core_nt, Local SSD mode (`exp-use-local-ssd = true`)
 **Queries**: pathogen-10.fa (1 batch) + pathogen-300.fa (9 batches)
 
-| Test ID    | SKU        | Nodes | Query        | batches | 측정 목표                      |
-| ---------- | ---------- | ----- | ------------ | ------- | ------------------------------ |
-| A1-E32-10  | E32s_v3    | 1     | pathogen-10  | 1       | E32 baseline (DB 수용 가능 시) |
-| A1-E48-10  | E48s_v3    | 1     | pathogen-10  | 1       | CPU 1.5x 효과                  |
-| A1-E64-10  | E64s_v3    | 1     | pathogen-10  | 1       | CPU 2x 효과                    |
-| A1-E96-10  | E96s_v3    | 1     | pathogen-10  | 1       | CPU 3x 효과                    |
-| A1-L32-10  | L32as_v3   | 1     | pathogen-10  | 1       | NVMe baseline                  |
-| A1-L64-10  | L64as_v3   | 1     | pathogen-10  | 1       | NVMe + CPU 2x                  |
-| A1-HB-10   | HB120rs_v3 | 1     | pathogen-10  | 1       | HPC (Tsai 비교)                |
-| A1-E32-300 | E32s_v3    | 1     | pathogen-300 | 9       | multi-batch single node        |
-| A1-E64-300 | E64s_v3    | 1     | pathogen-300 | 9       | multi-batch scale-up           |
-| A1-L32-300 | L32as_v3   | 1     | pathogen-300 | 9       | multi-batch NVMe               |
-| A1-HB-300  | HB120rs_v3 | 1     | pathogen-300 | 9       | multi-batch HPC                |
+| Test ID    | SKU        | Nodes | Query        | batches | Measurement Goal          |
+| ---------- | ---------- | ----- | ------------ | ------- | ------------------------- |
+| A1-E32-10  | E32s_v3    | 1     | pathogen-10  | 1       | E32 baseline (if DB fits) |
+| A1-E48-10  | E48s_v3    | 1     | pathogen-10  | 1       | CPU 1.5x effect           |
+| A1-E64-10  | E64s_v3    | 1     | pathogen-10  | 1       | CPU 2x effect             |
+| A1-E96-10  | E96s_v3    | 1     | pathogen-10  | 1       | CPU 3x effect             |
+| A1-L32-10  | L32as_v3   | 1     | pathogen-10  | 1       | NVMe baseline             |
+| A1-L64-10  | L64as_v3   | 1     | pathogen-10  | 1       | NVMe + CPU 2x             |
+| A1-HB-10   | HB120rs_v3 | 1     | pathogen-10  | 1       | HPC (Tsai comparison)     |
+| A1-E32-300 | E32s_v3    | 1     | pathogen-300 | 9       | multi-batch single node   |
+| A1-E64-300 | E64s_v3    | 1     | pathogen-300 | 9       | multi-batch scale-up      |
+| A1-L32-300 | L32as_v3   | 1     | pathogen-300 | 9       | multi-batch NVMe          |
+| A1-HB-300  | HB120rs_v3 | 1     | pathogen-300 | 9       | multi-batch HPC           |
 
 **Total**: 11 tests
 
@@ -258,9 +258,9 @@ curl -s https://ftp.ncbi.nlm.nih.gov/blast/db/ | grep "core_nt\." | head -20
 
 ### 4.6 Expected Output
 
-1. **SKU Performance Chart**: bar chart — SKU별 median per-batch time
+1. **SKU Performance Chart**: bar chart — median per-batch time per SKU
 2. **SKU Cost-Efficiency Chart**: scatter — cost/run vs median time
-3. **CPU Scaling Chart**: line chart — vCPU count vs speedup (linear 대비)
+3. **CPU Scaling Chart**: line chart — vCPU count vs speedup (vs linear)
 4. **Optimal SKU recommendation table**
 
 ### 4.7 Cost Estimate
@@ -324,57 +324,57 @@ mem-limit = 4G
 
 ---
 
-## 5. Axis 2: Query-Based Tuning — 쿼리 규모별 최적 설정
+## 5. Axis 2: Query-Based Tuning — Optimal Config per Query Scale
 
 ### 5.1 Objective
 
-쿼리 수 (10-3,000)에 따라 **(SKU, 노드수, batch-len, mem-limit)** 최적 조합을 도출하고,
-`azure_optimizer.py`에 자동 추천 로직을 구현합니다.
+Derive the optimal combination of **(SKU, node count, batch-len, mem-limit)** based on query count (10-3,000),
+and implement auto-recommendation logic in `azure_optimizer.py`.
 
 ### 5.2 Dependencies
 
-- Axis 1에서 **최적 SKU 2-3종**이 결정된 후 진행
-- 가정: Axis 1 결과로 `E64s_v3` (또는 유사)가 선정됨
+- Proceed after **2-3 optimal SKUs** are determined from Axis 1
+- Assumption: `E64s_v3` (or similar) is selected from Axis 1 results
 
 ### 5.3 Test Matrix
 
 **DB**: core_nt, Local SSD mode
-**SKU**: Axis 1 최적 SKU (예: E64s_v3) + v1 baseline (E32s_v3)
+**SKU**: Axis 1 optimal SKU (e.g., E64s_v3) + v1 baseline (E32s_v3)
 
-| Test ID    | Query         | Bases  | batches | SKU      | Nodes | 목적                    |
-| ---------- | ------------- | ------ | ------- | -------- | ----- | ----------------------- |
-| A2-10-1N   | pathogen-10   | 37 KB  | 1       | best_sku | 1     | 최소 쿼리 baseline      |
-| A2-50-1N   | pathogen-50   | 150 KB | 2       | best_sku | 1     | 소규모                  |
-| A2-100-1N  | pathogen-100  | 300 KB | 3       | best_sku | 1     | 중규모, 1N              |
-| A2-100-3N  | pathogen-100  | 300 KB | 3       | best_sku | 3     | 중규모, 3N (분산 효과?) |
-| A2-300-1N  | pathogen-300  | 900 KB | 9       | best_sku | 1     | 최대 단일요청, 1N       |
-| A2-300-3N  | pathogen-300  | 900 KB | 9       | best_sku | 3     | 최대 단일요청, 3N       |
-| A2-300-5N  | pathogen-300  | 900 KB | 9       | best_sku | 5     | 최대 단일요청, 5N       |
-| A2-1000-1N | pathogen-1000 | 3 MB   | 30      | best_sku | 1     | 멀티유저 시뮬           |
-| A2-1000-3N | pathogen-1000 | 3 MB   | 30      | best_sku | 3     | 멀티유저, 3N            |
-| A2-1000-5N | pathogen-1000 | 3 MB   | 30      | best_sku | 5     | 멀티유저, 5N            |
-| A2-3054-3N | gut-3054      | 3.1 MB | 31      | best_sku | 3     | v1 비교 (DB만 다름)     |
+| Test ID    | Query         | Bases  | batches | SKU      | Nodes | Purpose                                 |
+| ---------- | ------------- | ------ | ------- | -------- | ----- | --------------------------------------- |
+| A2-10-1N   | pathogen-10   | 37 KB  | 1       | best_sku | 1     | Min query baseline                      |
+| A2-50-1N   | pathogen-50   | 150 KB | 2       | best_sku | 1     | Small scale                             |
+| A2-100-1N  | pathogen-100  | 300 KB | 3       | best_sku | 1     | Medium scale, 1N                        |
+| A2-100-3N  | pathogen-100  | 300 KB | 3       | best_sku | 3     | Medium scale, 3N (distribution effect?) |
+| A2-300-1N  | pathogen-300  | 900 KB | 9       | best_sku | 1     | Max single request, 1N                  |
+| A2-300-3N  | pathogen-300  | 900 KB | 9       | best_sku | 3     | Max single request, 3N                  |
+| A2-300-5N  | pathogen-300  | 900 KB | 9       | best_sku | 5     | Max single request, 5N                  |
+| A2-1000-1N | pathogen-1000 | 3 MB   | 30      | best_sku | 1     | Multi-user simulation                   |
+| A2-1000-3N | pathogen-1000 | 3 MB   | 30      | best_sku | 3     | Multi-user, 3N                          |
+| A2-1000-5N | pathogen-1000 | 3 MB   | 30      | best_sku | 5     | Multi-user, 5N                          |
+| A2-3054-3N | gut-3054      | 3.1 MB | 31      | best_sku | 3     | v1 comparison (DB only)                 |
 
 **Total**: 11 tests
 
 ### 5.4 Measurement
 
-v1과 동일 + 추가:
+Same as v1 + additions:
 
-| Metric            | Method                                           |
-| ----------------- | ------------------------------------------------ |
-| batch 생성 수     | ElasticBLAST submit 로그                         |
-| pod 스케줄링 지연 | pod creationTimestamp → startTime                |
-| 유휴 노드 시간    | (batch 수 < node × pod/node) 시 일부 노드 미사용 |
+| Metric             | Method                                            |
+| ------------------ | ------------------------------------------------- |
+| Batch count        | ElasticBLAST submit log                           |
+| Pod scheduling lag | pod creationTimestamp → startTime                 |
+| Idle node time     | (batch count < node × pod/node) some nodes unused |
 
 ### 5.5 Expected Output
 
-1. **Query-Scale Heatmap**: (쿼리 수 × 노드 수) → wall-clock time
-2. **Cost-Efficiency Table**: 각 조합의 cost/run
+1. **Query-Scale Heatmap**: (query count × node count) → wall-clock time
+2. **Cost-Efficiency Table**: cost/run for each combination
 3. **Recommendation Matrix**:
 
 ```
-| 쿼리 수 | 추천 노드 | 추천 SKU | 예상 시간 | 예상 비용 |
+| Queries | Rec. Nodes | Rec. SKU | Est. Time | Est. Cost |
 |---------|----------|---------|----------|----------|
 | 1-50    | 1        | E64s    | X min    | $Y       |
 | 50-100  | 1-3      | E64s    | X min    | $Y       |
@@ -382,7 +382,7 @@ v1과 동일 + 추가:
 | 300+    | 3-5      | E64s    | X min    | $Y       |
 ```
 
-4. **`azure_optimizer.py` 코드**: `recommend_config()` 함수 구현
+4. **`azure_optimizer.py` code**: implement `recommend_config()` function
 
 ### 5.6 Cost Estimate
 
@@ -400,14 +400,14 @@ v1과 동일 + 추가:
 
 ### 6.1 Objective
 
-다수 사용자가 동시에 BLAST 요청을 보내는 **서비스 시나리오**를 검증합니다.
-핵심: `reuse = true` 상시 클러스터에서 **큐 기반 다중 요청 처리** + **오토스케일링**.
+Validate the **service scenario** where multiple users send BLAST requests concurrently.
+Key: **Queue-based multi-request processing** + **auto-scaling** on a persistent `reuse = true` cluster.
 
 ### 6.2 Dependencies
 
-- Axis 1, 2 완료 → 최적 SKU와 노드 설정 확정
-- `reuse = true` 기능 검증
-- 큐 연동 Worker 구현 (신규 개발)
+- Axis 1, 2 complete → optimal SKU and node config finalized
+- `reuse = true` functionality verified
+- Queue-integrated Worker implementation (new development)
 
 ### 6.3 Architecture
 
@@ -430,19 +430,19 @@ v1과 동일 + 추가:
 
 ### 6.4 Implementation Steps
 
-#### Step 1: `reuse = true` 검증 (기존 기능)
+#### Step 1: `reuse = true` validation (existing feature)
 
 ```bash
-# 첫 번째 submit — 클러스터 생성 (5-15 min)
+# First submit — cluster creation (5-15 min)
 elastic-blast submit --cfg bench-v2-reuse.ini
 
-# 두 번째 submit — 클러스터 재사용 (즉시 시작)
+# Second submit — cluster reuse (starts immediately)
 elastic-blast submit --cfg bench-v2-reuse-2nd.ini
 
-# 측정: 첫 submit E2E vs 두 번째 submit E2E
+# Measure: first submit E2E vs second submit E2E
 ```
 
-#### Step 2: 순차 다중 요청 스크립트
+#### Step 2: Sequential multi-request script
 
 ```bash
 # benchmark/run_sequential_requests.sh
@@ -455,7 +455,7 @@ for i in $(seq 1 $NUM_REQUESTS); do
 done
 ```
 
-#### Step 3: 동시 다중 요청 (병렬 submit)
+#### Step 3: Concurrent multi-request (parallel submit)
 
 ```bash
 # benchmark/run_concurrent_requests.sh
@@ -469,27 +469,27 @@ done
 wait
 ```
 
-> **Known limitation**: 현재 ElasticBLAST는 동일 클러스터에서 동시 submit을 지원하지 않을 수 있음.
-> 이 경우 Job namespace 분리 또는 큐 기반 순차 처리가 필요.
+> **Known limitation**: ElasticBLAST may not support concurrent submit on the same cluster.
+> In that case, Job namespace isolation or queue-based sequential processing is required.
 
-#### Step 4: Queue Worker (신규 개발 — 필요 시)
+#### Step 4: Queue Worker (new development — if needed)
 
 ```python
-# src/elastic_blast/queue_worker.py (향후 구현)
-# Azure Queue Storage에서 메시지를 polling하여
-# elastic-blast submit을 순차 실행하는 Worker
+# src/elastic_blast/queue_worker.py (future implementation)
+# Polls messages from Azure Queue Storage and
+# sequentially executes elastic-blast submit
 ```
 
 ### 6.5 Test Matrix
 
-| Test ID     | Scenario         | Requests | Queries/req | 동시성 | 클러스터        | 측정               |
-| ----------- | ---------------- | -------- | ----------- | ------ | --------------- | ------------------ |
-| A3-reuse    | reuse 검증       | 2 순차   | 10          | 1      | 신규→재사용     | 재사용 시 E2E 지연 |
-| A3-seq5     | 순차 5 요청      | 5 순차   | 10          | 1      | 상시            | 평균 E2E           |
-| A3-seq5-300 | 순차 5 × 300쿼리 | 5 순차   | 300         | 1      | 상시            | throughput         |
-| A3-con3     | 동시 3 요청      | 3 동시   | 100         | 3      | 상시, 3N        | 간섭 효과          |
-| A3-con10    | 동시 10 요청     | 10 동시  | 100         | 10     | 상시, 5N        | 최대 부하          |
-| A3-burst    | Burst 부하       | 20/min   | 10          | burst  | 상시, autoscale | 스케일링 반응      |
+| Test ID     | Scenario         | Requests | Queries/req | Concurrency | Cluster               | Measurement       |
+| ----------- | ---------------- | -------- | ----------- | ----------- | --------------------- | ----------------- |
+| A3-reuse    | reuse validation | 2 seq    | 10          | 1           | new→reuse             | Reuse E2E latency |
+| A3-seq5     | seq 5 requests   | 5 seq    | 10          | 1           | persistent            | Avg E2E           |
+| A3-seq5-300 | seq 5 × 300q     | 5 seq    | 300         | 1           | persistent            | throughput        |
+| A3-con3     | concurrent 3 req | 3 conc   | 100         | 3           | persistent, 3N        | Interference      |
+| A3-con10    | concurrent 10    | 10 conc  | 100         | 10          | persistent, 5N        | Max load          |
+| A3-burst    | Burst load       | 20/min   | 10          | burst       | persistent, autoscale | Scale response    |
 
 **Total**: 6 tests
 
@@ -544,7 +544,7 @@ wait
 | 1.5 | Data collection + cleanup    | Export JSON, delete clusters | 30 min                    |
 | 1.6 | Preliminary analysis         | Charts, SKU ranking          | 1 hr                      |
 
-**Gate**: Axis 1 결과로 최적 SKU 2-3종 선정 → Axis 2 진행 결정
+**Gate**: Select 2-3 optimal SKUs from Axis 1 results → proceed to Axis 2
 
 ### Day 2: Axis 2 — Query-Based Tuning (4-6 hours)
 
@@ -555,13 +555,13 @@ wait
 | 2.3 | v1 comparison (core_nt)   | A2-3054-3N                         | 30 min    |
 | 2.4 | Data analysis             | Heatmap, recommendation table      | 1 hr      |
 
-**Gate**: Recommendation matrix 완성 → Axis 3 진행
+**Gate**: Recommendation matrix complete → proceed to Axis 3
 
 ### Day 3-4: Axis 3 — Multi-Request Service (6-10 hours)
 
 | #   | Task                     | Tests                      | Est. Time |
 | --- | ------------------------ | -------------------------- | --------- |
-| 3.1 | `reuse=true` 검증        | A3-reuse                   | 30 min    |
+| 3.1 | `reuse=true` validation  | A3-reuse                   | 30 min    |
 | 3.2 | Sequential multi-request | A3-seq5, A3-seq5-300       | 3 hr      |
 | 3.3 | Concurrent multi-request | A3-con3, A3-con10          | 2 hr      |
 | 3.4 | Burst/autoscale test     | A3-burst                   | 1.5 hr    |
@@ -569,12 +569,12 @@ wait
 
 ### Day 5: Report (3-4 hours)
 
-| #   | Task                                           | Est. Time |
-| --- | ---------------------------------------------- | --------- |
-| 5.1 | v2 report draft                                | 2 hr      |
-| 5.2 | Charts generation (`create_charts_v2.py` 확장) | 1 hr      |
-| 5.3 | Customer-facing summary (1-pager)              | 30 min    |
-| 5.4 | `azure_optimizer.py` 코드 업데이트             | 30 min    |
+| #   | Task                                                | Est. Time |
+| --- | --------------------------------------------------- | --------- |
+| 5.1 | v2 report draft                                     | 2 hr      |
+| 5.2 | Charts generation (`create_charts_v2.py` extension) | 1 hr      |
+| 5.3 | Customer-facing summary (1-pager)                   | 30 min    |
+| 5.4 | `azure_optimizer.py` code update                    | 30 min    |
 
 ---
 

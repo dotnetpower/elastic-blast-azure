@@ -431,13 +431,13 @@ The highest-value next steps are ordered by impact on unresolved claims.
 
 ### 10.1 Priority 1 — Unblock Axis 3 (production-mode validation)
 
-| #   | Task                                       | Depends on | Est. Cost | Blocks                              |
-| --- | ------------------------------------------ | ---------- | --------- | ----------------------------------- |
-| P1  | **Fix reuse `submit-jobs` hang** (Bug #2)  | —          | $0        | All Axis 3; TL;DR warm-cluster row  |
-| P2  | **A3-reuse**: cold+warm E2E 측정 (10q)     | P1         | ~$4       | $1.34/run claim, Section 7 estimate |
-| P3  | **A3-seq5**: 5 sequential warm requests    | P1         | ~$6       | Service throughput number           |
-| P4  | **A3-con3**: concurrent submit feasibility | P1         | ~$3       | Axis 3 assumption unknown           |
-| P5  | **A3-burst**: KEDA/HPA autoscale 3→5→10    | P1, P4     | ~$15      | Service-level scalability           |
+| #   | Task                                          | Depends on | Est. Cost | Blocks                              |
+| --- | --------------------------------------------- | ---------- | --------- | ----------------------------------- |
+| P1  | **Fix reuse `submit-jobs` hang** (Bug #2)     | —          | $0        | All Axis 3; TL;DR warm-cluster row  |
+| P2  | **A3-reuse**: cold+warm E2E measurement (10q) | P1         | ~$4       | $1.34/run claim, Section 7 estimate |
+| P3  | **A3-seq5**: 5 sequential warm requests       | P1         | ~$6       | Service throughput number           |
+| P4  | **A3-con3**: concurrent submit feasibility    | P1         | ~$3       | Axis 3 assumption unknown           |
+| P5  | **A3-burst**: KEDA/HPA autoscale 3→5→10       | P1, P4     | ~$15      | Service-level scalability           |
 
 ### 10.2 Priority 2 — Complete Axis 1 SKU Comparison
 

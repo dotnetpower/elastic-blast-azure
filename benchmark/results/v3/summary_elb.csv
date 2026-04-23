@@ -1,0 +1,5 @@
+test_id,status,elapsed_seconds,blast_seconds,notes
+B1-S10-elb,SUCCESS,2780,45,10xE16s_v3 10-shard core_nt 269GB max-shard-blast (fixed script)
+B2-pathogen-E16-1N,SUCCESS,2100,516,E16s_v3 1N pathogen subset 64GB
+B2-pathogen-E64-1N,SUCCESS,1158,231,E64s_v3 1N pathogen subset 64GB
+B2-virus-E64-1N,SUCCESS,934,231,E64s_v3 1N virus subset 60GB

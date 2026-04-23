@@ -470,7 +470,12 @@ class ElasticBlastAzure(ElasticBlast):
     # -- Partitioned search -------------------------------------------------
 
     def _submit_partitioned(self, query_batches: List[str], query_length) -> None:
-        """Submit jobs for DB-partitioned mode: P partitions x N queries."""
+        """Submit jobs for DB-partitioned mode: P partitions x N queries.
+        
+        In local-SSD mode: each node downloads one shard, BLAST jobs are pinned
+        to nodes via nodeSelector. Each shard × batch combination = one job.
+        In PV mode: all partitions are downloaded to a shared PVC.
+        """
         cfg = self.cfg
         num_partitions = cfg.blast.db_partitions
 
@@ -483,12 +488,104 @@ class ElasticBlastAzure(ElasticBlast):
                         f'Partitioned search would create {total} jobs '
                         f'({num_partitions} x {len(query_batches)}), exceeding limit {limit}.')
             self.query_files = []
-            self._initialize_cluster_partitioned(query_batches)
+            if cfg.cluster.use_local_ssd:
+                self._initialize_cluster_sharded(query_batches)
+            else:
+                self._initialize_cluster_partitioned(query_batches)
             self.cluster_initialized = True
 
-        self._generate_partitioned_jobs(query_batches)
+        if cfg.cluster.use_local_ssd:
+            self._generate_sharded_jobs(query_batches)
+        else:
+            self._generate_partitioned_jobs(query_batches)
+
+        # Deploy finalizer
+        if self.auto_shutdown:
+            self._submit_finalizer_job()
+
         self.cleanup_stack.clear()
         self.cleanup_stack.append(lambda: self._safe_collect_logs())
+
+    def _initialize_cluster_sharded(self, queries: Optional[List[str]]) -> None:
+        """Initialize cluster for local-SSD shard mode (one shard per node)."""
+        cfg = self.cfg
+
+        if not cfg.cluster.reuse:
+            self.cleanup_stack.append(lambda: delete_cluster_with_cleanup(cfg, allow_missing=True))
+        self.cleanup_stack.append(lambda: self._safe_collect_logs())
+
+        aks_status = check_cluster(cfg)
+        poller = None
+        if not cfg.cluster.reuse or not aks_status:
+            poller = start_cluster_async(cfg)
+
+        # Upload job template while cluster is creating
+        if self.cloud_job_submission:
+            self._upload_job_template(queries)
+
+        if poller:
+            wait_for_cluster(cfg, poller)
+
+        self._get_k8s_ctx()
+        self._label_nodes()
+
+        if not cfg.cluster.reuse or not aks_status:
+            set_role_assignment(cfg)
+
+        if self.cloud_job_submission or self.auto_shutdown:
+            kubernetes.enable_service_account(cfg)
+
+        kubernetes.create_scripts_configmap(cfg.appstate.k8s_ctx, cfg.cluster.dry_run)
+
+        # Initialize sharded storage: each node downloads its own shard
+        # Always WAIT — BLAST jobs need init to complete before they can run
+        kubernetes.initialize_local_ssd_sharded(cfg, self.query_files, ElbExecutionMode.WAIT)
+
+    def _generate_sharded_jobs(self, query_batches: List[str]) -> None:
+        """Generate BLAST jobs for local-SSD shard mode.
+        
+        Creates N_shards × N_batches jobs. Each job is pinned to the node
+        that has its shard via nodeSelector ordinal.
+        """
+        cfg = self.cfg
+        prefix = cfg.blast.db_partition_prefix
+        base = self._results_path()
+        num_shards = cfg.blast.db_partitions
+
+        # Read shard-specific BLAST job template
+        from importlib.resources import files as pkg_files
+        ref = pkg_files('elastic_blast').joinpath('templates/blast-batch-job-shard-ssd-aks.yaml.template')
+        template = ref.read_text()
+
+        all_files = []
+        with TemporaryDirectory() as job_path:
+            for shard_idx in range(num_shards):
+                shard_name = os.path.basename(f'{prefix}{shard_idx:02d}')
+                shard_label = f's{shard_idx:02d}'
+
+                subs = self._build_substitutions(
+                    query_batches,
+                    db=shard_name,
+                    db_label=shard_label,
+                    results_path=os.path.join(base, f'shard_{shard_idx:02d}'),
+                )
+                subs['ELB_SHARD_IDX'] = str(shard_idx)
+                subs['ELB_RESULTS_BASE'] = base
+
+                files_written = write_job_files(
+                    job_path, f'{shard_label}_batch_',
+                    template, query_batches, **subs)
+                all_files.extend(files_written)
+
+            total = len(all_files)
+            logging.info(f'Submitting {total} sharded jobs ({num_shards} shards x {len(query_batches)} batches)')
+            assert cfg.appstate.k8s_ctx
+            start = timer()
+            kubernetes.submit_jobs(cfg.appstate.k8s_ctx, Path(job_path), dry_run=self.dry_run)
+            logging.debug(f'RUNTIME submit-sharded-jobs {timer() - start:.1f}s')
+
+        with open_for_write_immediate(self._metadata_path(ELB_NUM_JOBS_SUBMITTED)) as f:
+            f.write(str(total))
 
     def _generate_partitioned_jobs(self, query_batches: List[str]) -> None:
         """Generate and submit BLAST jobs for each DB partition."""

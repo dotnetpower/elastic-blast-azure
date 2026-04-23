@@ -166,9 +166,7 @@ def start_cluster(resource_group: str, cluster_name: str, *,
         "vm_size": machine_type,
         "os_disk_type": "Managed",
         "mode": "System",
-        "enable_auto_scaling": True,
-        "min_count": 1,             # System pool requires min 1
-        "max_count": max(num_nodes * 3, 3),
+        "enable_auto_scaling": False,
         "type": "VirtualMachineScaleSets",
     }
 

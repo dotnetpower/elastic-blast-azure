@@ -539,8 +539,6 @@ class BlastConfig(ConfigParserToDataclassMapper):
             '-gilist',
             '-negative_gilist',
             '-filtering_db',
-            '-use_index',
-            '-index_name',
             '-in_pssm',
             '-entrez_query',
             '-in_msa'
@@ -1160,6 +1158,9 @@ class ElasticBlastConfig:
 
                 if self.blast.db_metadata:
                     bytes_to_cache_gb = round(self.blast.db_metadata.bytes_to_cache / (1024 ** 3), 1)
+                    # In shard mode, each node only holds 1/N of the DB
+                    if self.blast.db_partitions > 0:
+                        bytes_to_cache_gb = round(bytes_to_cache_gb / self.blast.db_partitions, 1)
                     if instance_props.memory - SYSTEM_MEMORY_RESERVE < bytes_to_cache_gb:
                         errors.append(f'BLAST database {self.blast.db} memory requirements exceed memory available on selected machine type "{self.cluster.machine_type}". Please select machine type with at least {bytes_to_cache_gb + SYSTEM_MEMORY_RESERVE}GB available memory.')
 

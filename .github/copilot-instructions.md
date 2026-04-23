@@ -362,12 +362,38 @@ pytest tests/azure_traits/ -v
 
 ### AKS Cluster
 
-| Issue                                                             | Fix                                                              |
-| ----------------------------------------------------------------- | ---------------------------------------------------------------- |
-| Cluster provisioning takes 5-15 minutes                           | Wait for AKS provisioning to complete before proceeding          |
-| kubectl context error                                             | Re-run `az aks get-credentials`                                  |
-| Stale jobs cause immutable field errors                           | `kubectl delete jobs --all` before resubmitting                  |
-| Kubernetes 1.31+ returns `SuccessCriteriaMet Complete` conditions | Use jsonpath-based job failure check instead of pattern matching |
+| Issue                                                             | Fix                                                                                                                                                                    |
+| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cluster provisioning takes 5-15 minutes                           | Wait for AKS provisioning to complete before proceeding                                                                                                                |
+| kubectl context error                                             | Re-run `az aks get-credentials`                                                                                                                                        |
+| Stale jobs cause immutable field errors                           | `kubectl delete jobs --all` before resubmitting                                                                                                                        |
+| Kubernetes 1.31+ returns `SuccessCriteriaMet Complete` conditions | Use jsonpath-based job failure check instead of pattern matching                                                                                                       |
+| AKS autoscaler scales down idle nodes during benchmark            | Set `enable_auto_scaling: False` in `azure_sdk.py` agent pool profile. Autoscaler sees init-ssd pods complete quickly and removes "idle" nodes before BLAST jobs start |
+| `elb-finalizer` deletes cluster before BLAST completes            | Set `ELB_DISABLE_AUTO_SHUTDOWN=1` env var. The finalizer sees 0 submitted jobs and writes `SUCCESS.txt` prematurely when using `cloud_job_submission` mode             |
+| Each test must use a unique cluster name                          | Use different `[cluster] name` per INI config. Shared cluster names cause interference when finalizer writes `SUCCESS.txt`                                             |
+
+### DB Sharding (Local-SSD Mode)
+
+| Issue                                                          | Fix                                                                                                                                                               |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `azcopy cp` with `*.` wildcard in URL path fails               | Use `--include-pattern "vol.*"` with trailing `/*` on source URL instead of `url/vol.*`. azcopy only allows wildcards in trailing `/*` position                   |
+| `azcopy cp` with `--include-pattern` creates subdirectory      | Use source URL ending with `/*` (not `/` alone). `--recursive` without `/*` preserves blob directory structure                                                    |
+| `ELB_DB` in init-ssd set to full DB name instead of shard name | Derive shard name from `db_partition_prefix` in `initialize_local_ssd_sharded()`: `os.path.basename(f'{prefix}{n:02d}')`                                          |
+| Query download initContainer uses shard-specific `ELB_RESULTS` | Add `ELB_RESULTS_BASE` variable pointing to base results path (without `shard_NN/` suffix) for query download. Queries are stored at the base path, not per-shard |
+| Init-ssd completes but BLAST jobs fail with "DB not found"     | Ensure `ElbExecutionMode.WAIT` in `_initialize_cluster_sharded()`. `NOWAIT` mode (used with `cloud_job_submission`) submits BLAST jobs before init completes      |
+| Shard `.nal` alias file missing after init                     | Download `.nal` file explicitly in `init-db-shard-aks.sh` alongside the manifest and volume files                                                                 |
+| `BLASTDB` env var not set causes taxonomy lookup failure       | Set `export BLASTDB=/blast/blastdb` in VM run-command scripts. `blastdbcmd -taxidlist` requires taxdb in BLASTDB search path                                      |
+| DB memory check rejects sharded config (full DB > node RAM)    | Divide `bytes_to_cache_gb` by `db_partitions` in `elb_config.py` validation. Each node holds only 1/N of the DB                                                   |
+
+### ElasticBLAST Benchmark Execution
+
+| Issue                                                          | Fix                                                                                                                                      |
+| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `elastic-blast status` shows `Pending 1` even after completion | Don't rely on `elastic-blast status` for completion detection. Check `SUCCESS.txt` blob or use `kubectl get jobs` directly               |
+| `AZCOPY_AUTO_LOGIN_TYPE` not set causes auth failures locally  | Always `export AZCOPY_AUTO_LOGIN_TYPE=AZCLI` before running `elastic-blast submit/status/delete` locally                                 |
+| `blast-run-aks.sh` ran BLAST twice (duplicate code bug)        | **Fixed**: Removed duplicated BLAST execution block (was copy-paste error, not retry logic). Now runs once                               |
+| VM `az vm run-command invoke` timeout (90 min default)         | Use `az vm run-command create --timeout-in-seconds 7200` for long operations (DB extract, makeblastdb). Or split into smaller operations |
+| `makembindex` produces empty `.idx` files on subset DBs        | MegaBLAST indexing may not be effective for all DB types. Check `.idx` file sizes before assuming index is usable                        |
 
 ### Code Fixes Applied
 
@@ -468,6 +494,7 @@ Always cite:
 - [NCBI ElasticBLAST Official Docs](https://blast.ncbi.nlm.nih.gov/doc/elastic-blast/)
 - [ElasticBLAST Paper (BMC Bioinformatics 2023)](https://doi.org/10.1186/s12859-023-05245-9)
 - [Azure HPC BLAST Benchmark (Tsai 2021)](https://techcommunity.microsoft.com/blog/azurehighperformancecomputingblog/running-ncbi-blast-on-azure-%E2%80%93-performance-scalability-and-best-practice/2410483)
+- [Azure Pipeline Reference](docs/azure-pipeline-reference.md)
 - [Azure Prerequisites](docs/azure-prereq.md)
 - [Environment Setup Guide](docs/environment.md)
 - [Improvement Plan](docs/improvement-plan.md)
