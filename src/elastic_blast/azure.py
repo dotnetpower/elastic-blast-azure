@@ -180,15 +180,20 @@ class ElasticBlastAzure(ElasticBlast):
         return 1e9, 0.0
 
     def merge_partitioned_results(self) -> List[str]:
-        """Merge results from DB-partitioned search into main results directory."""
+        """Merge results from DB-partitioned search into main results directory.
+        
+        Handles both PV mode (part_XX/) and local-SSD shard mode (shard_XX/).
+        """
         num_partitions = self.cfg.blast.db_partitions
         if num_partitions <= 0:
             return []
 
         base = os.path.join(self.cfg.cluster.results, self.cfg.azure.elb_job_id)
+        # Detect directory pattern: shard_XX for local-SSD, part_XX for PV
+        prefix = 'shard_' if self.cfg.cluster.use_local_ssd else 'part_'
         merged: List[str] = []
         for i in range(num_partitions):
-            src = os.path.join(base, f'part_{i:02d}', '*.out.gz')
+            src = os.path.join(base, f'{prefix}{i:02d}', '*.out.gz')
             cmd = ['azcopy', 'cp', src, f'{base}/', '--recursive']
             if self.cfg.cluster.dry_run:
                 logging.info(f'dry-run: {" ".join(cmd)}')
@@ -317,6 +322,8 @@ class ElasticBlastAzure(ElasticBlast):
             'ELB_REUSE_CLUSTER': 'true' if cfg.cluster.reuse else 'false',
             'ELB_METADATA_DIR': ELB_METADATA_DIR,
             'ELB_SERVICE_ACCOUNT': 'default',
+            'ELB_DB_PARTITIONS': str(cfg.blast.db_partitions) if cfg.blast.db_partitions > 0 else '0',
+            'ELB_BLAST_PROGRAM': cfg.blast.program,
         }
 
         from importlib.resources import files as pkg_files
