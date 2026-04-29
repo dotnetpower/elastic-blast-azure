@@ -143,6 +143,27 @@ class ElasticBlastAzure(ElasticBlast):
         self.cleanup_stack.clear()
         self.cleanup_stack.append(lambda: self._safe_collect_logs())
 
+    def prepare(self) -> None:
+        """Prepare cluster: create AKS, download DB shards, warm cache.
+        Does NOT submit BLAST jobs or finalizer."""
+        cfg = self.cfg
+
+        # Register cleanup in case prepare fails mid-way
+        if not cfg.cluster.reuse:
+            self.cleanup_stack.append(lambda: delete_cluster_with_cleanup(cfg, allow_missing=True))
+
+        if cfg.blast.db_partitions > 0 and cfg.cluster.use_local_ssd:
+            self._initialize_cluster_sharded(None)
+        elif cfg.blast.db_partitions > 0:
+            self._initialize_cluster_partitioned(None)
+        else:
+            self._initialize_cluster(None)
+        self.cluster_initialized = True
+
+        # Clear cleanup stack on success — cluster should persist for later submit
+        self.cleanup_stack.clear()
+        logging.info('Cluster prepared and DB loaded. Ready for BLAST job submission.')
+
     # -- Status & lifecycle -------------------------------------------------
 
     def check_status(self, extended=False) -> Tuple[ElbStatus, Dict[str, int], Dict[str, str]]:
@@ -219,7 +240,11 @@ class ElasticBlastAzure(ElasticBlast):
     def _get_k8s_ctx(self) -> str:
         """Get or cache kubectl context."""
         if not self.cfg.appstate.k8s_ctx:
-            self.cfg.appstate.k8s_ctx = get_aks_credentials(self.cfg)
+            ctx = get_aks_credentials(self.cfg)
+            if not ctx:
+                raise UserReportError(returncode=CLUSTER_ERROR,
+                                      message='Failed to get AKS kubectl context')
+            self.cfg.appstate.k8s_ctx = ctx
         return self.cfg.appstate.k8s_ctx
 
     def _kubectl(self) -> str:
@@ -268,7 +293,7 @@ class ElasticBlastAzure(ElasticBlast):
         else:
             cpu_req = ((cfg.cluster.num_nodes * cfg.cluster.num_cpus) // 4) - 2
         cpu_req = min(cpu_req, cfg.cluster.num_cpus - 2)
-        cpu_req = max(0, cpu_req)
+        cpu_req = max(1, cpu_req)
 
         return {
             'ELB_BLAST_PROGRAM': program,

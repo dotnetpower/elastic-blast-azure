@@ -43,6 +43,7 @@ class ElbCommand(Enum):
     STATUS = 'status'
     DELETE = 'delete'
     RUN_SUMMARY = 'run-summary'
+    PREPARE = 'prepare'
 
 
 class ElbStatus(Enum):

@@ -295,11 +295,12 @@ def get_aks_credentials(resource_group: str, cluster_name: str, dry_run: bool = 
         existing = env.get('KUBECONFIG', kube_config_path)
         env['KUBECONFIG'] = f'{existing}:{tmp_path}'
         import subprocess
-        subprocess.run(
-            ['kubectl', 'config', 'view', '--flatten'],
-            stdout=open(kube_config_path, 'w'),
-            env=env, check=True
-        )
+        with open(kube_config_path, 'w') as kube_out:
+            subprocess.run(
+                ['kubectl', 'config', 'view', '--flatten'],
+                stdout=kube_out,
+                env=env, check=True
+            )
     finally:
         os.unlink(tmp_path)
 

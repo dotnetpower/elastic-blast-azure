@@ -33,6 +33,7 @@ from pprint import pformat
 from typing import List
 from elastic_blast import VERSION
 from elastic_blast.commands.submit import submit as elb_submit
+from elastic_blast.commands.prepare import prepare as elb_prepare
 from elastic_blast.commands.status import create_arg_parser as create_status_arg_parser
 from elastic_blast.commands.delete import delete as elb_delete
 from elastic_blast.commands.run_summary import create_arg_parser as create_run_summary_arg_parser
@@ -52,8 +53,8 @@ on the cloud"""
 
 # error message for missing Elastic-BLAST task on the command line
 NO_TASK_MSG =\
-"""Elastic-BLAST task was not specified. Please, use submit, status, delete, or run-summary.
-usage: elastic-blast [-h] [--version] {submit,status,delete,run-summary} --cfg <config file> [options]"""
+"""Elastic-BLAST task was not specified. Please, use submit, status, delete, run-summary, or prepare.
+usage: elastic-blast [-h] [--version] {submit,status,delete,run-summary,prepare} --cfg <config file> [options]"""
 
 def main():
     """Local main entry point which sets up arguments, undo stack,
@@ -176,6 +177,7 @@ def create_arg_parser():
     create_status_arg_parser(sp, common_opts_parser)
     create_delete_arg_parser(sp, common_opts_parser)
     create_run_summary_arg_parser(sp, common_opts_parser)
+    create_prepare_arg_parser(sp, common_opts_parser)
     return parser
 
 
@@ -211,6 +213,15 @@ def create_submit_arg_parser(subparser, common_opts_parser):
     #parser.add_argument("--sync", action='store_true', 
     #                    help="Run in synchronous mode")
     parser.set_defaults(func=elb_submit)
+    return parser
+
+
+def create_prepare_arg_parser(subparser, common_opts_parser):
+    """ Create the command line options subparser for the prepare command. """
+    parser = subparser.add_parser('prepare',
+                                  help='Create AKS cluster, download DB shards, and warm up cache (no BLAST execution)',
+                                  parents=[common_opts_parser])
+    parser.set_defaults(func=elb_prepare)
     return parser
 
 

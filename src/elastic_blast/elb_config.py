@@ -1021,7 +1021,7 @@ class ElasticBlastConfig:
             self.cloud_provider = AZUREConfig.create_from_cfg(cfg)
             self.azure = cast(AZUREConfig, self.cloud_provider)
 
-        if task == ElbCommand.SUBMIT:
+        if task == ElbCommand.SUBMIT or task == ElbCommand.PREPARE:
             self.blast = BlastConfig.create_from_cfg(cfg)
 
         self.timeouts = TimeoutsConfig.create_from_cfg(cfg)

@@ -32,10 +32,11 @@ def safe_exec(cmd: Union[List[str], str], env: Optional[Dict[str, str]] = None, 
     except subprocess.CalledProcessError as e:
         msg = f'The command "{" ".join(e.cmd)}" returned with exit code {e.returncode}\n{handle_error(e.stderr)}\n{handle_error(e.stdout)}'
         if e.output is not None:
-            '\n'.join([msg, f'{handle_error(e.output)}'])
-            raise Exception(e.returncode, msg)
-    except Exception as e:
-        raise Exception(e.errno, str(e))
+            msg = '\n'.join([msg, f'{handle_error(e.output)}'])
+        raise Exception(msg)
+    except subprocess.TimeoutExpired as e:
+        cmd_str = " ".join(e.cmd) if isinstance(e.cmd, list) else str(e.cmd)
+        raise Exception(f'Command timed out after {e.timeout}s: {cmd_str}')
    
     return p
 

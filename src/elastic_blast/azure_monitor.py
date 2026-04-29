@@ -15,11 +15,13 @@ Authors: Moon Hyuk Choi moonchoi@microsoft.com
 
 import os
 import logging
+import threading
 import time
 from typing import Dict, Optional
 
 _CONN_STR = os.environ.get('APPLICATIONINSIGHTS_CONNECTION_STRING', '')
 _initialized = False
+_init_lock = threading.Lock()
 _tracer = None
 _meter = None
 
@@ -39,7 +41,10 @@ def _ensure_initialized():
 
     if _initialized:
         return
-    _initialized = True
+    with _init_lock:
+        if _initialized:
+            return
+        _initialized = True
 
     if not _CONN_STR:
         logging.debug('Azure Monitor: disabled (no APPLICATIONINSIGHTS_CONNECTION_STRING)')

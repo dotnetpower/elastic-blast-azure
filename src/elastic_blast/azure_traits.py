@@ -115,9 +115,12 @@ def get_machine_properties(machineType: str) -> InstanceProperties:
 def get_instance_type_offerings(region: str) -> List[Dict[str, Any]]:
     """Get a list of instance types offered in an Azure region"""
     try:
-        jmespath_query = f'"[?numberOfCores >= `{MIN_PROCESSORS}` && memoryInMB >= `{MIN_MEMORY*1024}`]"'
-        cmd = f'az vm list-sizes --location {region} --query {jmespath_query} -o json'
-        result = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        jmespath_query = f'[?numberOfCores >= `{MIN_PROCESSORS}` && memoryInMB >= `{MIN_MEMORY*1024}`]'
+        result = subprocess.run(
+            ['az', 'vm', 'list-sizes', '--location', region,
+             '--query', jmespath_query, '-o', 'json'],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
         
         vm_list = json.loads(result.stdout)
         
