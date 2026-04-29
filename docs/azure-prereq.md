@@ -6,6 +6,8 @@
 > For performance evaluation results, see the [Benchmark Report](../benchmark/results/report-final.md).
 >
 > **Validated Versions**: Azure CLI 2.81.0 · kubectl v1.34.5 · azcopy v10.28.0 · BLAST+ 2.17.0 · AKS K8s v1.33
+>
+> **End-to-end validated**: 2026-04-29 on a fresh subscription in `koreacentral`. All commands in this guide have been re-tested by deploying RG/ACR/Storage/AKS from scratch and running an `elastic-blast submit` for `pdbnt` against `Standard_E16s_v3`. Issues uncovered during validation are documented inline.
 
 ---
 
@@ -42,6 +44,30 @@ Before you begin, make sure you have:
 > ```bash
 > az vm list-usage -l <your-region> --query "[?name.value=='cores'].{used:currentValue,limit:limit}" -o table
 > ```
+
+### Subscription preflight (run once per subscription)
+
+Before starting, register the resource providers ElasticBLAST needs and confirm your ESv3 quota for AKS nodes:
+
+```bash
+# 1) Register required resource providers (one-time per subscription, takes 1-2 min)
+for p in Microsoft.ContainerRegistry Microsoft.ContainerService Microsoft.Storage Microsoft.Compute Microsoft.Network; do
+    az provider register -n "$p" --wait
+done
+
+# 2) Verify all are Registered
+for p in Microsoft.ContainerRegistry Microsoft.ContainerService Microsoft.Storage Microsoft.Compute Microsoft.Network; do
+    printf '%-32s %s\n' "$p" "$(az provider show -n $p --query registrationState -o tsv)"
+done
+
+# 3) Confirm ESv3 quota for AKS node pool (need >= 16 vCPU for E16s_v3, 32 for E32s_v3)
+REGION=koreacentral
+az vm list-usage -l "$REGION" \
+  --query "[?contains(name.value,'standardESv3') || name.value=='cores'].{quota:name.localizedValue, used:currentValue, limit:limit}" \
+  -o table
+```
+
+If any provider is `NotRegistered`, the corresponding `az ... create` calls will fail with `MissingSubscriptionRegistration`. If ESv3 quota is insufficient, request a quota increase from the Azure portal before continuing.
 
 ---
 
@@ -187,30 +213,41 @@ pip install -r requirements/test.txt
 
 ## Step 6: Build and Push Docker Images
 
-Each Docker image needs to be built and pushed to your ACR.
+Each Docker image needs to be built and pushed to your ACR. We use **`az acr build`** (ACR Tasks remote build) so you do not need a local Docker daemon — the build runs inside Azure.
 
-### 6.1 Update the ACR Registry Name
+### 6.1 Set the ACR Registry as an Environment Variable
 
-In each Docker folder's `Makefile`, update the registry URL:
-
-```makefile
-# Change this line in each Makefile:
-AZURE_REGISTRY?=elbacr.azurecr.io
-# To your ACR:
-AZURE_REGISTRY?=youracr.azurecr.io
-```
-
-### 6.2 Build and Push
+The `Makefile`s use `AZURE_REGISTRY?=elbacr.azurecr.io` (note the `?=`), so you can override it via environment variable without editing files:
 
 ```bash
-# Log in to your ACR
+# Set once for the shell session
+export ACR_NAME=youracr               # the name you used in Step 4
+export AZURE_REGISTRY=$ACR_NAME.azurecr.io
+```
+
+### 6.2 Log In to ACR and Build All Images
+
+```bash
+# Log in to your ACR (uses your AAD token, no password)
 az acr login --name $ACR_NAME
 
-# Build and push each image
-cd docker-blast && make azure-build && cd ..
-cd docker-job-submit && make azure-build && cd ..
-cd docker-qs && make azure-build && cd ..
+# Build and push each image (each takes 1-3 min via ACR Tasks)
+cd docker-blast      && make azure-build AZURE_REGISTRY=$AZURE_REGISTRY && cd ..
+cd docker-job-submit && make azure-build AZURE_REGISTRY=$AZURE_REGISTRY && cd ..
+cd docker-qs         && make azure-build AZURE_REGISTRY=$AZURE_REGISTRY && cd ..
 ```
+
+> **Important — image tag must match the version pinned in `src/elastic_blast/constants.py`.**
+>
+> The runtime expects these exact tags:
+>
+> | Image                           | Required tag | `Makefile` `VERSION`               |
+> | ------------------------------- | ------------ | ---------------------------------- |
+> | `ncbi/elb`                      | `1.4.0`      | `1.4.0` (matches)                  |
+> | `ncbi/elasticblast-job-submit`  | `4.1.0`      | `4.1.0` (matches)                  |
+> | `ncbi/elasticblast-query-split` | `0.1.4`      | `0.1.4` (matches as of 2026-04-29) |
+>
+> If you change `constants.py`, also update the matching `Makefile` `VERSION?=` line, or the AKS pods will fail with `ErrImagePull: ... not found`.
 
 ### 6.3 Verify
 
@@ -223,11 +260,29 @@ You should see:
 ```
 Result
 ----------------------------------
-elb-openapi
 ncbi/elasticblast-job-submit
 ncbi/elasticblast-query-split
 ncbi/elb
 ```
+
+To confirm the tags pushed:
+
+```bash
+for repo in ncbi/elb ncbi/elasticblast-job-submit ncbi/elasticblast-query-split; do
+    echo "=== $repo ==="
+    az acr repository show-tags --name $ACR_NAME --repository "$repo" -o tsv
+done
+```
+
+### 6.4 Known Build Issues
+
+These were uncovered during the 2026-04-29 fresh-subscription validation and **are already fixed** in the repository's `Dockerfile`s, but if you encounter them after rebasing, here are the symptoms and fixes:
+
+| Image               | Symptom                                                                                             | Fix in Dockerfile                                                                                               |
+| ------------------- | --------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `docker-qs`         | `ModuleNotFoundError: No module named 'pkg_resources'` during `pip install -r requirements.txt`     | Use `pip3 install --no-build-isolation -r requirements.txt --break-system-packages` and pre-pin `setuptools<70` |
+| `docker-job-submit` | Pod logs: `/usr/bin/azcopy: cannot execute: required file not found` (`submit-jobs` job in `Error`) | `azcopy` is a glibc binary; on `alpine` install `gcompat libstdc++` alongside the other apk packages            |
+| Any image           | ACR Task fails with `failed to retrieve manifest` when pulling base image                           | Ensure `Microsoft.ContainerRegistry` provider is registered (see Subscription preflight)                        |
 
 ---
 
@@ -262,31 +317,69 @@ az storage container create --account-name $SA_NAME --name results --auth-mode l
 
 The fastest way to get NCBI databases into Azure is **direct transfer from the NCBI public S3 bucket**. This avoids the slow NCBI FTP and transfers data at cloud-to-cloud speed.
 
+> **Critical: blob layout must be flat under the DB directory.**
+>
+> Pod-side `init-db-aks.sh` runs `azcopy cp .../<db_name>/* /blast/blastdb/` (no `--recursive`).
+> If your blob layout is `blast-db/<db_name>/<NCBI_DATE>/<files>` (nested), 0 files will be downloaded
+> and BLAST jobs will fail with `No alias or index file found for nucleotide database`.
+>
+> **Use a source URL ending in `/*` (not just `/`) and omit `--recursive`** so files land flat under the destination.
+
 ```bash
-# Enable public network access temporarily
+# 1) Discover the latest NCBI dump directory
+LATEST=$(curl -s "https://ncbi-blast-databases.s3.amazonaws.com/latest-dir")
+echo "Latest NCBI BLAST DB date: $LATEST"
+
+# 2) Enable public network access on the storage account temporarily
+#    (required because azcopy AAD upload from your laptop hits the storage account public endpoint)
 az storage account update -n $SA_NAME --public-network-access Enabled -o none
-sleep 10  # Wait for propagation
+sleep 15  # wait for the network rule to propagate
 
-# Example: Transfer nt_prok database (82GB, ~2 minutes at 860 MB/s)
+# 3) Authenticate azcopy via Azure CLI credentials
+export AZCOPY_AUTO_LOGIN_TYPE=AZCLI
+
+# 4) Transfer (example: pdbnt — small DB, ~15 MB, ~10s; replace with nt_prok, etc.)
+#    Note the trailing /* on the source and the absence of --recursive.
 azcopy cp \
-  "https://ncbi-blast-databases.s3.amazonaws.com/2025-09-16-01-05-02/" \
-  "https://$SA_NAME.blob.core.windows.net/blast-db/nt_prok/" \
-  --recursive \
-  --include-pattern "nt_prok*" \
-  --block-size-mb=256
+  "https://ncbi-blast-databases.s3.amazonaws.com/${LATEST}/*" \
+  "https://${SA_NAME}.blob.core.windows.net/blast-db/pdbnt/" \
+  --include-pattern "pdbnt.*" \
+  --block-size-mb=64
 
-# Disable public access when done
+# 5) Verify a flat layout (files should appear directly under pdbnt/, no date subfolder)
+azcopy list "https://${SA_NAME}.blob.core.windows.net/blast-db/pdbnt/" | head
+
+# Expected output:
+#   pdbnt.ndb; Content Length: 1.97 MiB
+#   pdbnt.nhr; Content Length: 9.38 MiB
+#   pdbnt.nin; Content Length: 246.90 KiB
+#   ... (no NCBI_DATE/ prefix)
+
+# 6) Disable public access when done (best practice, but see Step 9 caveat)
 az storage account update -n $SA_NAME --public-network-access Disabled -o none
 ```
 
 > **Why S3?** NCBI publishes pre-formatted BLAST databases on AWS S3 (`s3://ncbi-blast-databases`). azcopy can transfer directly from S3 to Azure Blob at up to 860 MB/s — **the same 82GB transfer takes hours via NCBI FTP but only 2 minutes from S3.**
 
+For larger databases, scale up the block size and patterns:
+
+```bash
+# nt_prok (~82 GB, ~2 min at ~700 MB/s)
+azcopy cp \
+  "https://ncbi-blast-databases.s3.amazonaws.com/${LATEST}/*" \
+  "https://${SA_NAME}.blob.core.windows.net/blast-db/nt_prok/" \
+  --include-pattern "nt_prok.*" \
+  --block-size-mb=256
+```
+
 ### 7.4 Upload Query Files
 
 ```bash
 az storage account update -n $SA_NAME --public-network-access Enabled -o none
+sleep 15
+export AZCOPY_AUTO_LOGIN_TYPE=AZCLI
 azcopy cp ./your-query-file.fa "https://$SA_NAME.blob.core.windows.net/queries/"
-az storage account update -n $SA_NAME --public-network-access Disabled -o none
+# Leave public access Enabled if the next step is `elastic-blast submit` (see Step 9).
 ```
 
 ### 7.5 Available Databases on S3
@@ -377,7 +470,31 @@ export AZCOPY_AUTO_LOGIN_TYPE=AZCLI
 
 # Recommended: skip DB integrity check for custom databases
 export ELB_SKIP_DB_VERIFY=true
+
+# Recommended for benchmarks/long jobs: prevent the in-cluster finalizer
+# from deleting the cluster before BLAST jobs complete
+export ELB_DISABLE_AUTO_SHUTDOWN=1
+
+# Required because pip install -e . may fail (packit). Run from src/ instead:
+export PYTHONPATH=src:$PYTHONPATH
 ```
+
+> **Storage account public network access must be Enabled while running `submit`, `status`, and `delete`.**
+>
+> The local CLI calls Azure SDK (`get_length`, blob list) against the storage account from your machine. With `publicNetworkAccess=Disabled`, you will see:
+>
+> ```
+> ERROR: Query input https://...blob.core.windows.net/queries/... is not readable or does not exist
+> ```
+>
+> Re-enable before running ElasticBLAST commands:
+>
+> ```bash
+> az storage account update -n $SA_NAME --public-network-access Enabled -o none
+> sleep 15  # propagation
+> ```
+>
+> Disable again only after the run is complete (or keep it enabled for the duration of repeated experiments).
 
 ### 9.2 Submit a Search
 
@@ -577,6 +694,114 @@ Our benchmark shows **dramatic differences** between Blob NFS and Local NVMe for
 Set `exp-use-local-ssd = true` in your INI file for databases larger than 50% of VM RAM.
 
 For the full analysis, see the [Benchmark Report](../benchmark/results/report-final.md).
+
+---
+
+## Validation Reproduction Recipe (2026-04-29)
+
+The following script recreates the entire stack on a fresh subscription and is the exact sequence used to validate this guide. Total cost: **~$1-2** (mostly AKS control plane + ~10 min of `Standard_E16s_v3`).
+
+```bash
+# --- 0) Pin variables (use unique, lowercase names) ---
+export REGION=koreacentral
+export RG=rg-elb-preqtest
+export ACR_RG=rg-elb-preqtest-acr
+export ACR_NAME=elbpreqacr$(date +%s | tail -c 6)        # globally unique
+export SA_NAME=stgelbpreq$(date +%s | tail -c 6)         # globally unique
+export CLUSTER=elb-preqtest
+
+# --- 1) Subscription preflight ---
+for p in Microsoft.ContainerRegistry Microsoft.ContainerService \
+         Microsoft.Storage Microsoft.Compute Microsoft.Network; do
+    az provider register -n "$p" --wait
+done
+
+# --- 2) RGs + ACR ---
+az group create -n $RG -l $REGION -o table
+az group create -n $ACR_RG -l $REGION -o table
+az acr create -g $ACR_RG -n $ACR_NAME --sku Standard -o table
+
+# --- 3) Build all 3 images via ACR Tasks (no local Docker needed) ---
+export AZURE_REGISTRY=$ACR_NAME.azurecr.io
+az acr login --name $ACR_NAME
+( cd docker-blast      && make azure-build AZURE_REGISTRY=$AZURE_REGISTRY )
+( cd docker-job-submit && make azure-build AZURE_REGISTRY=$AZURE_REGISTRY )
+( cd docker-qs         && make azure-build AZURE_REGISTRY=$AZURE_REGISTRY )
+
+# --- 4) Storage account + containers + DB ---
+az storage account create -g $RG -n $SA_NAME --hns true -l $REGION --sku Standard_LRS -o table
+export AZCOPY_AUTO_LOGIN_TYPE=AZCLI
+for c in blast-db queries results; do
+    az storage container create --account-name $SA_NAME --name $c --auth-mode login
+done
+
+az storage account update -n $SA_NAME --public-network-access Enabled -o none
+sleep 15
+
+# pdbnt is a tiny test DB (~15 MB) — perfect for end-to-end validation
+LATEST=$(curl -s "https://ncbi-blast-databases.s3.amazonaws.com/latest-dir")
+azcopy cp \
+  "https://ncbi-blast-databases.s3.amazonaws.com/${LATEST}/*" \
+  "https://${SA_NAME}.blob.core.windows.net/blast-db/pdbnt/" \
+  --include-pattern "pdbnt.*" --block-size-mb=64
+
+# Tiny query (10 sequences, ~37 KB) from this repo
+azcopy cp benchmark/queries/pathogen-10.fa \
+  "https://${SA_NAME}.blob.core.windows.net/queries/pathogen-10.fa"
+
+# --- 5) Generate INI and submit ---
+cat > /tmp/preqtest-search.ini <<EOF
+[cloud-provider]
+azure-region = $REGION
+azure-acr-resource-group = $ACR_RG
+azure-acr-name = $ACR_NAME
+azure-resource-group = $RG
+azure-storage-account = $SA_NAME
+azure-storage-account-container = blast-db
+
+[cluster]
+name = $CLUSTER
+machine-type = Standard_E16s_v3
+num-nodes = 1
+exp-use-local-ssd = false
+
+[blast]
+program = blastn
+db = https://${SA_NAME}.blob.core.windows.net/blast-db/pdbnt/pdbnt
+queries = https://${SA_NAME}.blob.core.windows.net/queries/pathogen-10.fa
+results = https://${SA_NAME}.blob.core.windows.net/results
+options = -evalue 0.01 -outfmt 7
+EOF
+
+source venv/bin/activate
+export ELB_SKIP_DB_VERIFY=true
+export PYTHONPATH=src:$PYTHONPATH
+# Submit (5-10 min for cold cluster)
+python bin/elastic-blast submit --cfg /tmp/preqtest-search.ini --loglevel INFO
+
+# --- 6) Monitor BLAST jobs (elastic-blast status is unreliable, use kubectl) ---
+az aks get-credentials -g $RG -n $CLUSTER --overwrite-existing
+kubectl get jobs --watch
+# Wait for: blastn-batch-pdbnt-job-000   Complete   1/1
+
+# --- 7) Cleanup (when finished) ---
+az group delete -n $RG --yes --no-wait
+az group delete -n $ACR_RG --yes --no-wait
+```
+
+### Validation Findings — Required Fixes Already Merged
+
+The 2026-04-29 fresh-subscription run uncovered these issues; the fixes are committed in this branch but documented here so anyone reproducing on an older fork knows what to expect:
+
+| #   | Stage                  | Symptom                                                                                              | Resolution (already applied)                                                                                                                              |
+| --- | ---------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `docker-qs` build      | `ModuleNotFoundError: No module named 'pkg_resources'` (pip 26 build isolation breaks `git+...`)     | `Dockerfile`: pin `setuptools<70` and add `--no-build-isolation` to the `pip install -r requirements.txt` line                                            |
+| 2   | `docker-qs` tag        | AKS Pod fails `ErrImagePull: ...elasticblast-query-split:0.1.4 not found` (Makefile built `0.1.4.1`) | `docker-qs/Makefile`: `VERSION?=0.1.4` to match `ELB_QS_DOCKER_VERSION` in `src/elastic_blast/constants.py`                                               |
+| 3   | `docker-job-submit`    | `submit-jobs` Pod logs: `/usr/bin/azcopy: cannot execute: required file not found`                   | `Dockerfile.azure`: `apk add gcompat libstdc++` (azcopy is a glibc binary; alpine's musl libc cannot run it without `gcompat`)                            |
+| 4   | DB upload              | `init-pv` finds 0 files; BLAST exits with `No alias or index file found for nucleotide database`     | Use source `.../<NCBI_DATE>/*` (trailing `/*`) **without** `--recursive` so blob layout is flat (`blast-db/<db>/<files>`), matching `init-db-aks.sh`      |
+| 5   | `elastic-blast submit` | `ERROR: Query input ... is not readable or does not exist`                                           | Storage account `publicNetworkAccess` must be `Enabled` while running `submit`/`status`/`delete` (the local CLI hits the storage account public endpoint) |
+| 6   | `elastic-blast delete` | Hangs for 15+ min waiting for AKS deletion                                                           | For a faster cleanup loop, call `az aks delete -g $RG -n $CLUSTER --yes --no-wait` directly, then `az group delete --yes --no-wait` once the AKS is gone  |
+| 7   | Repeat submit          | `ERROR: An ElasticBLAST search ... has already been submitted` (`disk-id.txt` left in results)       | Either point to a new `results = ...` URL or run `azcopy rm "<results URL>" --recursive` and delete the AKS cluster before re-submitting                  |
 
 ---
 

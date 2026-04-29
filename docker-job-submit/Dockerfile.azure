@@ -44,7 +44,7 @@ LABEL Maintainer=moonchoi@microsoft.com
 COPY --from=builder /opt/venv /opt/venv
 
 RUN apk -U upgrade && \
-    apk add --no-cache bash gettext curl unzip jq python3 && \
+    apk add --no-cache bash gettext curl unzip jq python3 gcompat libstdc++ && \
     rm -rf /var/cache/apk/*
 
 # Install kubectl
