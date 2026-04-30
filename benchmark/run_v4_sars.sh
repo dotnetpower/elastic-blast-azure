@@ -81,7 +81,7 @@ step_upload_query() {
 step_create() {
     section "Creating AKS cluster: $CLUSTER ($NUM_NODES x $VM_SIZE)"
     local T_START=$(date +%s)
-
+    
     local state
     state=$(az aks show -g "$RG" -n "$CLUSTER" --query provisioningState -o tsv 2>/dev/null || echo "NotFound")
     if [[ "$state" == "Succeeded" ]]; then
@@ -91,19 +91,19 @@ step_create() {
         log "PHASE cluster-create $((T_END - T_START)) seconds (reused)"
         return 0
     fi
-
+    
     az aks create \
-        -g "$RG" \
-        -n "$CLUSTER" \
-        --node-count "$NUM_NODES" \
-        --node-vm-size "$VM_SIZE" \
-        --attach-acr "$ACR" \
-        --generate-ssh-keys \
-        -o none 2>&1
-
+    -g "$RG" \
+    -n "$CLUSTER" \
+    --node-count "$NUM_NODES" \
+    --node-vm-size "$VM_SIZE" \
+    --attach-acr "$ACR" \
+    --generate-ssh-keys \
+    -o none 2>&1
+    
     log "Getting credentials..."
     az aks get-credentials -g "$RG" -n "$CLUSTER" --overwrite-existing 2>/dev/null
-
+    
     # Assign storage access to kubelet identity
     log "Assigning storage access..."
     local kubelet_id
@@ -111,11 +111,11 @@ step_create() {
     local storage_id
     storage_id=$(az storage account show -n "$STORAGE" -g "$RG" --query id -o tsv)
     az role assignment create \
-        --role "Storage Blob Data Contributor" \
-        --assignee-object-id "$kubelet_id" \
-        --assignee-principal-type ServicePrincipal \
-        --scope "$storage_id" -o none 2>/dev/null || true
-
+    --role "Storage Blob Data Contributor" \
+    --assignee-object-id "$kubelet_id" \
+    --assignee-principal-type ServicePrincipal \
+    --scope "$storage_id" -o none 2>/dev/null || true
+    
     local T_END=$(date +%s)
     log "PHASE cluster-create $((T_END - T_START)) seconds"
     log "Cluster ready. Nodes:"
@@ -127,26 +127,26 @@ step_create() {
 # ══════════════════════════════════════════════════
 step_deploy() {
     section "Deploying $NUM_SHARDS shard jobs ($BLAST_RUNS BLAST runs each)"
-
+    
     az aks get-credentials -g "$RG" -n "$CLUSTER" --overwrite-existing 2>/dev/null
-
+    
     local nodes
     nodes=($(kubectl get nodes -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | sort))
     local num_worker_nodes=${#nodes[@]}
     log "Worker nodes: $num_worker_nodes"
-
+    
     # Delete existing jobs
     kubectl delete jobs -l app=v4-sars-blast --ignore-not-found 2>/dev/null
-
+    
     for ((s=0; s<NUM_SHARDS; s++)); do
         local shard_idx=$(printf '%02d' $s)
         local shard_name="${DB_NAME}_shard_${shard_idx}"
         local job_name="v4-sars-${shard_idx}"
         local node_idx=$((s % num_worker_nodes))
         local target_node="${nodes[$node_idx]}"
-
+        
         log "  Creating job: $job_name -> $target_node (shard $shard_idx, $BLAST_RUNS runs)"
-
+        
         cat <<EOF | kubectl apply -f -
 apiVersion: batch/v1
 kind: Job
@@ -333,7 +333,7 @@ spec:
           type: DirectoryOrCreate
 EOF
     done
-
+    
     log ""
     log "All $NUM_SHARDS shard jobs deployed ($BLAST_RUNS BLAST runs each)."
     kubectl get jobs -l app=v4-sars-blast
@@ -344,30 +344,30 @@ EOF
 # ══════════════════════════════════════════════════
 step_status() {
     az aks get-credentials -g "$RG" -n "$CLUSTER" --overwrite-existing 2>/dev/null
-
+    
     log "=== Job Status ==="
     kubectl get jobs -l app=v4-sars-blast -o custom-columns=\
-NAME:.metadata.name,\
-STATUS:.status.conditions[0].type,\
-START:.status.startTime,\
-COMPLETION:.status.completionTime,\
-SUCCEEDED:.status.succeeded,\
-FAILED:.status.failed 2>/dev/null
-
+    NAME:.metadata.name,\
+    STATUS:.status.conditions[0].type,\
+    START:.status.startTime,\
+    COMPLETION:.status.completionTime,\
+    SUCCEEDED:.status.succeeded,\
+    FAILED:.status.failed 2>/dev/null
+    
     echo ""
     log "=== Pod Status ==="
     kubectl get pods -l app=v4-sars-blast -o custom-columns=\
-NAME:.metadata.name,\
-STATUS:.status.phase,\
-NODE:.spec.nodeName,\
-START:.status.startTime 2>/dev/null
-
+    NAME:.metadata.name,\
+    STATUS:.status.phase,\
+    NODE:.spec.nodeName,\
+    START:.status.startTime 2>/dev/null
+    
     echo ""
     local total=$(kubectl get jobs -l app=v4-sars-blast --no-headers 2>/dev/null | wc -l)
     local done_count=$(kubectl get jobs -l app=v4-sars-blast -o jsonpath='{.items[?(@.status.succeeded==1)].metadata.name}' 2>/dev/null | wc -w)
     local fail_count=$(kubectl get jobs -l app=v4-sars-blast -o jsonpath='{.items[?(@.status.failed>=1)].metadata.name}' 2>/dev/null | wc -w)
     log "Progress: $done_count/$total completed, $fail_count failed"
-
+    
     # Show recent log from a running pod
     local running
     running=$(kubectl get pods -l app=v4-sars-blast --field-selector=status.phase=Running -o name 2>/dev/null | head -1)
@@ -384,10 +384,10 @@ START:.status.startTime 2>/dev/null
 step_results() {
     section "Collecting V4 Results"
     az aks get-credentials -g "$RG" -n "$CLUSTER" --overwrite-existing 2>/dev/null
-
+    
     # Save K8s job metadata
     kubectl get jobs -l app=v4-sars-blast -o json > "$DATA_DIR/v4_sars_jobs.json" 2>/dev/null
-
+    
     # Collect logs from each shard
     for ((s=0; s<NUM_SHARDS; s++)); do
         local idx=$(printf '%02d' $s)
@@ -397,14 +397,14 @@ step_results() {
             kubectl logs "$pod" > "$DATA_DIR/v4_shard_${idx}_log.txt" 2>/dev/null || true
         fi
     done
-
+    
     # Parse and display results
     section "V4 SARS-CoV-2 ORF1ab Benchmark Results"
     echo ""
     echo "Query: NC_045512.2:266-21555 (SARS-CoV-2 ORF1ab, 21,290 bp)"
     echo "Config: $NUM_SHARDS shards × $NUM_NODES nodes × $BLAST_RUNS BLAST runs"
     echo ""
-
+    
     # Phase timings per shard
     printf "${BOLD}%-8s %8s %10s %8s" "Shard" "Auth" "DB_DL" "Q_DL"
     for ((R=1; R<=BLAST_RUNS; R++)); do
@@ -416,10 +416,10 @@ step_results() {
         printf " %9s" "--------"
     done
     printf " %8s\n" "------"
-
+    
     declare -a ALL_BLAST_TIMES=()
     local max_total=0
-
+    
     for ((s=0; s<NUM_SHARDS; s++)); do
         local idx=$(printf '%02d' $s)
         local logfile="$DATA_DIR/v4_shard_${idx}_log.txt"
@@ -427,14 +427,14 @@ step_results() {
             printf "%-8s  no log\n" "S${idx}"
             continue
         fi
-
+        
         local auth=$(grep "^TIMING auth" "$logfile" 2>/dev/null | awk '{print $3}' || echo "?")
         local db_dl=$(grep "^TIMING db-download" "$logfile" 2>/dev/null | awk '{print $3}' || echo "?")
         local q_dl=$(grep "^TIMING query-download" "$logfile" 2>/dev/null | awk '{print $3}' || echo "?")
         local upload=$(grep "^TIMING upload" "$logfile" 2>/dev/null | awk '{print $3}' || echo "?")
-
+        
         printf "%-8s %7.1fs %9.1fs %7.1fs" "S${idx}" "$auth" "$db_dl" "$q_dl"
-
+        
         for ((R=1; R<=BLAST_RUNS; R++)); do
             local bt=$(grep "^TIMING blast-run-${R} " "$logfile" 2>/dev/null | awk '{print $3}' || echo "?")
             printf " %8.1fs" "$bt"
@@ -444,7 +444,7 @@ step_results() {
         done
         printf " %7.1fs\n" "$upload"
     done
-
+    
     # BLAST run statistics
     echo ""
     section "BLAST Run Statistics (across all shards, $BLAST_RUNS runs each)"
@@ -470,20 +470,20 @@ step_results() {
             printf "  CV:     %.1f%%\n", (mean > 0 ? stddev/mean*100 : 0)
         }'
     fi
-
+    
     # Per-run average across shards
     echo ""
     log "Per-run averages (across $NUM_SHARDS shards):"
     for ((R=1; R<=BLAST_RUNS; R++)); do
         local run_avg
         run_avg=$(for ((s=0; s<NUM_SHARDS; s++)); do
-            local idx=$(printf '%02d' $s)
-            local logfile="$DATA_DIR/v4_shard_${idx}_log.txt"
-            grep "^TIMING blast-run-${R} " "$logfile" 2>/dev/null | awk '{print $3}'
+                local idx=$(printf '%02d' $s)
+                local logfile="$DATA_DIR/v4_shard_${idx}_log.txt"
+                grep "^TIMING blast-run-${R} " "$logfile" 2>/dev/null | awk '{print $3}'
         done | awk '{sum+=$1; n++} END {if(n>0) printf "%.2f", sum/n; else print "?"}')
         log "  Run $R avg: ${run_avg}s"
     done
-
+    
     # Hit counts
     echo ""
     log "Hit counts per shard (Run 1):"
@@ -493,15 +493,15 @@ step_results() {
         local hits=$(grep "^HITS run-1 " "$logfile" 2>/dev/null | awk '{print $3}' || echo "?")
         log "  Shard $idx: $hits hits"
     done
-
+    
     # Download results from blob
     echo ""
     log "Downloading results from blob..."
     mkdir -p "$RESULTS_DIR/raw/V4-SARS-S10"
     AZCOPY_AUTO_LOGIN_TYPE=AZCLI azcopy cp \
-        "${RESULTS_BLOB}/*" "$RESULTS_DIR/raw/V4-SARS-S10/" \
-        --recursive --log-level=WARNING 2>&1 | tail -3
-
+    "${RESULTS_BLOB}/*" "$RESULTS_DIR/raw/V4-SARS-S10/" \
+    --recursive --log-level=WARNING 2>&1 | tail -3
+    
     # K8s job timing
     echo ""
     section "K8s Job Timing (wall clock)"
@@ -536,7 +536,7 @@ step_cleanup() {
 # ══════════════════════════════════════════════════
 step_full() {
     local BENCH_START=$(date +%s)
-
+    
     section "V4 SARS-CoV-2 ORF1ab Benchmark"
     log "Query:  NC_045512.2:266-21555 (21,290 bp)"
     log "Shards: $NUM_SHARDS"
@@ -544,44 +544,44 @@ step_full() {
     log "BLAST:  $BLAST_RUNS runs per shard"
     log "Cost:   ~\$$(echo "scale=2; $NUM_NODES * 1.008" | bc)/hr"
     echo ""
-
+    
     step_upload_query
     step_create
     step_deploy
-
+    
     log ""
     log "Waiting for all shard jobs to complete..."
     log "Monitor with: $0 status"
-
+    
     local max_wait=10800  # 3 hours (5 BLAST runs per shard)
     local waited=0
     while [[ $waited -lt $max_wait ]]; do
         local done_count=$(kubectl get jobs -l app=v4-sars-blast -o jsonpath='{.items[?(@.status.succeeded==1)].metadata.name}' 2>/dev/null | wc -w)
         local fail_count=$(kubectl get jobs -l app=v4-sars-blast -o jsonpath='{.items[?(@.status.failed>=1)].metadata.name}' 2>/dev/null | wc -w)
         local total=$((done_count + fail_count))
-
+        
         if [[ $total -ge $NUM_SHARDS ]]; then
             log "All jobs finished: $done_count succeeded, $fail_count failed"
             break
         fi
-
+        
         if (( waited % 60 == 0 )); then
             log "  Progress: $done_count/$NUM_SHARDS completed ($waited s elapsed)"
         fi
         sleep 15
         waited=$((waited + 15))
     done
-
+    
     step_results
-
+    
     local BENCH_END=$(date +%s)
     local ELAPSED=$((BENCH_END - BENCH_START))
-
+    
     section "Benchmark Complete"
     log "Total wall clock: $((ELAPSED / 60)) min $((ELAPSED % 60)) sec"
     log "Results:  $RESULTS_DIR/"
     log "Cost:     ~\$$(echo "scale=2; $ELAPSED / 3600 * $NUM_NODES * 1.008" | bc)"
-
+    
     echo ""
     read -p "Delete AKS cluster? (y/N) " -n 1 -r
     echo
@@ -607,5 +607,5 @@ case "${1:-full}" in
     *)
         echo "Usage: $0 {full|upload-query|create|deploy|status|results|cleanup}"
         exit 1
-        ;;
+    ;;
 esac
