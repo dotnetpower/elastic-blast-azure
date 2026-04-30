@@ -1,0 +1,1219 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\",\"kind\":\"Job\",\"metadata\":{\"annotations\":{},\"labels\":{\"app\":\"v4-sars-blast\",\"shard\":\"00\"},\"name\":\"v4-sars-00\",\"namespace\":\"default\"},\"spec\":{\"activeDeadlineSeconds\":10800,\"backoffLimit\":1,\"template\":{\"metadata\":{\"labels\":{\"app\":\"v4-sars-blast\",\"shard\":\"00\"}},\"spec\":{\"containers\":[{\"args\":[\"set -eo pipefail\\nSHARD_IDX=0\\nSHARD_NAME=core_nt_shard_00\\nDB_DIR=/workspace/blastdb\\nQUERY_DIR=/workspace/queries\\nRES_DIR=/workspace/results\\nBLAST_RUNS=5\\nmkdir -p $DB_DIR $QUERY_DIR $RES_DIR\\n\\necho \\\"================================================================\\\"\\necho \\\"  V4 SARS-CoV-2 ORF1ab Benchmark — Shard $SHARD_IDX\\\"\\necho \\\"  Query: NC_045512.2:266-21555 (21,290 bp)\\\"\\necho \\\"  BLAST runs: $BLAST_RUNS\\\"\\necho \\\"================================================================\\\"\\n\\n# ── Phase 1: Managed Identity Login ──\\necho \\\"\\\"\\necho \\\"=== Phase 1: Auth ===\\\"\\nT_AUTH_S=$(date +%s)\\nazcopy login --identity 2\\u003e/dev/null || echo \\\"azcopy login warning\\\"\\nT_AUTH_E=$(date +%s)\\nAUTH_SEC=$((T_AUTH_E - T_AUTH_S))\\necho \\\"TIMING auth $AUTH_SEC seconds\\\"\\n\\n# ── Phase 2: Download DB shard ──\\necho \\\"\\\"\\necho \\\"=== Phase 2: Download DB Shard ===\\\"\\nT_DL_S=$(date +%s)\\n\\n# Download manifest\\nT_MANIFEST_S=$(date +%s)\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_00/core_nt_shard_00.manifest\\\"               /tmp/manifest.txt --log-level=WARNING 2\\u003e/dev/null\\nT_MANIFEST_E=$(date +%s)\\nVOLUMES=$(cat /tmp/manifest.txt)\\necho \\\"Manifest download: $((T_MANIFEST_E - T_MANIFEST_S))s\\\"\\necho \\\"Volumes: $VOLUMES\\\"\\n\\n# Download each volume\\nT_VOL_S=$(date +%s)\\nVOL_COUNT=0\\nfor VOL in $VOLUMES; do\\n    echo \\\"  Downloading $VOL...\\\"\\n    for EXT in nsq nhr nin nnd nni nog nos not; do\\n        azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\\\" \\\"${DB_DIR}/${VOL}.${EXT}\\\"                       --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\n    done\\n    VOL_COUNT=$((VOL_COUNT + 1))\\ndone\\nT_VOL_E=$(date +%s)\\nVOL_SEC=$((T_VOL_E - T_VOL_S))\\necho \\\"Volume download: ${VOL_SEC}s (${VOL_COUNT} volumes)\\\"\\n\\n# Build volume paths\\nVOLPATHS=\\\"\\\"\\nfor VOL in $VOLUMES; do\\n    [ -n \\\"$VOLPATHS\\\" ] \\u0026\\u0026 VOLPATHS=\\\"$VOLPATHS \\\"\\n    VOLPATHS=\\\"${VOLPATHS}${DB_DIR}/${VOL}\\\"\\ndone\\n\\n# Download taxonomy files\\nT_TAX_S=$(date +%s)\\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\\n    echo \\\"  Downloading $F...\\\"\\n    azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\\\" \\\"${DB_DIR}/${F}\\\"                   --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\ndone\\nT_TAX_E=$(date +%s)\\nTAX_SEC=$((T_TAX_E - T_TAX_S))\\necho \\\"Taxonomy download: ${TAX_SEC}s\\\"\\n\\nT_DL_E=$(date +%s)\\nDL_TOTAL=$((T_DL_E - T_DL_S))\\nDB_SIZE=$(du -sh $DB_DIR 2\\u003e/dev/null | cut -f1)\\nDB_FILES=$(ls ${DB_DIR}/*.nsq 2\\u003e/dev/null | wc -l)\\necho \\\"\\\"\\necho \\\"TIMING db-download $DL_TOTAL seconds\\\"\\necho \\\"DB size: $DB_SIZE (${DB_FILES} nsq volumes)\\\"\\n\\n# ── Phase 3: Download query ──\\necho \\\"\\\"\\necho \\\"=== Phase 3: Download Query ===\\\"\\nT_QDL_S=$(date +%s)\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/queries/sars_cov2_orf1ab.fa\\\" \\\"${QUERY_DIR}/query.fa\\\"               --log-level=WARNING 2\\u003e/dev/null\\nT_QDL_E=$(date +%s)\\nQDL_SEC=$((T_QDL_E - T_QDL_S))\\nQSEQS=$(grep -c '^\\u003e' ${QUERY_DIR}/query.fa)\\nQLEN=$(grep -v '^\\u003e' ${QUERY_DIR}/query.fa | tr -d '\\\\n' | wc -c)\\necho \\\"TIMING query-download $QDL_SEC seconds\\\"\\necho \\\"Query: $QSEQS sequence(s), $QLEN bp\\\"\\n\\n# ── Phase 4: BLAST × N runs ──\\necho \\\"\\\"\\necho \\\"=== Phase 4: BLAST Execution (5 runs) ===\\\"\\nNCPU=$(nproc)\\necho \\\"CPUs: $NCPU\\\"\\n\\nfor ((R=1; R\\u003c=5; R++)); do\\n    echo \\\"\\\"\\n    echo \\\"--- Run $R/5 ---\\\"\\n    OUTFILE=\\\"${RES_DIR}/shard_00_run${R}.out\\\"\\n\\n    T_BL_S=$(date +%s)\\n    blastn -db \\\"$VOLPATHS\\\"                   -query \\\"${QUERY_DIR}/query.fa\\\"                   -max_target_seqs 500 -evalue 0.05                   -word_size 28 -dust yes -soft_masking true                   -outfmt 7                   -dbsize 978954058562                   -num_threads $NCPU                   -out \\\"$OUTFILE\\\" 2\\u003e\\u00261\\n    T_BL_E=$(date +%s)\\n\\n    BL_SEC=$((T_BL_E - T_BL_S))\\n    HITS=$(grep -vc '^#' \\\"$OUTFILE\\\" 2\\u003e/dev/null || echo 0)\\n    OUT_SIZE=$(wc -c \\u003c \\\"$OUTFILE\\\" 2\\u003e/dev/null || echo 0)\\n    echo \\\"TIMING blast-run-$R $BL_SEC seconds\\\"\\n    echo \\\"HITS run-$R $HITS\\\"\\n    echo \\\"OUTPUT_SIZE run-$R $OUT_SIZE bytes\\\"\\ndone\\n\\n# ── Phase 5: Upload results ──\\necho \\\"\\\"\\necho \\\"=== Phase 5: Upload Results ===\\\"\\nT_UP_S=$(date +%s)\\nfor ((R=1; R\\u003c=5; R++)); do\\n    OUTFILE=\\\"${RES_DIR}/shard_00_run${R}.out\\\"\\n    gzip -f \\\"$OUTFILE\\\"\\n    azcopy cp \\\"${OUTFILE}.gz\\\"                   \\\"https://stgelb.blob.core.windows.net/results/v4/V4-SARS-S10/shard_00_run${R}.out.gz\\\"                   --log-level=WARNING 2\\u003e/dev/null || true\\ndone\\nT_UP_E=$(date +%s)\\nUP_SEC=$((T_UP_E - T_UP_S))\\necho \\\"TIMING upload $UP_SEC seconds\\\"\\n\\n# ── Summary ──\\necho \\\"\\\"\\necho \\\"================================================================\\\"\\necho \\\"  SHARD $SHARD_IDX COMPLETE\\\"\\necho \\\"================================================================\\\"\\necho \\\"TIMING_SUMMARY auth=$AUTH_SEC db_download=$DL_TOTAL query_download=$QDL_SEC upload=$UP_SEC\\\"\\necho \\\"SHARD_COMPLETE $SHARD_IDX\\\"\\n\"],\"command\":[\"/bin/bash\",\"-c\"],\"image\":\"elbacr.azurecr.io/ncbi/elb:1.4.0\",\"name\":\"blast\",\"resources\":{\"limits\":{\"cpu\":\"15\",\"memory\":\"110Gi\"},\"requests\":{\"cpu\":\"8\",\"memory\":\"80Gi\"}},\"volumeMounts\":[{\"mountPath\":\"/workspace\",\"name\":\"workspace\"}]}],\"nodeName\":\"aks-nodepool1-46214719-vmss000000\",\"restartPolicy\":\"Never\",\"volumes\":[{\"hostPath\":{\"path\":\"/mnt/workspace-v4-shard-00\",\"type\":\"DirectoryOrCreate\"},\"name\":\"workspace\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-04-30T08:54:52Z",
+                "generation": 1,
+                "labels": {
+                    "app": "v4-sars-blast",
+                    "shard": "00"
+                },
+                "name": "v4-sars-00",
+                "namespace": "default",
+                "resourceVersion": "8165",
+                "uid": "7f182b8e-4d37-4506-9d22-dc9b6ec4f6b5"
+            },
+            "spec": {
+                "activeDeadlineSeconds": 10800,
+                "backoffLimit": 1,
+                "completionMode": "NonIndexed",
+                "completions": 1,
+                "manualSelector": false,
+                "parallelism": 1,
+                "podReplacementPolicy": "TerminatingOrFailed",
+                "selector": {
+                    "matchLabels": {
+                        "batch.kubernetes.io/controller-uid": "7f182b8e-4d37-4506-9d22-dc9b6ec4f6b5"
+                    }
+                },
+                "suspend": false,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "v4-sars-blast",
+                            "batch.kubernetes.io/controller-uid": "7f182b8e-4d37-4506-9d22-dc9b6ec4f6b5",
+                            "batch.kubernetes.io/job-name": "v4-sars-00",
+                            "controller-uid": "7f182b8e-4d37-4506-9d22-dc9b6ec4f6b5",
+                            "job-name": "v4-sars-00",
+                            "shard": "00"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "set -eo pipefail\nSHARD_IDX=0\nSHARD_NAME=core_nt_shard_00\nDB_DIR=/workspace/blastdb\nQUERY_DIR=/workspace/queries\nRES_DIR=/workspace/results\nBLAST_RUNS=5\nmkdir -p $DB_DIR $QUERY_DIR $RES_DIR\n\necho \"================================================================\"\necho \"  V4 SARS-CoV-2 ORF1ab Benchmark — Shard $SHARD_IDX\"\necho \"  Query: NC_045512.2:266-21555 (21,290 bp)\"\necho \"  BLAST runs: $BLAST_RUNS\"\necho \"================================================================\"\n\n# ── Phase 1: Managed Identity Login ──\necho \"\"\necho \"=== Phase 1: Auth ===\"\nT_AUTH_S=$(date +%s)\nazcopy login --identity 2\u003e/dev/null || echo \"azcopy login warning\"\nT_AUTH_E=$(date +%s)\nAUTH_SEC=$((T_AUTH_E - T_AUTH_S))\necho \"TIMING auth $AUTH_SEC seconds\"\n\n# ── Phase 2: Download DB shard ──\necho \"\"\necho \"=== Phase 2: Download DB Shard ===\"\nT_DL_S=$(date +%s)\n\n# Download manifest\nT_MANIFEST_S=$(date +%s)\nazcopy cp \"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_00/core_nt_shard_00.manifest\"               /tmp/manifest.txt --log-level=WARNING 2\u003e/dev/null\nT_MANIFEST_E=$(date +%s)\nVOLUMES=$(cat /tmp/manifest.txt)\necho \"Manifest download: $((T_MANIFEST_E - T_MANIFEST_S))s\"\necho \"Volumes: $VOLUMES\"\n\n# Download each volume\nT_VOL_S=$(date +%s)\nVOL_COUNT=0\nfor VOL in $VOLUMES; do\n    echo \"  Downloading $VOL...\"\n    for EXT in nsq nhr nin nnd nni nog nos not; do\n        azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\" \"${DB_DIR}/${VOL}.${EXT}\"                       --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\n    done\n    VOL_COUNT=$((VOL_COUNT + 1))\ndone\nT_VOL_E=$(date +%s)\nVOL_SEC=$((T_VOL_E - T_VOL_S))\necho \"Volume download: ${VOL_SEC}s (${VOL_COUNT} volumes)\"\n\n# Build volume paths\nVOLPATHS=\"\"\nfor VOL in $VOLUMES; do\n    [ -n \"$VOLPATHS\" ] \u0026\u0026 VOLPATHS=\"$VOLPATHS \"\n    VOLPATHS=\"${VOLPATHS}${DB_DIR}/${VOL}\"\ndone\n\n# Download taxonomy files\nT_TAX_S=$(date +%s)\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\n    echo \"  Downloading $F...\"\n    azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\" \"${DB_DIR}/${F}\"                   --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\ndone\nT_TAX_E=$(date +%s)\nTAX_SEC=$((T_TAX_E - T_TAX_S))\necho \"Taxonomy download: ${TAX_SEC}s\"\n\nT_DL_E=$(date +%s)\nDL_TOTAL=$((T_DL_E - T_DL_S))\nDB_SIZE=$(du -sh $DB_DIR 2\u003e/dev/null | cut -f1)\nDB_FILES=$(ls ${DB_DIR}/*.nsq 2\u003e/dev/null | wc -l)\necho \"\"\necho \"TIMING db-download $DL_TOTAL seconds\"\necho \"DB size: $DB_SIZE (${DB_FILES} nsq volumes)\"\n\n# ── Phase 3: Download query ──\necho \"\"\necho \"=== Phase 3: Download Query ===\"\nT_QDL_S=$(date +%s)\nazcopy cp \"https://stgelb.blob.core.windows.net/queries/sars_cov2_orf1ab.fa\" \"${QUERY_DIR}/query.fa\"               --log-level=WARNING 2\u003e/dev/null\nT_QDL_E=$(date +%s)\nQDL_SEC=$((T_QDL_E - T_QDL_S))\nQSEQS=$(grep -c '^\u003e' ${QUERY_DIR}/query.fa)\nQLEN=$(grep -v '^\u003e' ${QUERY_DIR}/query.fa | tr -d '\\n' | wc -c)\necho \"TIMING query-download $QDL_SEC seconds\"\necho \"Query: $QSEQS sequence(s), $QLEN bp\"\n\n# ── Phase 4: BLAST × N runs ──\necho \"\"\necho \"=== Phase 4: BLAST Execution (5 runs) ===\"\nNCPU=$(nproc)\necho \"CPUs: $NCPU\"\n\nfor ((R=1; R\u003c=5; R++)); do\n    echo \"\"\n    echo \"--- Run $R/5 ---\"\n    OUTFILE=\"${RES_DIR}/shard_00_run${R}.out\"\n\n    T_BL_S=$(date +%s)\n    blastn -db \"$VOLPATHS\"                   -query \"${QUERY_DIR}/query.fa\"                   -max_target_seqs 500 -evalue 0.05                   -word_size 28 -dust yes -soft_masking true                   -outfmt 7                   -dbsize 978954058562                   -num_threads $NCPU                   -out \"$OUTFILE\" 2\u003e\u00261\n    T_BL_E=$(date +%s)\n\n    BL_SEC=$((T_BL_E - T_BL_S))\n    HITS=$(grep -vc '^#' \"$OUTFILE\" 2\u003e/dev/null || echo 0)\n    OUT_SIZE=$(wc -c \u003c \"$OUTFILE\" 2\u003e/dev/null || echo 0)\n    echo \"TIMING blast-run-$R $BL_SEC seconds\"\n    echo \"HITS run-$R $HITS\"\n    echo \"OUTPUT_SIZE run-$R $OUT_SIZE bytes\"\ndone\n\n# ── Phase 5: Upload results ──\necho \"\"\necho \"=== Phase 5: Upload Results ===\"\nT_UP_S=$(date +%s)\nfor ((R=1; R\u003c=5; R++)); do\n    OUTFILE=\"${RES_DIR}/shard_00_run${R}.out\"\n    gzip -f \"$OUTFILE\"\n    azcopy cp \"${OUTFILE}.gz\"                   \"https://stgelb.blob.core.windows.net/results/v4/V4-SARS-S10/shard_00_run${R}.out.gz\"                   --log-level=WARNING 2\u003e/dev/null || true\ndone\nT_UP_E=$(date +%s)\nUP_SEC=$((T_UP_E - T_UP_S))\necho \"TIMING upload $UP_SEC seconds\"\n\n# ── Summary ──\necho \"\"\necho \"================================================================\"\necho \"  SHARD $SHARD_IDX COMPLETE\"\necho \"================================================================\"\necho \"TIMING_SUMMARY auth=$AUTH_SEC db_download=$DL_TOTAL query_download=$QDL_SEC upload=$UP_SEC\"\necho \"SHARD_COMPLETE $SHARD_IDX\"\n"
+                                ],
+                                "command": [
+                                    "/bin/bash",
+                                    "-c"
+                                ],
+                                "image": "elbacr.azurecr.io/ncbi/elb:1.4.0",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "blast",
+                                "resources": {
+                                    "limits": {
+                                        "cpu": "15",
+                                        "memory": "110Gi"
+                                    },
+                                    "requests": {
+                                        "cpu": "8",
+                                        "memory": "80Gi"
+                                    }
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/workspace",
+                                        "name": "workspace"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeName": "aks-nodepool1-46214719-vmss000000",
+                        "restartPolicy": "Never",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30,
+                        "volumes": [
+                            {
+                                "hostPath": {
+                                    "path": "/mnt/workspace-v4-shard-00",
+                                    "type": "DirectoryOrCreate"
+                                },
+                                "name": "workspace"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "completionTime": "2026-04-30T09:00:21Z",
+                "conditions": [
+                    {
+                        "lastProbeTime": "2026-04-30T09:00:21Z",
+                        "lastTransitionTime": "2026-04-30T09:00:21Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "SuccessCriteriaMet"
+                    },
+                    {
+                        "lastProbeTime": "2026-04-30T09:00:21Z",
+                        "lastTransitionTime": "2026-04-30T09:00:21Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "Complete"
+                    }
+                ],
+                "ready": 0,
+                "startTime": "2026-04-30T08:54:52Z",
+                "succeeded": 1,
+                "terminating": 0,
+                "uncountedTerminatedPods": {}
+            }
+        },
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\",\"kind\":\"Job\",\"metadata\":{\"annotations\":{},\"labels\":{\"app\":\"v4-sars-blast\",\"shard\":\"01\"},\"name\":\"v4-sars-01\",\"namespace\":\"default\"},\"spec\":{\"activeDeadlineSeconds\":10800,\"backoffLimit\":1,\"template\":{\"metadata\":{\"labels\":{\"app\":\"v4-sars-blast\",\"shard\":\"01\"}},\"spec\":{\"containers\":[{\"args\":[\"set -eo pipefail\\nSHARD_IDX=1\\nSHARD_NAME=core_nt_shard_01\\nDB_DIR=/workspace/blastdb\\nQUERY_DIR=/workspace/queries\\nRES_DIR=/workspace/results\\nBLAST_RUNS=5\\nmkdir -p $DB_DIR $QUERY_DIR $RES_DIR\\n\\necho \\\"================================================================\\\"\\necho \\\"  V4 SARS-CoV-2 ORF1ab Benchmark — Shard $SHARD_IDX\\\"\\necho \\\"  Query: NC_045512.2:266-21555 (21,290 bp)\\\"\\necho \\\"  BLAST runs: $BLAST_RUNS\\\"\\necho \\\"================================================================\\\"\\n\\n# ── Phase 1: Managed Identity Login ──\\necho \\\"\\\"\\necho \\\"=== Phase 1: Auth ===\\\"\\nT_AUTH_S=$(date +%s)\\nazcopy login --identity 2\\u003e/dev/null || echo \\\"azcopy login warning\\\"\\nT_AUTH_E=$(date +%s)\\nAUTH_SEC=$((T_AUTH_E - T_AUTH_S))\\necho \\\"TIMING auth $AUTH_SEC seconds\\\"\\n\\n# ── Phase 2: Download DB shard ──\\necho \\\"\\\"\\necho \\\"=== Phase 2: Download DB Shard ===\\\"\\nT_DL_S=$(date +%s)\\n\\n# Download manifest\\nT_MANIFEST_S=$(date +%s)\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_01/core_nt_shard_01.manifest\\\"               /tmp/manifest.txt --log-level=WARNING 2\\u003e/dev/null\\nT_MANIFEST_E=$(date +%s)\\nVOLUMES=$(cat /tmp/manifest.txt)\\necho \\\"Manifest download: $((T_MANIFEST_E - T_MANIFEST_S))s\\\"\\necho \\\"Volumes: $VOLUMES\\\"\\n\\n# Download each volume\\nT_VOL_S=$(date +%s)\\nVOL_COUNT=0\\nfor VOL in $VOLUMES; do\\n    echo \\\"  Downloading $VOL...\\\"\\n    for EXT in nsq nhr nin nnd nni nog nos not; do\\n        azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\\\" \\\"${DB_DIR}/${VOL}.${EXT}\\\"                       --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\n    done\\n    VOL_COUNT=$((VOL_COUNT + 1))\\ndone\\nT_VOL_E=$(date +%s)\\nVOL_SEC=$((T_VOL_E - T_VOL_S))\\necho \\\"Volume download: ${VOL_SEC}s (${VOL_COUNT} volumes)\\\"\\n\\n# Build volume paths\\nVOLPATHS=\\\"\\\"\\nfor VOL in $VOLUMES; do\\n    [ -n \\\"$VOLPATHS\\\" ] \\u0026\\u0026 VOLPATHS=\\\"$VOLPATHS \\\"\\n    VOLPATHS=\\\"${VOLPATHS}${DB_DIR}/${VOL}\\\"\\ndone\\n\\n# Download taxonomy files\\nT_TAX_S=$(date +%s)\\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\\n    echo \\\"  Downloading $F...\\\"\\n    azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\\\" \\\"${DB_DIR}/${F}\\\"                   --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\ndone\\nT_TAX_E=$(date +%s)\\nTAX_SEC=$((T_TAX_E - T_TAX_S))\\necho \\\"Taxonomy download: ${TAX_SEC}s\\\"\\n\\nT_DL_E=$(date +%s)\\nDL_TOTAL=$((T_DL_E - T_DL_S))\\nDB_SIZE=$(du -sh $DB_DIR 2\\u003e/dev/null | cut -f1)\\nDB_FILES=$(ls ${DB_DIR}/*.nsq 2\\u003e/dev/null | wc -l)\\necho \\\"\\\"\\necho \\\"TIMING db-download $DL_TOTAL seconds\\\"\\necho \\\"DB size: $DB_SIZE (${DB_FILES} nsq volumes)\\\"\\n\\n# ── Phase 3: Download query ──\\necho \\\"\\\"\\necho \\\"=== Phase 3: Download Query ===\\\"\\nT_QDL_S=$(date +%s)\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/queries/sars_cov2_orf1ab.fa\\\" \\\"${QUERY_DIR}/query.fa\\\"               --log-level=WARNING 2\\u003e/dev/null\\nT_QDL_E=$(date +%s)\\nQDL_SEC=$((T_QDL_E - T_QDL_S))\\nQSEQS=$(grep -c '^\\u003e' ${QUERY_DIR}/query.fa)\\nQLEN=$(grep -v '^\\u003e' ${QUERY_DIR}/query.fa | tr -d '\\\\n' | wc -c)\\necho \\\"TIMING query-download $QDL_SEC seconds\\\"\\necho \\\"Query: $QSEQS sequence(s), $QLEN bp\\\"\\n\\n# ── Phase 4: BLAST × N runs ──\\necho \\\"\\\"\\necho \\\"=== Phase 4: BLAST Execution (5 runs) ===\\\"\\nNCPU=$(nproc)\\necho \\\"CPUs: $NCPU\\\"\\n\\nfor ((R=1; R\\u003c=5; R++)); do\\n    echo \\\"\\\"\\n    echo \\\"--- Run $R/5 ---\\\"\\n    OUTFILE=\\\"${RES_DIR}/shard_01_run${R}.out\\\"\\n\\n    T_BL_S=$(date +%s)\\n    blastn -db \\\"$VOLPATHS\\\"                   -query \\\"${QUERY_DIR}/query.fa\\\"                   -max_target_seqs 500 -evalue 0.05                   -word_size 28 -dust yes -soft_masking true                   -outfmt 7                   -dbsize 978954058562                   -num_threads $NCPU                   -out \\\"$OUTFILE\\\" 2\\u003e\\u00261\\n    T_BL_E=$(date +%s)\\n\\n    BL_SEC=$((T_BL_E - T_BL_S))\\n    HITS=$(grep -vc '^#' \\\"$OUTFILE\\\" 2\\u003e/dev/null || echo 0)\\n    OUT_SIZE=$(wc -c \\u003c \\\"$OUTFILE\\\" 2\\u003e/dev/null || echo 0)\\n    echo \\\"TIMING blast-run-$R $BL_SEC seconds\\\"\\n    echo \\\"HITS run-$R $HITS\\\"\\n    echo \\\"OUTPUT_SIZE run-$R $OUT_SIZE bytes\\\"\\ndone\\n\\n# ── Phase 5: Upload results ──\\necho \\\"\\\"\\necho \\\"=== Phase 5: Upload Results ===\\\"\\nT_UP_S=$(date +%s)\\nfor ((R=1; R\\u003c=5; R++)); do\\n    OUTFILE=\\\"${RES_DIR}/shard_01_run${R}.out\\\"\\n    gzip -f \\\"$OUTFILE\\\"\\n    azcopy cp \\\"${OUTFILE}.gz\\\"                   \\\"https://stgelb.blob.core.windows.net/results/v4/V4-SARS-S10/shard_01_run${R}.out.gz\\\"                   --log-level=WARNING 2\\u003e/dev/null || true\\ndone\\nT_UP_E=$(date +%s)\\nUP_SEC=$((T_UP_E - T_UP_S))\\necho \\\"TIMING upload $UP_SEC seconds\\\"\\n\\n# ── Summary ──\\necho \\\"\\\"\\necho \\\"================================================================\\\"\\necho \\\"  SHARD $SHARD_IDX COMPLETE\\\"\\necho \\\"================================================================\\\"\\necho \\\"TIMING_SUMMARY auth=$AUTH_SEC db_download=$DL_TOTAL query_download=$QDL_SEC upload=$UP_SEC\\\"\\necho \\\"SHARD_COMPLETE $SHARD_IDX\\\"\\n\"],\"command\":[\"/bin/bash\",\"-c\"],\"image\":\"elbacr.azurecr.io/ncbi/elb:1.4.0\",\"name\":\"blast\",\"resources\":{\"limits\":{\"cpu\":\"15\",\"memory\":\"110Gi\"},\"requests\":{\"cpu\":\"8\",\"memory\":\"80Gi\"}},\"volumeMounts\":[{\"mountPath\":\"/workspace\",\"name\":\"workspace\"}]}],\"nodeName\":\"aks-nodepool1-46214719-vmss000001\",\"restartPolicy\":\"Never\",\"volumes\":[{\"hostPath\":{\"path\":\"/mnt/workspace-v4-shard-01\",\"type\":\"DirectoryOrCreate\"},\"name\":\"workspace\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-04-30T08:54:53Z",
+                "generation": 1,
+                "labels": {
+                    "app": "v4-sars-blast",
+                    "shard": "01"
+                },
+                "name": "v4-sars-01",
+                "namespace": "default",
+                "resourceVersion": "8357",
+                "uid": "4401c391-b895-4e93-82c0-533a0ba1b1dd"
+            },
+            "spec": {
+                "activeDeadlineSeconds": 10800,
+                "backoffLimit": 1,
+                "completionMode": "NonIndexed",
+                "completions": 1,
+                "manualSelector": false,
+                "parallelism": 1,
+                "podReplacementPolicy": "TerminatingOrFailed",
+                "selector": {
+                    "matchLabels": {
+                        "batch.kubernetes.io/controller-uid": "4401c391-b895-4e93-82c0-533a0ba1b1dd"
+                    }
+                },
+                "suspend": false,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "v4-sars-blast",
+                            "batch.kubernetes.io/controller-uid": "4401c391-b895-4e93-82c0-533a0ba1b1dd",
+                            "batch.kubernetes.io/job-name": "v4-sars-01",
+                            "controller-uid": "4401c391-b895-4e93-82c0-533a0ba1b1dd",
+                            "job-name": "v4-sars-01",
+                            "shard": "01"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "set -eo pipefail\nSHARD_IDX=1\nSHARD_NAME=core_nt_shard_01\nDB_DIR=/workspace/blastdb\nQUERY_DIR=/workspace/queries\nRES_DIR=/workspace/results\nBLAST_RUNS=5\nmkdir -p $DB_DIR $QUERY_DIR $RES_DIR\n\necho \"================================================================\"\necho \"  V4 SARS-CoV-2 ORF1ab Benchmark — Shard $SHARD_IDX\"\necho \"  Query: NC_045512.2:266-21555 (21,290 bp)\"\necho \"  BLAST runs: $BLAST_RUNS\"\necho \"================================================================\"\n\n# ── Phase 1: Managed Identity Login ──\necho \"\"\necho \"=== Phase 1: Auth ===\"\nT_AUTH_S=$(date +%s)\nazcopy login --identity 2\u003e/dev/null || echo \"azcopy login warning\"\nT_AUTH_E=$(date +%s)\nAUTH_SEC=$((T_AUTH_E - T_AUTH_S))\necho \"TIMING auth $AUTH_SEC seconds\"\n\n# ── Phase 2: Download DB shard ──\necho \"\"\necho \"=== Phase 2: Download DB Shard ===\"\nT_DL_S=$(date +%s)\n\n# Download manifest\nT_MANIFEST_S=$(date +%s)\nazcopy cp \"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_01/core_nt_shard_01.manifest\"               /tmp/manifest.txt --log-level=WARNING 2\u003e/dev/null\nT_MANIFEST_E=$(date +%s)\nVOLUMES=$(cat /tmp/manifest.txt)\necho \"Manifest download: $((T_MANIFEST_E - T_MANIFEST_S))s\"\necho \"Volumes: $VOLUMES\"\n\n# Download each volume\nT_VOL_S=$(date +%s)\nVOL_COUNT=0\nfor VOL in $VOLUMES; do\n    echo \"  Downloading $VOL...\"\n    for EXT in nsq nhr nin nnd nni nog nos not; do\n        azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\" \"${DB_DIR}/${VOL}.${EXT}\"                       --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\n    done\n    VOL_COUNT=$((VOL_COUNT + 1))\ndone\nT_VOL_E=$(date +%s)\nVOL_SEC=$((T_VOL_E - T_VOL_S))\necho \"Volume download: ${VOL_SEC}s (${VOL_COUNT} volumes)\"\n\n# Build volume paths\nVOLPATHS=\"\"\nfor VOL in $VOLUMES; do\n    [ -n \"$VOLPATHS\" ] \u0026\u0026 VOLPATHS=\"$VOLPATHS \"\n    VOLPATHS=\"${VOLPATHS}${DB_DIR}/${VOL}\"\ndone\n\n# Download taxonomy files\nT_TAX_S=$(date +%s)\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\n    echo \"  Downloading $F...\"\n    azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\" \"${DB_DIR}/${F}\"                   --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\ndone\nT_TAX_E=$(date +%s)\nTAX_SEC=$((T_TAX_E - T_TAX_S))\necho \"Taxonomy download: ${TAX_SEC}s\"\n\nT_DL_E=$(date +%s)\nDL_TOTAL=$((T_DL_E - T_DL_S))\nDB_SIZE=$(du -sh $DB_DIR 2\u003e/dev/null | cut -f1)\nDB_FILES=$(ls ${DB_DIR}/*.nsq 2\u003e/dev/null | wc -l)\necho \"\"\necho \"TIMING db-download $DL_TOTAL seconds\"\necho \"DB size: $DB_SIZE (${DB_FILES} nsq volumes)\"\n\n# ── Phase 3: Download query ──\necho \"\"\necho \"=== Phase 3: Download Query ===\"\nT_QDL_S=$(date +%s)\nazcopy cp \"https://stgelb.blob.core.windows.net/queries/sars_cov2_orf1ab.fa\" \"${QUERY_DIR}/query.fa\"               --log-level=WARNING 2\u003e/dev/null\nT_QDL_E=$(date +%s)\nQDL_SEC=$((T_QDL_E - T_QDL_S))\nQSEQS=$(grep -c '^\u003e' ${QUERY_DIR}/query.fa)\nQLEN=$(grep -v '^\u003e' ${QUERY_DIR}/query.fa | tr -d '\\n' | wc -c)\necho \"TIMING query-download $QDL_SEC seconds\"\necho \"Query: $QSEQS sequence(s), $QLEN bp\"\n\n# ── Phase 4: BLAST × N runs ──\necho \"\"\necho \"=== Phase 4: BLAST Execution (5 runs) ===\"\nNCPU=$(nproc)\necho \"CPUs: $NCPU\"\n\nfor ((R=1; R\u003c=5; R++)); do\n    echo \"\"\n    echo \"--- Run $R/5 ---\"\n    OUTFILE=\"${RES_DIR}/shard_01_run${R}.out\"\n\n    T_BL_S=$(date +%s)\n    blastn -db \"$VOLPATHS\"                   -query \"${QUERY_DIR}/query.fa\"                   -max_target_seqs 500 -evalue 0.05                   -word_size 28 -dust yes -soft_masking true                   -outfmt 7                   -dbsize 978954058562                   -num_threads $NCPU                   -out \"$OUTFILE\" 2\u003e\u00261\n    T_BL_E=$(date +%s)\n\n    BL_SEC=$((T_BL_E - T_BL_S))\n    HITS=$(grep -vc '^#' \"$OUTFILE\" 2\u003e/dev/null || echo 0)\n    OUT_SIZE=$(wc -c \u003c \"$OUTFILE\" 2\u003e/dev/null || echo 0)\n    echo \"TIMING blast-run-$R $BL_SEC seconds\"\n    echo \"HITS run-$R $HITS\"\n    echo \"OUTPUT_SIZE run-$R $OUT_SIZE bytes\"\ndone\n\n# ── Phase 5: Upload results ──\necho \"\"\necho \"=== Phase 5: Upload Results ===\"\nT_UP_S=$(date +%s)\nfor ((R=1; R\u003c=5; R++)); do\n    OUTFILE=\"${RES_DIR}/shard_01_run${R}.out\"\n    gzip -f \"$OUTFILE\"\n    azcopy cp \"${OUTFILE}.gz\"                   \"https://stgelb.blob.core.windows.net/results/v4/V4-SARS-S10/shard_01_run${R}.out.gz\"                   --log-level=WARNING 2\u003e/dev/null || true\ndone\nT_UP_E=$(date +%s)\nUP_SEC=$((T_UP_E - T_UP_S))\necho \"TIMING upload $UP_SEC seconds\"\n\n# ── Summary ──\necho \"\"\necho \"================================================================\"\necho \"  SHARD $SHARD_IDX COMPLETE\"\necho \"================================================================\"\necho \"TIMING_SUMMARY auth=$AUTH_SEC db_download=$DL_TOTAL query_download=$QDL_SEC upload=$UP_SEC\"\necho \"SHARD_COMPLETE $SHARD_IDX\"\n"
+                                ],
+                                "command": [
+                                    "/bin/bash",
+                                    "-c"
+                                ],
+                                "image": "elbacr.azurecr.io/ncbi/elb:1.4.0",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "blast",
+                                "resources": {
+                                    "limits": {
+                                        "cpu": "15",
+                                        "memory": "110Gi"
+                                    },
+                                    "requests": {
+                                        "cpu": "8",
+                                        "memory": "80Gi"
+                                    }
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/workspace",
+                                        "name": "workspace"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeName": "aks-nodepool1-46214719-vmss000001",
+                        "restartPolicy": "Never",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30,
+                        "volumes": [
+                            {
+                                "hostPath": {
+                                    "path": "/mnt/workspace-v4-shard-01",
+                                    "type": "DirectoryOrCreate"
+                                },
+                                "name": "workspace"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "completionTime": "2026-04-30T09:00:54Z",
+                "conditions": [
+                    {
+                        "lastProbeTime": "2026-04-30T09:00:54Z",
+                        "lastTransitionTime": "2026-04-30T09:00:54Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "SuccessCriteriaMet"
+                    },
+                    {
+                        "lastProbeTime": "2026-04-30T09:00:54Z",
+                        "lastTransitionTime": "2026-04-30T09:00:54Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "Complete"
+                    }
+                ],
+                "ready": 0,
+                "startTime": "2026-04-30T08:54:53Z",
+                "succeeded": 1,
+                "terminating": 0,
+                "uncountedTerminatedPods": {}
+            }
+        },
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\",\"kind\":\"Job\",\"metadata\":{\"annotations\":{},\"labels\":{\"app\":\"v4-sars-blast\",\"shard\":\"02\"},\"name\":\"v4-sars-02\",\"namespace\":\"default\"},\"spec\":{\"activeDeadlineSeconds\":10800,\"backoffLimit\":1,\"template\":{\"metadata\":{\"labels\":{\"app\":\"v4-sars-blast\",\"shard\":\"02\"}},\"spec\":{\"containers\":[{\"args\":[\"set -eo pipefail\\nSHARD_IDX=2\\nSHARD_NAME=core_nt_shard_02\\nDB_DIR=/workspace/blastdb\\nQUERY_DIR=/workspace/queries\\nRES_DIR=/workspace/results\\nBLAST_RUNS=5\\nmkdir -p $DB_DIR $QUERY_DIR $RES_DIR\\n\\necho \\\"================================================================\\\"\\necho \\\"  V4 SARS-CoV-2 ORF1ab Benchmark — Shard $SHARD_IDX\\\"\\necho \\\"  Query: NC_045512.2:266-21555 (21,290 bp)\\\"\\necho \\\"  BLAST runs: $BLAST_RUNS\\\"\\necho \\\"================================================================\\\"\\n\\n# ── Phase 1: Managed Identity Login ──\\necho \\\"\\\"\\necho \\\"=== Phase 1: Auth ===\\\"\\nT_AUTH_S=$(date +%s)\\nazcopy login --identity 2\\u003e/dev/null || echo \\\"azcopy login warning\\\"\\nT_AUTH_E=$(date +%s)\\nAUTH_SEC=$((T_AUTH_E - T_AUTH_S))\\necho \\\"TIMING auth $AUTH_SEC seconds\\\"\\n\\n# ── Phase 2: Download DB shard ──\\necho \\\"\\\"\\necho \\\"=== Phase 2: Download DB Shard ===\\\"\\nT_DL_S=$(date +%s)\\n\\n# Download manifest\\nT_MANIFEST_S=$(date +%s)\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_02/core_nt_shard_02.manifest\\\"               /tmp/manifest.txt --log-level=WARNING 2\\u003e/dev/null\\nT_MANIFEST_E=$(date +%s)\\nVOLUMES=$(cat /tmp/manifest.txt)\\necho \\\"Manifest download: $((T_MANIFEST_E - T_MANIFEST_S))s\\\"\\necho \\\"Volumes: $VOLUMES\\\"\\n\\n# Download each volume\\nT_VOL_S=$(date +%s)\\nVOL_COUNT=0\\nfor VOL in $VOLUMES; do\\n    echo \\\"  Downloading $VOL...\\\"\\n    for EXT in nsq nhr nin nnd nni nog nos not; do\\n        azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\\\" \\\"${DB_DIR}/${VOL}.${EXT}\\\"                       --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\n    done\\n    VOL_COUNT=$((VOL_COUNT + 1))\\ndone\\nT_VOL_E=$(date +%s)\\nVOL_SEC=$((T_VOL_E - T_VOL_S))\\necho \\\"Volume download: ${VOL_SEC}s (${VOL_COUNT} volumes)\\\"\\n\\n# Build volume paths\\nVOLPATHS=\\\"\\\"\\nfor VOL in $VOLUMES; do\\n    [ -n \\\"$VOLPATHS\\\" ] \\u0026\\u0026 VOLPATHS=\\\"$VOLPATHS \\\"\\n    VOLPATHS=\\\"${VOLPATHS}${DB_DIR}/${VOL}\\\"\\ndone\\n\\n# Download taxonomy files\\nT_TAX_S=$(date +%s)\\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\\n    echo \\\"  Downloading $F...\\\"\\n    azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\\\" \\\"${DB_DIR}/${F}\\\"                   --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\ndone\\nT_TAX_E=$(date +%s)\\nTAX_SEC=$((T_TAX_E - T_TAX_S))\\necho \\\"Taxonomy download: ${TAX_SEC}s\\\"\\n\\nT_DL_E=$(date +%s)\\nDL_TOTAL=$((T_DL_E - T_DL_S))\\nDB_SIZE=$(du -sh $DB_DIR 2\\u003e/dev/null | cut -f1)\\nDB_FILES=$(ls ${DB_DIR}/*.nsq 2\\u003e/dev/null | wc -l)\\necho \\\"\\\"\\necho \\\"TIMING db-download $DL_TOTAL seconds\\\"\\necho \\\"DB size: $DB_SIZE (${DB_FILES} nsq volumes)\\\"\\n\\n# ── Phase 3: Download query ──\\necho \\\"\\\"\\necho \\\"=== Phase 3: Download Query ===\\\"\\nT_QDL_S=$(date +%s)\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/queries/sars_cov2_orf1ab.fa\\\" \\\"${QUERY_DIR}/query.fa\\\"               --log-level=WARNING 2\\u003e/dev/null\\nT_QDL_E=$(date +%s)\\nQDL_SEC=$((T_QDL_E - T_QDL_S))\\nQSEQS=$(grep -c '^\\u003e' ${QUERY_DIR}/query.fa)\\nQLEN=$(grep -v '^\\u003e' ${QUERY_DIR}/query.fa | tr -d '\\\\n' | wc -c)\\necho \\\"TIMING query-download $QDL_SEC seconds\\\"\\necho \\\"Query: $QSEQS sequence(s), $QLEN bp\\\"\\n\\n# ── Phase 4: BLAST × N runs ──\\necho \\\"\\\"\\necho \\\"=== Phase 4: BLAST Execution (5 runs) ===\\\"\\nNCPU=$(nproc)\\necho \\\"CPUs: $NCPU\\\"\\n\\nfor ((R=1; R\\u003c=5; R++)); do\\n    echo \\\"\\\"\\n    echo \\\"--- Run $R/5 ---\\\"\\n    OUTFILE=\\\"${RES_DIR}/shard_02_run${R}.out\\\"\\n\\n    T_BL_S=$(date +%s)\\n    blastn -db \\\"$VOLPATHS\\\"                   -query \\\"${QUERY_DIR}/query.fa\\\"                   -max_target_seqs 500 -evalue 0.05                   -word_size 28 -dust yes -soft_masking true                   -outfmt 7                   -dbsize 978954058562                   -num_threads $NCPU                   -out \\\"$OUTFILE\\\" 2\\u003e\\u00261\\n    T_BL_E=$(date +%s)\\n\\n    BL_SEC=$((T_BL_E - T_BL_S))\\n    HITS=$(grep -vc '^#' \\\"$OUTFILE\\\" 2\\u003e/dev/null || echo 0)\\n    OUT_SIZE=$(wc -c \\u003c \\\"$OUTFILE\\\" 2\\u003e/dev/null || echo 0)\\n    echo \\\"TIMING blast-run-$R $BL_SEC seconds\\\"\\n    echo \\\"HITS run-$R $HITS\\\"\\n    echo \\\"OUTPUT_SIZE run-$R $OUT_SIZE bytes\\\"\\ndone\\n\\n# ── Phase 5: Upload results ──\\necho \\\"\\\"\\necho \\\"=== Phase 5: Upload Results ===\\\"\\nT_UP_S=$(date +%s)\\nfor ((R=1; R\\u003c=5; R++)); do\\n    OUTFILE=\\\"${RES_DIR}/shard_02_run${R}.out\\\"\\n    gzip -f \\\"$OUTFILE\\\"\\n    azcopy cp \\\"${OUTFILE}.gz\\\"                   \\\"https://stgelb.blob.core.windows.net/results/v4/V4-SARS-S10/shard_02_run${R}.out.gz\\\"                   --log-level=WARNING 2\\u003e/dev/null || true\\ndone\\nT_UP_E=$(date +%s)\\nUP_SEC=$((T_UP_E - T_UP_S))\\necho \\\"TIMING upload $UP_SEC seconds\\\"\\n\\n# ── Summary ──\\necho \\\"\\\"\\necho \\\"================================================================\\\"\\necho \\\"  SHARD $SHARD_IDX COMPLETE\\\"\\necho \\\"================================================================\\\"\\necho \\\"TIMING_SUMMARY auth=$AUTH_SEC db_download=$DL_TOTAL query_download=$QDL_SEC upload=$UP_SEC\\\"\\necho \\\"SHARD_COMPLETE $SHARD_IDX\\\"\\n\"],\"command\":[\"/bin/bash\",\"-c\"],\"image\":\"elbacr.azurecr.io/ncbi/elb:1.4.0\",\"name\":\"blast\",\"resources\":{\"limits\":{\"cpu\":\"15\",\"memory\":\"110Gi\"},\"requests\":{\"cpu\":\"8\",\"memory\":\"80Gi\"}},\"volumeMounts\":[{\"mountPath\":\"/workspace\",\"name\":\"workspace\"}]}],\"nodeName\":\"aks-nodepool1-46214719-vmss000002\",\"restartPolicy\":\"Never\",\"volumes\":[{\"hostPath\":{\"path\":\"/mnt/workspace-v4-shard-02\",\"type\":\"DirectoryOrCreate\"},\"name\":\"workspace\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-04-30T08:54:53Z",
+                "generation": 1,
+                "labels": {
+                    "app": "v4-sars-blast",
+                    "shard": "02"
+                },
+                "name": "v4-sars-02",
+                "namespace": "default",
+                "resourceVersion": "8399",
+                "uid": "5cb536f0-f656-4663-98f4-3c5481d9e9c9"
+            },
+            "spec": {
+                "activeDeadlineSeconds": 10800,
+                "backoffLimit": 1,
+                "completionMode": "NonIndexed",
+                "completions": 1,
+                "manualSelector": false,
+                "parallelism": 1,
+                "podReplacementPolicy": "TerminatingOrFailed",
+                "selector": {
+                    "matchLabels": {
+                        "batch.kubernetes.io/controller-uid": "5cb536f0-f656-4663-98f4-3c5481d9e9c9"
+                    }
+                },
+                "suspend": false,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "v4-sars-blast",
+                            "batch.kubernetes.io/controller-uid": "5cb536f0-f656-4663-98f4-3c5481d9e9c9",
+                            "batch.kubernetes.io/job-name": "v4-sars-02",
+                            "controller-uid": "5cb536f0-f656-4663-98f4-3c5481d9e9c9",
+                            "job-name": "v4-sars-02",
+                            "shard": "02"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "set -eo pipefail\nSHARD_IDX=2\nSHARD_NAME=core_nt_shard_02\nDB_DIR=/workspace/blastdb\nQUERY_DIR=/workspace/queries\nRES_DIR=/workspace/results\nBLAST_RUNS=5\nmkdir -p $DB_DIR $QUERY_DIR $RES_DIR\n\necho \"================================================================\"\necho \"  V4 SARS-CoV-2 ORF1ab Benchmark — Shard $SHARD_IDX\"\necho \"  Query: NC_045512.2:266-21555 (21,290 bp)\"\necho \"  BLAST runs: $BLAST_RUNS\"\necho \"================================================================\"\n\n# ── Phase 1: Managed Identity Login ──\necho \"\"\necho \"=== Phase 1: Auth ===\"\nT_AUTH_S=$(date +%s)\nazcopy login --identity 2\u003e/dev/null || echo \"azcopy login warning\"\nT_AUTH_E=$(date +%s)\nAUTH_SEC=$((T_AUTH_E - T_AUTH_S))\necho \"TIMING auth $AUTH_SEC seconds\"\n\n# ── Phase 2: Download DB shard ──\necho \"\"\necho \"=== Phase 2: Download DB Shard ===\"\nT_DL_S=$(date +%s)\n\n# Download manifest\nT_MANIFEST_S=$(date +%s)\nazcopy cp \"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_02/core_nt_shard_02.manifest\"               /tmp/manifest.txt --log-level=WARNING 2\u003e/dev/null\nT_MANIFEST_E=$(date +%s)\nVOLUMES=$(cat /tmp/manifest.txt)\necho \"Manifest download: $((T_MANIFEST_E - T_MANIFEST_S))s\"\necho \"Volumes: $VOLUMES\"\n\n# Download each volume\nT_VOL_S=$(date +%s)\nVOL_COUNT=0\nfor VOL in $VOLUMES; do\n    echo \"  Downloading $VOL...\"\n    for EXT in nsq nhr nin nnd nni nog nos not; do\n        azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\" \"${DB_DIR}/${VOL}.${EXT}\"                       --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\n    done\n    VOL_COUNT=$((VOL_COUNT + 1))\ndone\nT_VOL_E=$(date +%s)\nVOL_SEC=$((T_VOL_E - T_VOL_S))\necho \"Volume download: ${VOL_SEC}s (${VOL_COUNT} volumes)\"\n\n# Build volume paths\nVOLPATHS=\"\"\nfor VOL in $VOLUMES; do\n    [ -n \"$VOLPATHS\" ] \u0026\u0026 VOLPATHS=\"$VOLPATHS \"\n    VOLPATHS=\"${VOLPATHS}${DB_DIR}/${VOL}\"\ndone\n\n# Download taxonomy files\nT_TAX_S=$(date +%s)\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\n    echo \"  Downloading $F...\"\n    azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\" \"${DB_DIR}/${F}\"                   --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\ndone\nT_TAX_E=$(date +%s)\nTAX_SEC=$((T_TAX_E - T_TAX_S))\necho \"Taxonomy download: ${TAX_SEC}s\"\n\nT_DL_E=$(date +%s)\nDL_TOTAL=$((T_DL_E - T_DL_S))\nDB_SIZE=$(du -sh $DB_DIR 2\u003e/dev/null | cut -f1)\nDB_FILES=$(ls ${DB_DIR}/*.nsq 2\u003e/dev/null | wc -l)\necho \"\"\necho \"TIMING db-download $DL_TOTAL seconds\"\necho \"DB size: $DB_SIZE (${DB_FILES} nsq volumes)\"\n\n# ── Phase 3: Download query ──\necho \"\"\necho \"=== Phase 3: Download Query ===\"\nT_QDL_S=$(date +%s)\nazcopy cp \"https://stgelb.blob.core.windows.net/queries/sars_cov2_orf1ab.fa\" \"${QUERY_DIR}/query.fa\"               --log-level=WARNING 2\u003e/dev/null\nT_QDL_E=$(date +%s)\nQDL_SEC=$((T_QDL_E - T_QDL_S))\nQSEQS=$(grep -c '^\u003e' ${QUERY_DIR}/query.fa)\nQLEN=$(grep -v '^\u003e' ${QUERY_DIR}/query.fa | tr -d '\\n' | wc -c)\necho \"TIMING query-download $QDL_SEC seconds\"\necho \"Query: $QSEQS sequence(s), $QLEN bp\"\n\n# ── Phase 4: BLAST × N runs ──\necho \"\"\necho \"=== Phase 4: BLAST Execution (5 runs) ===\"\nNCPU=$(nproc)\necho \"CPUs: $NCPU\"\n\nfor ((R=1; R\u003c=5; R++)); do\n    echo \"\"\n    echo \"--- Run $R/5 ---\"\n    OUTFILE=\"${RES_DIR}/shard_02_run${R}.out\"\n\n    T_BL_S=$(date +%s)\n    blastn -db \"$VOLPATHS\"                   -query \"${QUERY_DIR}/query.fa\"                   -max_target_seqs 500 -evalue 0.05                   -word_size 28 -dust yes -soft_masking true                   -outfmt 7                   -dbsize 978954058562                   -num_threads $NCPU                   -out \"$OUTFILE\" 2\u003e\u00261\n    T_BL_E=$(date +%s)\n\n    BL_SEC=$((T_BL_E - T_BL_S))\n    HITS=$(grep -vc '^#' \"$OUTFILE\" 2\u003e/dev/null || echo 0)\n    OUT_SIZE=$(wc -c \u003c \"$OUTFILE\" 2\u003e/dev/null || echo 0)\n    echo \"TIMING blast-run-$R $BL_SEC seconds\"\n    echo \"HITS run-$R $HITS\"\n    echo \"OUTPUT_SIZE run-$R $OUT_SIZE bytes\"\ndone\n\n# ── Phase 5: Upload results ──\necho \"\"\necho \"=== Phase 5: Upload Results ===\"\nT_UP_S=$(date +%s)\nfor ((R=1; R\u003c=5; R++)); do\n    OUTFILE=\"${RES_DIR}/shard_02_run${R}.out\"\n    gzip -f \"$OUTFILE\"\n    azcopy cp \"${OUTFILE}.gz\"                   \"https://stgelb.blob.core.windows.net/results/v4/V4-SARS-S10/shard_02_run${R}.out.gz\"                   --log-level=WARNING 2\u003e/dev/null || true\ndone\nT_UP_E=$(date +%s)\nUP_SEC=$((T_UP_E - T_UP_S))\necho \"TIMING upload $UP_SEC seconds\"\n\n# ── Summary ──\necho \"\"\necho \"================================================================\"\necho \"  SHARD $SHARD_IDX COMPLETE\"\necho \"================================================================\"\necho \"TIMING_SUMMARY auth=$AUTH_SEC db_download=$DL_TOTAL query_download=$QDL_SEC upload=$UP_SEC\"\necho \"SHARD_COMPLETE $SHARD_IDX\"\n"
+                                ],
+                                "command": [
+                                    "/bin/bash",
+                                    "-c"
+                                ],
+                                "image": "elbacr.azurecr.io/ncbi/elb:1.4.0",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "blast",
+                                "resources": {
+                                    "limits": {
+                                        "cpu": "15",
+                                        "memory": "110Gi"
+                                    },
+                                    "requests": {
+                                        "cpu": "8",
+                                        "memory": "80Gi"
+                                    }
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/workspace",
+                                        "name": "workspace"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeName": "aks-nodepool1-46214719-vmss000002",
+                        "restartPolicy": "Never",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30,
+                        "volumes": [
+                            {
+                                "hostPath": {
+                                    "path": "/mnt/workspace-v4-shard-02",
+                                    "type": "DirectoryOrCreate"
+                                },
+                                "name": "workspace"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "completionTime": "2026-04-30T09:00:59Z",
+                "conditions": [
+                    {
+                        "lastProbeTime": "2026-04-30T09:00:59Z",
+                        "lastTransitionTime": "2026-04-30T09:00:59Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "SuccessCriteriaMet"
+                    },
+                    {
+                        "lastProbeTime": "2026-04-30T09:00:59Z",
+                        "lastTransitionTime": "2026-04-30T09:00:59Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "Complete"
+                    }
+                ],
+                "ready": 0,
+                "startTime": "2026-04-30T08:54:53Z",
+                "succeeded": 1,
+                "terminating": 0,
+                "uncountedTerminatedPods": {}
+            }
+        },
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\",\"kind\":\"Job\",\"metadata\":{\"annotations\":{},\"labels\":{\"app\":\"v4-sars-blast\",\"shard\":\"03\"},\"name\":\"v4-sars-03\",\"namespace\":\"default\"},\"spec\":{\"activeDeadlineSeconds\":10800,\"backoffLimit\":1,\"template\":{\"metadata\":{\"labels\":{\"app\":\"v4-sars-blast\",\"shard\":\"03\"}},\"spec\":{\"containers\":[{\"args\":[\"set -eo pipefail\\nSHARD_IDX=3\\nSHARD_NAME=core_nt_shard_03\\nDB_DIR=/workspace/blastdb\\nQUERY_DIR=/workspace/queries\\nRES_DIR=/workspace/results\\nBLAST_RUNS=5\\nmkdir -p $DB_DIR $QUERY_DIR $RES_DIR\\n\\necho \\\"================================================================\\\"\\necho \\\"  V4 SARS-CoV-2 ORF1ab Benchmark — Shard $SHARD_IDX\\\"\\necho \\\"  Query: NC_045512.2:266-21555 (21,290 bp)\\\"\\necho \\\"  BLAST runs: $BLAST_RUNS\\\"\\necho \\\"================================================================\\\"\\n\\n# ── Phase 1: Managed Identity Login ──\\necho \\\"\\\"\\necho \\\"=== Phase 1: Auth ===\\\"\\nT_AUTH_S=$(date +%s)\\nazcopy login --identity 2\\u003e/dev/null || echo \\\"azcopy login warning\\\"\\nT_AUTH_E=$(date +%s)\\nAUTH_SEC=$((T_AUTH_E - T_AUTH_S))\\necho \\\"TIMING auth $AUTH_SEC seconds\\\"\\n\\n# ── Phase 2: Download DB shard ──\\necho \\\"\\\"\\necho \\\"=== Phase 2: Download DB Shard ===\\\"\\nT_DL_S=$(date +%s)\\n\\n# Download manifest\\nT_MANIFEST_S=$(date +%s)\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_03/core_nt_shard_03.manifest\\\"               /tmp/manifest.txt --log-level=WARNING 2\\u003e/dev/null\\nT_MANIFEST_E=$(date +%s)\\nVOLUMES=$(cat /tmp/manifest.txt)\\necho \\\"Manifest download: $((T_MANIFEST_E - T_MANIFEST_S))s\\\"\\necho \\\"Volumes: $VOLUMES\\\"\\n\\n# Download each volume\\nT_VOL_S=$(date +%s)\\nVOL_COUNT=0\\nfor VOL in $VOLUMES; do\\n    echo \\\"  Downloading $VOL...\\\"\\n    for EXT in nsq nhr nin nnd nni nog nos not; do\\n        azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\\\" \\\"${DB_DIR}/${VOL}.${EXT}\\\"                       --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\n    done\\n    VOL_COUNT=$((VOL_COUNT + 1))\\ndone\\nT_VOL_E=$(date +%s)\\nVOL_SEC=$((T_VOL_E - T_VOL_S))\\necho \\\"Volume download: ${VOL_SEC}s (${VOL_COUNT} volumes)\\\"\\n\\n# Build volume paths\\nVOLPATHS=\\\"\\\"\\nfor VOL in $VOLUMES; do\\n    [ -n \\\"$VOLPATHS\\\" ] \\u0026\\u0026 VOLPATHS=\\\"$VOLPATHS \\\"\\n    VOLPATHS=\\\"${VOLPATHS}${DB_DIR}/${VOL}\\\"\\ndone\\n\\n# Download taxonomy files\\nT_TAX_S=$(date +%s)\\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\\n    echo \\\"  Downloading $F...\\\"\\n    azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\\\" \\\"${DB_DIR}/${F}\\\"                   --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\ndone\\nT_TAX_E=$(date +%s)\\nTAX_SEC=$((T_TAX_E - T_TAX_S))\\necho \\\"Taxonomy download: ${TAX_SEC}s\\\"\\n\\nT_DL_E=$(date +%s)\\nDL_TOTAL=$((T_DL_E - T_DL_S))\\nDB_SIZE=$(du -sh $DB_DIR 2\\u003e/dev/null | cut -f1)\\nDB_FILES=$(ls ${DB_DIR}/*.nsq 2\\u003e/dev/null | wc -l)\\necho \\\"\\\"\\necho \\\"TIMING db-download $DL_TOTAL seconds\\\"\\necho \\\"DB size: $DB_SIZE (${DB_FILES} nsq volumes)\\\"\\n\\n# ── Phase 3: Download query ──\\necho \\\"\\\"\\necho \\\"=== Phase 3: Download Query ===\\\"\\nT_QDL_S=$(date +%s)\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/queries/sars_cov2_orf1ab.fa\\\" \\\"${QUERY_DIR}/query.fa\\\"               --log-level=WARNING 2\\u003e/dev/null\\nT_QDL_E=$(date +%s)\\nQDL_SEC=$((T_QDL_E - T_QDL_S))\\nQSEQS=$(grep -c '^\\u003e' ${QUERY_DIR}/query.fa)\\nQLEN=$(grep -v '^\\u003e' ${QUERY_DIR}/query.fa | tr -d '\\\\n' | wc -c)\\necho \\\"TIMING query-download $QDL_SEC seconds\\\"\\necho \\\"Query: $QSEQS sequence(s), $QLEN bp\\\"\\n\\n# ── Phase 4: BLAST × N runs ──\\necho \\\"\\\"\\necho \\\"=== Phase 4: BLAST Execution (5 runs) ===\\\"\\nNCPU=$(nproc)\\necho \\\"CPUs: $NCPU\\\"\\n\\nfor ((R=1; R\\u003c=5; R++)); do\\n    echo \\\"\\\"\\n    echo \\\"--- Run $R/5 ---\\\"\\n    OUTFILE=\\\"${RES_DIR}/shard_03_run${R}.out\\\"\\n\\n    T_BL_S=$(date +%s)\\n    blastn -db \\\"$VOLPATHS\\\"                   -query \\\"${QUERY_DIR}/query.fa\\\"                   -max_target_seqs 500 -evalue 0.05                   -word_size 28 -dust yes -soft_masking true                   -outfmt 7                   -dbsize 978954058562                   -num_threads $NCPU                   -out \\\"$OUTFILE\\\" 2\\u003e\\u00261\\n    T_BL_E=$(date +%s)\\n\\n    BL_SEC=$((T_BL_E - T_BL_S))\\n    HITS=$(grep -vc '^#' \\\"$OUTFILE\\\" 2\\u003e/dev/null || echo 0)\\n    OUT_SIZE=$(wc -c \\u003c \\\"$OUTFILE\\\" 2\\u003e/dev/null || echo 0)\\n    echo \\\"TIMING blast-run-$R $BL_SEC seconds\\\"\\n    echo \\\"HITS run-$R $HITS\\\"\\n    echo \\\"OUTPUT_SIZE run-$R $OUT_SIZE bytes\\\"\\ndone\\n\\n# ── Phase 5: Upload results ──\\necho \\\"\\\"\\necho \\\"=== Phase 5: Upload Results ===\\\"\\nT_UP_S=$(date +%s)\\nfor ((R=1; R\\u003c=5; R++)); do\\n    OUTFILE=\\\"${RES_DIR}/shard_03_run${R}.out\\\"\\n    gzip -f \\\"$OUTFILE\\\"\\n    azcopy cp \\\"${OUTFILE}.gz\\\"                   \\\"https://stgelb.blob.core.windows.net/results/v4/V4-SARS-S10/shard_03_run${R}.out.gz\\\"                   --log-level=WARNING 2\\u003e/dev/null || true\\ndone\\nT_UP_E=$(date +%s)\\nUP_SEC=$((T_UP_E - T_UP_S))\\necho \\\"TIMING upload $UP_SEC seconds\\\"\\n\\n# ── Summary ──\\necho \\\"\\\"\\necho \\\"================================================================\\\"\\necho \\\"  SHARD $SHARD_IDX COMPLETE\\\"\\necho \\\"================================================================\\\"\\necho \\\"TIMING_SUMMARY auth=$AUTH_SEC db_download=$DL_TOTAL query_download=$QDL_SEC upload=$UP_SEC\\\"\\necho \\\"SHARD_COMPLETE $SHARD_IDX\\\"\\n\"],\"command\":[\"/bin/bash\",\"-c\"],\"image\":\"elbacr.azurecr.io/ncbi/elb:1.4.0\",\"name\":\"blast\",\"resources\":{\"limits\":{\"cpu\":\"15\",\"memory\":\"110Gi\"},\"requests\":{\"cpu\":\"8\",\"memory\":\"80Gi\"}},\"volumeMounts\":[{\"mountPath\":\"/workspace\",\"name\":\"workspace\"}]}],\"nodeName\":\"aks-nodepool1-46214719-vmss000003\",\"restartPolicy\":\"Never\",\"volumes\":[{\"hostPath\":{\"path\":\"/mnt/workspace-v4-shard-03\",\"type\":\"DirectoryOrCreate\"},\"name\":\"workspace\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-04-30T08:54:54Z",
+                "generation": 1,
+                "labels": {
+                    "app": "v4-sars-blast",
+                    "shard": "03"
+                },
+                "name": "v4-sars-03",
+                "namespace": "default",
+                "resourceVersion": "8332",
+                "uid": "ec8500bc-52e1-42ff-9e49-59bf0e054da4"
+            },
+            "spec": {
+                "activeDeadlineSeconds": 10800,
+                "backoffLimit": 1,
+                "completionMode": "NonIndexed",
+                "completions": 1,
+                "manualSelector": false,
+                "parallelism": 1,
+                "podReplacementPolicy": "TerminatingOrFailed",
+                "selector": {
+                    "matchLabels": {
+                        "batch.kubernetes.io/controller-uid": "ec8500bc-52e1-42ff-9e49-59bf0e054da4"
+                    }
+                },
+                "suspend": false,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "v4-sars-blast",
+                            "batch.kubernetes.io/controller-uid": "ec8500bc-52e1-42ff-9e49-59bf0e054da4",
+                            "batch.kubernetes.io/job-name": "v4-sars-03",
+                            "controller-uid": "ec8500bc-52e1-42ff-9e49-59bf0e054da4",
+                            "job-name": "v4-sars-03",
+                            "shard": "03"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "set -eo pipefail\nSHARD_IDX=3\nSHARD_NAME=core_nt_shard_03\nDB_DIR=/workspace/blastdb\nQUERY_DIR=/workspace/queries\nRES_DIR=/workspace/results\nBLAST_RUNS=5\nmkdir -p $DB_DIR $QUERY_DIR $RES_DIR\n\necho \"================================================================\"\necho \"  V4 SARS-CoV-2 ORF1ab Benchmark — Shard $SHARD_IDX\"\necho \"  Query: NC_045512.2:266-21555 (21,290 bp)\"\necho \"  BLAST runs: $BLAST_RUNS\"\necho \"================================================================\"\n\n# ── Phase 1: Managed Identity Login ──\necho \"\"\necho \"=== Phase 1: Auth ===\"\nT_AUTH_S=$(date +%s)\nazcopy login --identity 2\u003e/dev/null || echo \"azcopy login warning\"\nT_AUTH_E=$(date +%s)\nAUTH_SEC=$((T_AUTH_E - T_AUTH_S))\necho \"TIMING auth $AUTH_SEC seconds\"\n\n# ── Phase 2: Download DB shard ──\necho \"\"\necho \"=== Phase 2: Download DB Shard ===\"\nT_DL_S=$(date +%s)\n\n# Download manifest\nT_MANIFEST_S=$(date +%s)\nazcopy cp \"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_03/core_nt_shard_03.manifest\"               /tmp/manifest.txt --log-level=WARNING 2\u003e/dev/null\nT_MANIFEST_E=$(date +%s)\nVOLUMES=$(cat /tmp/manifest.txt)\necho \"Manifest download: $((T_MANIFEST_E - T_MANIFEST_S))s\"\necho \"Volumes: $VOLUMES\"\n\n# Download each volume\nT_VOL_S=$(date +%s)\nVOL_COUNT=0\nfor VOL in $VOLUMES; do\n    echo \"  Downloading $VOL...\"\n    for EXT in nsq nhr nin nnd nni nog nos not; do\n        azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\" \"${DB_DIR}/${VOL}.${EXT}\"                       --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\n    done\n    VOL_COUNT=$((VOL_COUNT + 1))\ndone\nT_VOL_E=$(date +%s)\nVOL_SEC=$((T_VOL_E - T_VOL_S))\necho \"Volume download: ${VOL_SEC}s (${VOL_COUNT} volumes)\"\n\n# Build volume paths\nVOLPATHS=\"\"\nfor VOL in $VOLUMES; do\n    [ -n \"$VOLPATHS\" ] \u0026\u0026 VOLPATHS=\"$VOLPATHS \"\n    VOLPATHS=\"${VOLPATHS}${DB_DIR}/${VOL}\"\ndone\n\n# Download taxonomy files\nT_TAX_S=$(date +%s)\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\n    echo \"  Downloading $F...\"\n    azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\" \"${DB_DIR}/${F}\"                   --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\ndone\nT_TAX_E=$(date +%s)\nTAX_SEC=$((T_TAX_E - T_TAX_S))\necho \"Taxonomy download: ${TAX_SEC}s\"\n\nT_DL_E=$(date +%s)\nDL_TOTAL=$((T_DL_E - T_DL_S))\nDB_SIZE=$(du -sh $DB_DIR 2\u003e/dev/null | cut -f1)\nDB_FILES=$(ls ${DB_DIR}/*.nsq 2\u003e/dev/null | wc -l)\necho \"\"\necho \"TIMING db-download $DL_TOTAL seconds\"\necho \"DB size: $DB_SIZE (${DB_FILES} nsq volumes)\"\n\n# ── Phase 3: Download query ──\necho \"\"\necho \"=== Phase 3: Download Query ===\"\nT_QDL_S=$(date +%s)\nazcopy cp \"https://stgelb.blob.core.windows.net/queries/sars_cov2_orf1ab.fa\" \"${QUERY_DIR}/query.fa\"               --log-level=WARNING 2\u003e/dev/null\nT_QDL_E=$(date +%s)\nQDL_SEC=$((T_QDL_E - T_QDL_S))\nQSEQS=$(grep -c '^\u003e' ${QUERY_DIR}/query.fa)\nQLEN=$(grep -v '^\u003e' ${QUERY_DIR}/query.fa | tr -d '\\n' | wc -c)\necho \"TIMING query-download $QDL_SEC seconds\"\necho \"Query: $QSEQS sequence(s), $QLEN bp\"\n\n# ── Phase 4: BLAST × N runs ──\necho \"\"\necho \"=== Phase 4: BLAST Execution (5 runs) ===\"\nNCPU=$(nproc)\necho \"CPUs: $NCPU\"\n\nfor ((R=1; R\u003c=5; R++)); do\n    echo \"\"\n    echo \"--- Run $R/5 ---\"\n    OUTFILE=\"${RES_DIR}/shard_03_run${R}.out\"\n\n    T_BL_S=$(date +%s)\n    blastn -db \"$VOLPATHS\"                   -query \"${QUERY_DIR}/query.fa\"                   -max_target_seqs 500 -evalue 0.05                   -word_size 28 -dust yes -soft_masking true                   -outfmt 7                   -dbsize 978954058562                   -num_threads $NCPU                   -out \"$OUTFILE\" 2\u003e\u00261\n    T_BL_E=$(date +%s)\n\n    BL_SEC=$((T_BL_E - T_BL_S))\n    HITS=$(grep -vc '^#' \"$OUTFILE\" 2\u003e/dev/null || echo 0)\n    OUT_SIZE=$(wc -c \u003c \"$OUTFILE\" 2\u003e/dev/null || echo 0)\n    echo \"TIMING blast-run-$R $BL_SEC seconds\"\n    echo \"HITS run-$R $HITS\"\n    echo \"OUTPUT_SIZE run-$R $OUT_SIZE bytes\"\ndone\n\n# ── Phase 5: Upload results ──\necho \"\"\necho \"=== Phase 5: Upload Results ===\"\nT_UP_S=$(date +%s)\nfor ((R=1; R\u003c=5; R++)); do\n    OUTFILE=\"${RES_DIR}/shard_03_run${R}.out\"\n    gzip -f \"$OUTFILE\"\n    azcopy cp \"${OUTFILE}.gz\"                   \"https://stgelb.blob.core.windows.net/results/v4/V4-SARS-S10/shard_03_run${R}.out.gz\"                   --log-level=WARNING 2\u003e/dev/null || true\ndone\nT_UP_E=$(date +%s)\nUP_SEC=$((T_UP_E - T_UP_S))\necho \"TIMING upload $UP_SEC seconds\"\n\n# ── Summary ──\necho \"\"\necho \"================================================================\"\necho \"  SHARD $SHARD_IDX COMPLETE\"\necho \"================================================================\"\necho \"TIMING_SUMMARY auth=$AUTH_SEC db_download=$DL_TOTAL query_download=$QDL_SEC upload=$UP_SEC\"\necho \"SHARD_COMPLETE $SHARD_IDX\"\n"
+                                ],
+                                "command": [
+                                    "/bin/bash",
+                                    "-c"
+                                ],
+                                "image": "elbacr.azurecr.io/ncbi/elb:1.4.0",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "blast",
+                                "resources": {
+                                    "limits": {
+                                        "cpu": "15",
+                                        "memory": "110Gi"
+                                    },
+                                    "requests": {
+                                        "cpu": "8",
+                                        "memory": "80Gi"
+                                    }
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/workspace",
+                                        "name": "workspace"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeName": "aks-nodepool1-46214719-vmss000003",
+                        "restartPolicy": "Never",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30,
+                        "volumes": [
+                            {
+                                "hostPath": {
+                                    "path": "/mnt/workspace-v4-shard-03",
+                                    "type": "DirectoryOrCreate"
+                                },
+                                "name": "workspace"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "completionTime": "2026-04-30T09:00:51Z",
+                "conditions": [
+                    {
+                        "lastProbeTime": "2026-04-30T09:00:51Z",
+                        "lastTransitionTime": "2026-04-30T09:00:51Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "SuccessCriteriaMet"
+                    },
+                    {
+                        "lastProbeTime": "2026-04-30T09:00:51Z",
+                        "lastTransitionTime": "2026-04-30T09:00:51Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "Complete"
+                    }
+                ],
+                "ready": 0,
+                "startTime": "2026-04-30T08:54:54Z",
+                "succeeded": 1,
+                "terminating": 0,
+                "uncountedTerminatedPods": {}
+            }
+        },
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\",\"kind\":\"Job\",\"metadata\":{\"annotations\":{},\"labels\":{\"app\":\"v4-sars-blast\",\"shard\":\"04\"},\"name\":\"v4-sars-04\",\"namespace\":\"default\"},\"spec\":{\"activeDeadlineSeconds\":10800,\"backoffLimit\":1,\"template\":{\"metadata\":{\"labels\":{\"app\":\"v4-sars-blast\",\"shard\":\"04\"}},\"spec\":{\"containers\":[{\"args\":[\"set -eo pipefail\\nSHARD_IDX=4\\nSHARD_NAME=core_nt_shard_04\\nDB_DIR=/workspace/blastdb\\nQUERY_DIR=/workspace/queries\\nRES_DIR=/workspace/results\\nBLAST_RUNS=5\\nmkdir -p $DB_DIR $QUERY_DIR $RES_DIR\\n\\necho \\\"================================================================\\\"\\necho \\\"  V4 SARS-CoV-2 ORF1ab Benchmark — Shard $SHARD_IDX\\\"\\necho \\\"  Query: NC_045512.2:266-21555 (21,290 bp)\\\"\\necho \\\"  BLAST runs: $BLAST_RUNS\\\"\\necho \\\"================================================================\\\"\\n\\n# ── Phase 1: Managed Identity Login ──\\necho \\\"\\\"\\necho \\\"=== Phase 1: Auth ===\\\"\\nT_AUTH_S=$(date +%s)\\nazcopy login --identity 2\\u003e/dev/null || echo \\\"azcopy login warning\\\"\\nT_AUTH_E=$(date +%s)\\nAUTH_SEC=$((T_AUTH_E - T_AUTH_S))\\necho \\\"TIMING auth $AUTH_SEC seconds\\\"\\n\\n# ── Phase 2: Download DB shard ──\\necho \\\"\\\"\\necho \\\"=== Phase 2: Download DB Shard ===\\\"\\nT_DL_S=$(date +%s)\\n\\n# Download manifest\\nT_MANIFEST_S=$(date +%s)\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_04/core_nt_shard_04.manifest\\\"               /tmp/manifest.txt --log-level=WARNING 2\\u003e/dev/null\\nT_MANIFEST_E=$(date +%s)\\nVOLUMES=$(cat /tmp/manifest.txt)\\necho \\\"Manifest download: $((T_MANIFEST_E - T_MANIFEST_S))s\\\"\\necho \\\"Volumes: $VOLUMES\\\"\\n\\n# Download each volume\\nT_VOL_S=$(date +%s)\\nVOL_COUNT=0\\nfor VOL in $VOLUMES; do\\n    echo \\\"  Downloading $VOL...\\\"\\n    for EXT in nsq nhr nin nnd nni nog nos not; do\\n        azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\\\" \\\"${DB_DIR}/${VOL}.${EXT}\\\"                       --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\n    done\\n    VOL_COUNT=$((VOL_COUNT + 1))\\ndone\\nT_VOL_E=$(date +%s)\\nVOL_SEC=$((T_VOL_E - T_VOL_S))\\necho \\\"Volume download: ${VOL_SEC}s (${VOL_COUNT} volumes)\\\"\\n\\n# Build volume paths\\nVOLPATHS=\\\"\\\"\\nfor VOL in $VOLUMES; do\\n    [ -n \\\"$VOLPATHS\\\" ] \\u0026\\u0026 VOLPATHS=\\\"$VOLPATHS \\\"\\n    VOLPATHS=\\\"${VOLPATHS}${DB_DIR}/${VOL}\\\"\\ndone\\n\\n# Download taxonomy files\\nT_TAX_S=$(date +%s)\\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\\n    echo \\\"  Downloading $F...\\\"\\n    azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\\\" \\\"${DB_DIR}/${F}\\\"                   --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\ndone\\nT_TAX_E=$(date +%s)\\nTAX_SEC=$((T_TAX_E - T_TAX_S))\\necho \\\"Taxonomy download: ${TAX_SEC}s\\\"\\n\\nT_DL_E=$(date +%s)\\nDL_TOTAL=$((T_DL_E - T_DL_S))\\nDB_SIZE=$(du -sh $DB_DIR 2\\u003e/dev/null | cut -f1)\\nDB_FILES=$(ls ${DB_DIR}/*.nsq 2\\u003e/dev/null | wc -l)\\necho \\\"\\\"\\necho \\\"TIMING db-download $DL_TOTAL seconds\\\"\\necho \\\"DB size: $DB_SIZE (${DB_FILES} nsq volumes)\\\"\\n\\n# ── Phase 3: Download query ──\\necho \\\"\\\"\\necho \\\"=== Phase 3: Download Query ===\\\"\\nT_QDL_S=$(date +%s)\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/queries/sars_cov2_orf1ab.fa\\\" \\\"${QUERY_DIR}/query.fa\\\"               --log-level=WARNING 2\\u003e/dev/null\\nT_QDL_E=$(date +%s)\\nQDL_SEC=$((T_QDL_E - T_QDL_S))\\nQSEQS=$(grep -c '^\\u003e' ${QUERY_DIR}/query.fa)\\nQLEN=$(grep -v '^\\u003e' ${QUERY_DIR}/query.fa | tr -d '\\\\n' | wc -c)\\necho \\\"TIMING query-download $QDL_SEC seconds\\\"\\necho \\\"Query: $QSEQS sequence(s), $QLEN bp\\\"\\n\\n# ── Phase 4: BLAST × N runs ──\\necho \\\"\\\"\\necho \\\"=== Phase 4: BLAST Execution (5 runs) ===\\\"\\nNCPU=$(nproc)\\necho \\\"CPUs: $NCPU\\\"\\n\\nfor ((R=1; R\\u003c=5; R++)); do\\n    echo \\\"\\\"\\n    echo \\\"--- Run $R/5 ---\\\"\\n    OUTFILE=\\\"${RES_DIR}/shard_04_run${R}.out\\\"\\n\\n    T_BL_S=$(date +%s)\\n    blastn -db \\\"$VOLPATHS\\\"                   -query \\\"${QUERY_DIR}/query.fa\\\"                   -max_target_seqs 500 -evalue 0.05                   -word_size 28 -dust yes -soft_masking true                   -outfmt 7                   -dbsize 978954058562                   -num_threads $NCPU                   -out \\\"$OUTFILE\\\" 2\\u003e\\u00261\\n    T_BL_E=$(date +%s)\\n\\n    BL_SEC=$((T_BL_E - T_BL_S))\\n    HITS=$(grep -vc '^#' \\\"$OUTFILE\\\" 2\\u003e/dev/null || echo 0)\\n    OUT_SIZE=$(wc -c \\u003c \\\"$OUTFILE\\\" 2\\u003e/dev/null || echo 0)\\n    echo \\\"TIMING blast-run-$R $BL_SEC seconds\\\"\\n    echo \\\"HITS run-$R $HITS\\\"\\n    echo \\\"OUTPUT_SIZE run-$R $OUT_SIZE bytes\\\"\\ndone\\n\\n# ── Phase 5: Upload results ──\\necho \\\"\\\"\\necho \\\"=== Phase 5: Upload Results ===\\\"\\nT_UP_S=$(date +%s)\\nfor ((R=1; R\\u003c=5; R++)); do\\n    OUTFILE=\\\"${RES_DIR}/shard_04_run${R}.out\\\"\\n    gzip -f \\\"$OUTFILE\\\"\\n    azcopy cp \\\"${OUTFILE}.gz\\\"                   \\\"https://stgelb.blob.core.windows.net/results/v4/V4-SARS-S10/shard_04_run${R}.out.gz\\\"                   --log-level=WARNING 2\\u003e/dev/null || true\\ndone\\nT_UP_E=$(date +%s)\\nUP_SEC=$((T_UP_E - T_UP_S))\\necho \\\"TIMING upload $UP_SEC seconds\\\"\\n\\n# ── Summary ──\\necho \\\"\\\"\\necho \\\"================================================================\\\"\\necho \\\"  SHARD $SHARD_IDX COMPLETE\\\"\\necho \\\"================================================================\\\"\\necho \\\"TIMING_SUMMARY auth=$AUTH_SEC db_download=$DL_TOTAL query_download=$QDL_SEC upload=$UP_SEC\\\"\\necho \\\"SHARD_COMPLETE $SHARD_IDX\\\"\\n\"],\"command\":[\"/bin/bash\",\"-c\"],\"image\":\"elbacr.azurecr.io/ncbi/elb:1.4.0\",\"name\":\"blast\",\"resources\":{\"limits\":{\"cpu\":\"15\",\"memory\":\"110Gi\"},\"requests\":{\"cpu\":\"8\",\"memory\":\"80Gi\"}},\"volumeMounts\":[{\"mountPath\":\"/workspace\",\"name\":\"workspace\"}]}],\"nodeName\":\"aks-nodepool1-46214719-vmss000004\",\"restartPolicy\":\"Never\",\"volumes\":[{\"hostPath\":{\"path\":\"/mnt/workspace-v4-shard-04\",\"type\":\"DirectoryOrCreate\"},\"name\":\"workspace\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-04-30T08:54:54Z",
+                "generation": 1,
+                "labels": {
+                    "app": "v4-sars-blast",
+                    "shard": "04"
+                },
+                "name": "v4-sars-04",
+                "namespace": "default",
+                "resourceVersion": "8541",
+                "uid": "ec8a0b26-57df-46b0-afc8-0c344b764bdf"
+            },
+            "spec": {
+                "activeDeadlineSeconds": 10800,
+                "backoffLimit": 1,
+                "completionMode": "NonIndexed",
+                "completions": 1,
+                "manualSelector": false,
+                "parallelism": 1,
+                "podReplacementPolicy": "TerminatingOrFailed",
+                "selector": {
+                    "matchLabels": {
+                        "batch.kubernetes.io/controller-uid": "ec8a0b26-57df-46b0-afc8-0c344b764bdf"
+                    }
+                },
+                "suspend": false,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "v4-sars-blast",
+                            "batch.kubernetes.io/controller-uid": "ec8a0b26-57df-46b0-afc8-0c344b764bdf",
+                            "batch.kubernetes.io/job-name": "v4-sars-04",
+                            "controller-uid": "ec8a0b26-57df-46b0-afc8-0c344b764bdf",
+                            "job-name": "v4-sars-04",
+                            "shard": "04"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "set -eo pipefail\nSHARD_IDX=4\nSHARD_NAME=core_nt_shard_04\nDB_DIR=/workspace/blastdb\nQUERY_DIR=/workspace/queries\nRES_DIR=/workspace/results\nBLAST_RUNS=5\nmkdir -p $DB_DIR $QUERY_DIR $RES_DIR\n\necho \"================================================================\"\necho \"  V4 SARS-CoV-2 ORF1ab Benchmark — Shard $SHARD_IDX\"\necho \"  Query: NC_045512.2:266-21555 (21,290 bp)\"\necho \"  BLAST runs: $BLAST_RUNS\"\necho \"================================================================\"\n\n# ── Phase 1: Managed Identity Login ──\necho \"\"\necho \"=== Phase 1: Auth ===\"\nT_AUTH_S=$(date +%s)\nazcopy login --identity 2\u003e/dev/null || echo \"azcopy login warning\"\nT_AUTH_E=$(date +%s)\nAUTH_SEC=$((T_AUTH_E - T_AUTH_S))\necho \"TIMING auth $AUTH_SEC seconds\"\n\n# ── Phase 2: Download DB shard ──\necho \"\"\necho \"=== Phase 2: Download DB Shard ===\"\nT_DL_S=$(date +%s)\n\n# Download manifest\nT_MANIFEST_S=$(date +%s)\nazcopy cp \"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_04/core_nt_shard_04.manifest\"               /tmp/manifest.txt --log-level=WARNING 2\u003e/dev/null\nT_MANIFEST_E=$(date +%s)\nVOLUMES=$(cat /tmp/manifest.txt)\necho \"Manifest download: $((T_MANIFEST_E - T_MANIFEST_S))s\"\necho \"Volumes: $VOLUMES\"\n\n# Download each volume\nT_VOL_S=$(date +%s)\nVOL_COUNT=0\nfor VOL in $VOLUMES; do\n    echo \"  Downloading $VOL...\"\n    for EXT in nsq nhr nin nnd nni nog nos not; do\n        azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\" \"${DB_DIR}/${VOL}.${EXT}\"                       --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\n    done\n    VOL_COUNT=$((VOL_COUNT + 1))\ndone\nT_VOL_E=$(date +%s)\nVOL_SEC=$((T_VOL_E - T_VOL_S))\necho \"Volume download: ${VOL_SEC}s (${VOL_COUNT} volumes)\"\n\n# Build volume paths\nVOLPATHS=\"\"\nfor VOL in $VOLUMES; do\n    [ -n \"$VOLPATHS\" ] \u0026\u0026 VOLPATHS=\"$VOLPATHS \"\n    VOLPATHS=\"${VOLPATHS}${DB_DIR}/${VOL}\"\ndone\n\n# Download taxonomy files\nT_TAX_S=$(date +%s)\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\n    echo \"  Downloading $F...\"\n    azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\" \"${DB_DIR}/${F}\"                   --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\ndone\nT_TAX_E=$(date +%s)\nTAX_SEC=$((T_TAX_E - T_TAX_S))\necho \"Taxonomy download: ${TAX_SEC}s\"\n\nT_DL_E=$(date +%s)\nDL_TOTAL=$((T_DL_E - T_DL_S))\nDB_SIZE=$(du -sh $DB_DIR 2\u003e/dev/null | cut -f1)\nDB_FILES=$(ls ${DB_DIR}/*.nsq 2\u003e/dev/null | wc -l)\necho \"\"\necho \"TIMING db-download $DL_TOTAL seconds\"\necho \"DB size: $DB_SIZE (${DB_FILES} nsq volumes)\"\n\n# ── Phase 3: Download query ──\necho \"\"\necho \"=== Phase 3: Download Query ===\"\nT_QDL_S=$(date +%s)\nazcopy cp \"https://stgelb.blob.core.windows.net/queries/sars_cov2_orf1ab.fa\" \"${QUERY_DIR}/query.fa\"               --log-level=WARNING 2\u003e/dev/null\nT_QDL_E=$(date +%s)\nQDL_SEC=$((T_QDL_E - T_QDL_S))\nQSEQS=$(grep -c '^\u003e' ${QUERY_DIR}/query.fa)\nQLEN=$(grep -v '^\u003e' ${QUERY_DIR}/query.fa | tr -d '\\n' | wc -c)\necho \"TIMING query-download $QDL_SEC seconds\"\necho \"Query: $QSEQS sequence(s), $QLEN bp\"\n\n# ── Phase 4: BLAST × N runs ──\necho \"\"\necho \"=== Phase 4: BLAST Execution (5 runs) ===\"\nNCPU=$(nproc)\necho \"CPUs: $NCPU\"\n\nfor ((R=1; R\u003c=5; R++)); do\n    echo \"\"\n    echo \"--- Run $R/5 ---\"\n    OUTFILE=\"${RES_DIR}/shard_04_run${R}.out\"\n\n    T_BL_S=$(date +%s)\n    blastn -db \"$VOLPATHS\"                   -query \"${QUERY_DIR}/query.fa\"                   -max_target_seqs 500 -evalue 0.05                   -word_size 28 -dust yes -soft_masking true                   -outfmt 7                   -dbsize 978954058562                   -num_threads $NCPU                   -out \"$OUTFILE\" 2\u003e\u00261\n    T_BL_E=$(date +%s)\n\n    BL_SEC=$((T_BL_E - T_BL_S))\n    HITS=$(grep -vc '^#' \"$OUTFILE\" 2\u003e/dev/null || echo 0)\n    OUT_SIZE=$(wc -c \u003c \"$OUTFILE\" 2\u003e/dev/null || echo 0)\n    echo \"TIMING blast-run-$R $BL_SEC seconds\"\n    echo \"HITS run-$R $HITS\"\n    echo \"OUTPUT_SIZE run-$R $OUT_SIZE bytes\"\ndone\n\n# ── Phase 5: Upload results ──\necho \"\"\necho \"=== Phase 5: Upload Results ===\"\nT_UP_S=$(date +%s)\nfor ((R=1; R\u003c=5; R++)); do\n    OUTFILE=\"${RES_DIR}/shard_04_run${R}.out\"\n    gzip -f \"$OUTFILE\"\n    azcopy cp \"${OUTFILE}.gz\"                   \"https://stgelb.blob.core.windows.net/results/v4/V4-SARS-S10/shard_04_run${R}.out.gz\"                   --log-level=WARNING 2\u003e/dev/null || true\ndone\nT_UP_E=$(date +%s)\nUP_SEC=$((T_UP_E - T_UP_S))\necho \"TIMING upload $UP_SEC seconds\"\n\n# ── Summary ──\necho \"\"\necho \"================================================================\"\necho \"  SHARD $SHARD_IDX COMPLETE\"\necho \"================================================================\"\necho \"TIMING_SUMMARY auth=$AUTH_SEC db_download=$DL_TOTAL query_download=$QDL_SEC upload=$UP_SEC\"\necho \"SHARD_COMPLETE $SHARD_IDX\"\n"
+                                ],
+                                "command": [
+                                    "/bin/bash",
+                                    "-c"
+                                ],
+                                "image": "elbacr.azurecr.io/ncbi/elb:1.4.0",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "blast",
+                                "resources": {
+                                    "limits": {
+                                        "cpu": "15",
+                                        "memory": "110Gi"
+                                    },
+                                    "requests": {
+                                        "cpu": "8",
+                                        "memory": "80Gi"
+                                    }
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/workspace",
+                                        "name": "workspace"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeName": "aks-nodepool1-46214719-vmss000004",
+                        "restartPolicy": "Never",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30,
+                        "volumes": [
+                            {
+                                "hostPath": {
+                                    "path": "/mnt/workspace-v4-shard-04",
+                                    "type": "DirectoryOrCreate"
+                                },
+                                "name": "workspace"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "completionTime": "2026-04-30T09:01:25Z",
+                "conditions": [
+                    {
+                        "lastProbeTime": "2026-04-30T09:01:25Z",
+                        "lastTransitionTime": "2026-04-30T09:01:25Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "SuccessCriteriaMet"
+                    },
+                    {
+                        "lastProbeTime": "2026-04-30T09:01:25Z",
+                        "lastTransitionTime": "2026-04-30T09:01:25Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "Complete"
+                    }
+                ],
+                "ready": 0,
+                "startTime": "2026-04-30T08:54:54Z",
+                "succeeded": 1,
+                "terminating": 0,
+                "uncountedTerminatedPods": {}
+            }
+        },
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\",\"kind\":\"Job\",\"metadata\":{\"annotations\":{},\"labels\":{\"app\":\"v4-sars-blast\",\"shard\":\"05\"},\"name\":\"v4-sars-05\",\"namespace\":\"default\"},\"spec\":{\"activeDeadlineSeconds\":10800,\"backoffLimit\":1,\"template\":{\"metadata\":{\"labels\":{\"app\":\"v4-sars-blast\",\"shard\":\"05\"}},\"spec\":{\"containers\":[{\"args\":[\"set -eo pipefail\\nSHARD_IDX=5\\nSHARD_NAME=core_nt_shard_05\\nDB_DIR=/workspace/blastdb\\nQUERY_DIR=/workspace/queries\\nRES_DIR=/workspace/results\\nBLAST_RUNS=5\\nmkdir -p $DB_DIR $QUERY_DIR $RES_DIR\\n\\necho \\\"================================================================\\\"\\necho \\\"  V4 SARS-CoV-2 ORF1ab Benchmark — Shard $SHARD_IDX\\\"\\necho \\\"  Query: NC_045512.2:266-21555 (21,290 bp)\\\"\\necho \\\"  BLAST runs: $BLAST_RUNS\\\"\\necho \\\"================================================================\\\"\\n\\n# ── Phase 1: Managed Identity Login ──\\necho \\\"\\\"\\necho \\\"=== Phase 1: Auth ===\\\"\\nT_AUTH_S=$(date +%s)\\nazcopy login --identity 2\\u003e/dev/null || echo \\\"azcopy login warning\\\"\\nT_AUTH_E=$(date +%s)\\nAUTH_SEC=$((T_AUTH_E - T_AUTH_S))\\necho \\\"TIMING auth $AUTH_SEC seconds\\\"\\n\\n# ── Phase 2: Download DB shard ──\\necho \\\"\\\"\\necho \\\"=== Phase 2: Download DB Shard ===\\\"\\nT_DL_S=$(date +%s)\\n\\n# Download manifest\\nT_MANIFEST_S=$(date +%s)\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_05/core_nt_shard_05.manifest\\\"               /tmp/manifest.txt --log-level=WARNING 2\\u003e/dev/null\\nT_MANIFEST_E=$(date +%s)\\nVOLUMES=$(cat /tmp/manifest.txt)\\necho \\\"Manifest download: $((T_MANIFEST_E - T_MANIFEST_S))s\\\"\\necho \\\"Volumes: $VOLUMES\\\"\\n\\n# Download each volume\\nT_VOL_S=$(date +%s)\\nVOL_COUNT=0\\nfor VOL in $VOLUMES; do\\n    echo \\\"  Downloading $VOL...\\\"\\n    for EXT in nsq nhr nin nnd nni nog nos not; do\\n        azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\\\" \\\"${DB_DIR}/${VOL}.${EXT}\\\"                       --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\n    done\\n    VOL_COUNT=$((VOL_COUNT + 1))\\ndone\\nT_VOL_E=$(date +%s)\\nVOL_SEC=$((T_VOL_E - T_VOL_S))\\necho \\\"Volume download: ${VOL_SEC}s (${VOL_COUNT} volumes)\\\"\\n\\n# Build volume paths\\nVOLPATHS=\\\"\\\"\\nfor VOL in $VOLUMES; do\\n    [ -n \\\"$VOLPATHS\\\" ] \\u0026\\u0026 VOLPATHS=\\\"$VOLPATHS \\\"\\n    VOLPATHS=\\\"${VOLPATHS}${DB_DIR}/${VOL}\\\"\\ndone\\n\\n# Download taxonomy files\\nT_TAX_S=$(date +%s)\\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\\n    echo \\\"  Downloading $F...\\\"\\n    azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\\\" \\\"${DB_DIR}/${F}\\\"                   --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\ndone\\nT_TAX_E=$(date +%s)\\nTAX_SEC=$((T_TAX_E - T_TAX_S))\\necho \\\"Taxonomy download: ${TAX_SEC}s\\\"\\n\\nT_DL_E=$(date +%s)\\nDL_TOTAL=$((T_DL_E - T_DL_S))\\nDB_SIZE=$(du -sh $DB_DIR 2\\u003e/dev/null | cut -f1)\\nDB_FILES=$(ls ${DB_DIR}/*.nsq 2\\u003e/dev/null | wc -l)\\necho \\\"\\\"\\necho \\\"TIMING db-download $DL_TOTAL seconds\\\"\\necho \\\"DB size: $DB_SIZE (${DB_FILES} nsq volumes)\\\"\\n\\n# ── Phase 3: Download query ──\\necho \\\"\\\"\\necho \\\"=== Phase 3: Download Query ===\\\"\\nT_QDL_S=$(date +%s)\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/queries/sars_cov2_orf1ab.fa\\\" \\\"${QUERY_DIR}/query.fa\\\"               --log-level=WARNING 2\\u003e/dev/null\\nT_QDL_E=$(date +%s)\\nQDL_SEC=$((T_QDL_E - T_QDL_S))\\nQSEQS=$(grep -c '^\\u003e' ${QUERY_DIR}/query.fa)\\nQLEN=$(grep -v '^\\u003e' ${QUERY_DIR}/query.fa | tr -d '\\\\n' | wc -c)\\necho \\\"TIMING query-download $QDL_SEC seconds\\\"\\necho \\\"Query: $QSEQS sequence(s), $QLEN bp\\\"\\n\\n# ── Phase 4: BLAST × N runs ──\\necho \\\"\\\"\\necho \\\"=== Phase 4: BLAST Execution (5 runs) ===\\\"\\nNCPU=$(nproc)\\necho \\\"CPUs: $NCPU\\\"\\n\\nfor ((R=1; R\\u003c=5; R++)); do\\n    echo \\\"\\\"\\n    echo \\\"--- Run $R/5 ---\\\"\\n    OUTFILE=\\\"${RES_DIR}/shard_05_run${R}.out\\\"\\n\\n    T_BL_S=$(date +%s)\\n    blastn -db \\\"$VOLPATHS\\\"                   -query \\\"${QUERY_DIR}/query.fa\\\"                   -max_target_seqs 500 -evalue 0.05                   -word_size 28 -dust yes -soft_masking true                   -outfmt 7                   -dbsize 978954058562                   -num_threads $NCPU                   -out \\\"$OUTFILE\\\" 2\\u003e\\u00261\\n    T_BL_E=$(date +%s)\\n\\n    BL_SEC=$((T_BL_E - T_BL_S))\\n    HITS=$(grep -vc '^#' \\\"$OUTFILE\\\" 2\\u003e/dev/null || echo 0)\\n    OUT_SIZE=$(wc -c \\u003c \\\"$OUTFILE\\\" 2\\u003e/dev/null || echo 0)\\n    echo \\\"TIMING blast-run-$R $BL_SEC seconds\\\"\\n    echo \\\"HITS run-$R $HITS\\\"\\n    echo \\\"OUTPUT_SIZE run-$R $OUT_SIZE bytes\\\"\\ndone\\n\\n# ── Phase 5: Upload results ──\\necho \\\"\\\"\\necho \\\"=== Phase 5: Upload Results ===\\\"\\nT_UP_S=$(date +%s)\\nfor ((R=1; R\\u003c=5; R++)); do\\n    OUTFILE=\\\"${RES_DIR}/shard_05_run${R}.out\\\"\\n    gzip -f \\\"$OUTFILE\\\"\\n    azcopy cp \\\"${OUTFILE}.gz\\\"                   \\\"https://stgelb.blob.core.windows.net/results/v4/V4-SARS-S10/shard_05_run${R}.out.gz\\\"                   --log-level=WARNING 2\\u003e/dev/null || true\\ndone\\nT_UP_E=$(date +%s)\\nUP_SEC=$((T_UP_E - T_UP_S))\\necho \\\"TIMING upload $UP_SEC seconds\\\"\\n\\n# ── Summary ──\\necho \\\"\\\"\\necho \\\"================================================================\\\"\\necho \\\"  SHARD $SHARD_IDX COMPLETE\\\"\\necho \\\"================================================================\\\"\\necho \\\"TIMING_SUMMARY auth=$AUTH_SEC db_download=$DL_TOTAL query_download=$QDL_SEC upload=$UP_SEC\\\"\\necho \\\"SHARD_COMPLETE $SHARD_IDX\\\"\\n\"],\"command\":[\"/bin/bash\",\"-c\"],\"image\":\"elbacr.azurecr.io/ncbi/elb:1.4.0\",\"name\":\"blast\",\"resources\":{\"limits\":{\"cpu\":\"15\",\"memory\":\"110Gi\"},\"requests\":{\"cpu\":\"8\",\"memory\":\"80Gi\"}},\"volumeMounts\":[{\"mountPath\":\"/workspace\",\"name\":\"workspace\"}]}],\"nodeName\":\"aks-nodepool1-46214719-vmss000005\",\"restartPolicy\":\"Never\",\"volumes\":[{\"hostPath\":{\"path\":\"/mnt/workspace-v4-shard-05\",\"type\":\"DirectoryOrCreate\"},\"name\":\"workspace\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-04-30T08:54:55Z",
+                "generation": 1,
+                "labels": {
+                    "app": "v4-sars-blast",
+                    "shard": "05"
+                },
+                "name": "v4-sars-05",
+                "namespace": "default",
+                "resourceVersion": "8376",
+                "uid": "6b29f6fa-f7b9-4171-9e58-c1fe2375f8d6"
+            },
+            "spec": {
+                "activeDeadlineSeconds": 10800,
+                "backoffLimit": 1,
+                "completionMode": "NonIndexed",
+                "completions": 1,
+                "manualSelector": false,
+                "parallelism": 1,
+                "podReplacementPolicy": "TerminatingOrFailed",
+                "selector": {
+                    "matchLabels": {
+                        "batch.kubernetes.io/controller-uid": "6b29f6fa-f7b9-4171-9e58-c1fe2375f8d6"
+                    }
+                },
+                "suspend": false,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "v4-sars-blast",
+                            "batch.kubernetes.io/controller-uid": "6b29f6fa-f7b9-4171-9e58-c1fe2375f8d6",
+                            "batch.kubernetes.io/job-name": "v4-sars-05",
+                            "controller-uid": "6b29f6fa-f7b9-4171-9e58-c1fe2375f8d6",
+                            "job-name": "v4-sars-05",
+                            "shard": "05"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "set -eo pipefail\nSHARD_IDX=5\nSHARD_NAME=core_nt_shard_05\nDB_DIR=/workspace/blastdb\nQUERY_DIR=/workspace/queries\nRES_DIR=/workspace/results\nBLAST_RUNS=5\nmkdir -p $DB_DIR $QUERY_DIR $RES_DIR\n\necho \"================================================================\"\necho \"  V4 SARS-CoV-2 ORF1ab Benchmark — Shard $SHARD_IDX\"\necho \"  Query: NC_045512.2:266-21555 (21,290 bp)\"\necho \"  BLAST runs: $BLAST_RUNS\"\necho \"================================================================\"\n\n# ── Phase 1: Managed Identity Login ──\necho \"\"\necho \"=== Phase 1: Auth ===\"\nT_AUTH_S=$(date +%s)\nazcopy login --identity 2\u003e/dev/null || echo \"azcopy login warning\"\nT_AUTH_E=$(date +%s)\nAUTH_SEC=$((T_AUTH_E - T_AUTH_S))\necho \"TIMING auth $AUTH_SEC seconds\"\n\n# ── Phase 2: Download DB shard ──\necho \"\"\necho \"=== Phase 2: Download DB Shard ===\"\nT_DL_S=$(date +%s)\n\n# Download manifest\nT_MANIFEST_S=$(date +%s)\nazcopy cp \"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_05/core_nt_shard_05.manifest\"               /tmp/manifest.txt --log-level=WARNING 2\u003e/dev/null\nT_MANIFEST_E=$(date +%s)\nVOLUMES=$(cat /tmp/manifest.txt)\necho \"Manifest download: $((T_MANIFEST_E - T_MANIFEST_S))s\"\necho \"Volumes: $VOLUMES\"\n\n# Download each volume\nT_VOL_S=$(date +%s)\nVOL_COUNT=0\nfor VOL in $VOLUMES; do\n    echo \"  Downloading $VOL...\"\n    for EXT in nsq nhr nin nnd nni nog nos not; do\n        azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\" \"${DB_DIR}/${VOL}.${EXT}\"                       --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\n    done\n    VOL_COUNT=$((VOL_COUNT + 1))\ndone\nT_VOL_E=$(date +%s)\nVOL_SEC=$((T_VOL_E - T_VOL_S))\necho \"Volume download: ${VOL_SEC}s (${VOL_COUNT} volumes)\"\n\n# Build volume paths\nVOLPATHS=\"\"\nfor VOL in $VOLUMES; do\n    [ -n \"$VOLPATHS\" ] \u0026\u0026 VOLPATHS=\"$VOLPATHS \"\n    VOLPATHS=\"${VOLPATHS}${DB_DIR}/${VOL}\"\ndone\n\n# Download taxonomy files\nT_TAX_S=$(date +%s)\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\n    echo \"  Downloading $F...\"\n    azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\" \"${DB_DIR}/${F}\"                   --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\ndone\nT_TAX_E=$(date +%s)\nTAX_SEC=$((T_TAX_E - T_TAX_S))\necho \"Taxonomy download: ${TAX_SEC}s\"\n\nT_DL_E=$(date +%s)\nDL_TOTAL=$((T_DL_E - T_DL_S))\nDB_SIZE=$(du -sh $DB_DIR 2\u003e/dev/null | cut -f1)\nDB_FILES=$(ls ${DB_DIR}/*.nsq 2\u003e/dev/null | wc -l)\necho \"\"\necho \"TIMING db-download $DL_TOTAL seconds\"\necho \"DB size: $DB_SIZE (${DB_FILES} nsq volumes)\"\n\n# ── Phase 3: Download query ──\necho \"\"\necho \"=== Phase 3: Download Query ===\"\nT_QDL_S=$(date +%s)\nazcopy cp \"https://stgelb.blob.core.windows.net/queries/sars_cov2_orf1ab.fa\" \"${QUERY_DIR}/query.fa\"               --log-level=WARNING 2\u003e/dev/null\nT_QDL_E=$(date +%s)\nQDL_SEC=$((T_QDL_E - T_QDL_S))\nQSEQS=$(grep -c '^\u003e' ${QUERY_DIR}/query.fa)\nQLEN=$(grep -v '^\u003e' ${QUERY_DIR}/query.fa | tr -d '\\n' | wc -c)\necho \"TIMING query-download $QDL_SEC seconds\"\necho \"Query: $QSEQS sequence(s), $QLEN bp\"\n\n# ── Phase 4: BLAST × N runs ──\necho \"\"\necho \"=== Phase 4: BLAST Execution (5 runs) ===\"\nNCPU=$(nproc)\necho \"CPUs: $NCPU\"\n\nfor ((R=1; R\u003c=5; R++)); do\n    echo \"\"\n    echo \"--- Run $R/5 ---\"\n    OUTFILE=\"${RES_DIR}/shard_05_run${R}.out\"\n\n    T_BL_S=$(date +%s)\n    blastn -db \"$VOLPATHS\"                   -query \"${QUERY_DIR}/query.fa\"                   -max_target_seqs 500 -evalue 0.05                   -word_size 28 -dust yes -soft_masking true                   -outfmt 7                   -dbsize 978954058562                   -num_threads $NCPU                   -out \"$OUTFILE\" 2\u003e\u00261\n    T_BL_E=$(date +%s)\n\n    BL_SEC=$((T_BL_E - T_BL_S))\n    HITS=$(grep -vc '^#' \"$OUTFILE\" 2\u003e/dev/null || echo 0)\n    OUT_SIZE=$(wc -c \u003c \"$OUTFILE\" 2\u003e/dev/null || echo 0)\n    echo \"TIMING blast-run-$R $BL_SEC seconds\"\n    echo \"HITS run-$R $HITS\"\n    echo \"OUTPUT_SIZE run-$R $OUT_SIZE bytes\"\ndone\n\n# ── Phase 5: Upload results ──\necho \"\"\necho \"=== Phase 5: Upload Results ===\"\nT_UP_S=$(date +%s)\nfor ((R=1; R\u003c=5; R++)); do\n    OUTFILE=\"${RES_DIR}/shard_05_run${R}.out\"\n    gzip -f \"$OUTFILE\"\n    azcopy cp \"${OUTFILE}.gz\"                   \"https://stgelb.blob.core.windows.net/results/v4/V4-SARS-S10/shard_05_run${R}.out.gz\"                   --log-level=WARNING 2\u003e/dev/null || true\ndone\nT_UP_E=$(date +%s)\nUP_SEC=$((T_UP_E - T_UP_S))\necho \"TIMING upload $UP_SEC seconds\"\n\n# ── Summary ──\necho \"\"\necho \"================================================================\"\necho \"  SHARD $SHARD_IDX COMPLETE\"\necho \"================================================================\"\necho \"TIMING_SUMMARY auth=$AUTH_SEC db_download=$DL_TOTAL query_download=$QDL_SEC upload=$UP_SEC\"\necho \"SHARD_COMPLETE $SHARD_IDX\"\n"
+                                ],
+                                "command": [
+                                    "/bin/bash",
+                                    "-c"
+                                ],
+                                "image": "elbacr.azurecr.io/ncbi/elb:1.4.0",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "blast",
+                                "resources": {
+                                    "limits": {
+                                        "cpu": "15",
+                                        "memory": "110Gi"
+                                    },
+                                    "requests": {
+                                        "cpu": "8",
+                                        "memory": "80Gi"
+                                    }
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/workspace",
+                                        "name": "workspace"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeName": "aks-nodepool1-46214719-vmss000005",
+                        "restartPolicy": "Never",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30,
+                        "volumes": [
+                            {
+                                "hostPath": {
+                                    "path": "/mnt/workspace-v4-shard-05",
+                                    "type": "DirectoryOrCreate"
+                                },
+                                "name": "workspace"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "completionTime": "2026-04-30T09:00:56Z",
+                "conditions": [
+                    {
+                        "lastProbeTime": "2026-04-30T09:00:56Z",
+                        "lastTransitionTime": "2026-04-30T09:00:56Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "SuccessCriteriaMet"
+                    },
+                    {
+                        "lastProbeTime": "2026-04-30T09:00:56Z",
+                        "lastTransitionTime": "2026-04-30T09:00:56Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "Complete"
+                    }
+                ],
+                "ready": 0,
+                "startTime": "2026-04-30T08:54:55Z",
+                "succeeded": 1,
+                "terminating": 0,
+                "uncountedTerminatedPods": {}
+            }
+        },
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\",\"kind\":\"Job\",\"metadata\":{\"annotations\":{},\"labels\":{\"app\":\"v4-sars-blast\",\"shard\":\"06\"},\"name\":\"v4-sars-06\",\"namespace\":\"default\"},\"spec\":{\"activeDeadlineSeconds\":10800,\"backoffLimit\":1,\"template\":{\"metadata\":{\"labels\":{\"app\":\"v4-sars-blast\",\"shard\":\"06\"}},\"spec\":{\"containers\":[{\"args\":[\"set -eo pipefail\\nSHARD_IDX=6\\nSHARD_NAME=core_nt_shard_06\\nDB_DIR=/workspace/blastdb\\nQUERY_DIR=/workspace/queries\\nRES_DIR=/workspace/results\\nBLAST_RUNS=5\\nmkdir -p $DB_DIR $QUERY_DIR $RES_DIR\\n\\necho \\\"================================================================\\\"\\necho \\\"  V4 SARS-CoV-2 ORF1ab Benchmark — Shard $SHARD_IDX\\\"\\necho \\\"  Query: NC_045512.2:266-21555 (21,290 bp)\\\"\\necho \\\"  BLAST runs: $BLAST_RUNS\\\"\\necho \\\"================================================================\\\"\\n\\n# ── Phase 1: Managed Identity Login ──\\necho \\\"\\\"\\necho \\\"=== Phase 1: Auth ===\\\"\\nT_AUTH_S=$(date +%s)\\nazcopy login --identity 2\\u003e/dev/null || echo \\\"azcopy login warning\\\"\\nT_AUTH_E=$(date +%s)\\nAUTH_SEC=$((T_AUTH_E - T_AUTH_S))\\necho \\\"TIMING auth $AUTH_SEC seconds\\\"\\n\\n# ── Phase 2: Download DB shard ──\\necho \\\"\\\"\\necho \\\"=== Phase 2: Download DB Shard ===\\\"\\nT_DL_S=$(date +%s)\\n\\n# Download manifest\\nT_MANIFEST_S=$(date +%s)\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_06/core_nt_shard_06.manifest\\\"               /tmp/manifest.txt --log-level=WARNING 2\\u003e/dev/null\\nT_MANIFEST_E=$(date +%s)\\nVOLUMES=$(cat /tmp/manifest.txt)\\necho \\\"Manifest download: $((T_MANIFEST_E - T_MANIFEST_S))s\\\"\\necho \\\"Volumes: $VOLUMES\\\"\\n\\n# Download each volume\\nT_VOL_S=$(date +%s)\\nVOL_COUNT=0\\nfor VOL in $VOLUMES; do\\n    echo \\\"  Downloading $VOL...\\\"\\n    for EXT in nsq nhr nin nnd nni nog nos not; do\\n        azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\\\" \\\"${DB_DIR}/${VOL}.${EXT}\\\"                       --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\n    done\\n    VOL_COUNT=$((VOL_COUNT + 1))\\ndone\\nT_VOL_E=$(date +%s)\\nVOL_SEC=$((T_VOL_E - T_VOL_S))\\necho \\\"Volume download: ${VOL_SEC}s (${VOL_COUNT} volumes)\\\"\\n\\n# Build volume paths\\nVOLPATHS=\\\"\\\"\\nfor VOL in $VOLUMES; do\\n    [ -n \\\"$VOLPATHS\\\" ] \\u0026\\u0026 VOLPATHS=\\\"$VOLPATHS \\\"\\n    VOLPATHS=\\\"${VOLPATHS}${DB_DIR}/${VOL}\\\"\\ndone\\n\\n# Download taxonomy files\\nT_TAX_S=$(date +%s)\\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\\n    echo \\\"  Downloading $F...\\\"\\n    azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\\\" \\\"${DB_DIR}/${F}\\\"                   --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\ndone\\nT_TAX_E=$(date +%s)\\nTAX_SEC=$((T_TAX_E - T_TAX_S))\\necho \\\"Taxonomy download: ${TAX_SEC}s\\\"\\n\\nT_DL_E=$(date +%s)\\nDL_TOTAL=$((T_DL_E - T_DL_S))\\nDB_SIZE=$(du -sh $DB_DIR 2\\u003e/dev/null | cut -f1)\\nDB_FILES=$(ls ${DB_DIR}/*.nsq 2\\u003e/dev/null | wc -l)\\necho \\\"\\\"\\necho \\\"TIMING db-download $DL_TOTAL seconds\\\"\\necho \\\"DB size: $DB_SIZE (${DB_FILES} nsq volumes)\\\"\\n\\n# ── Phase 3: Download query ──\\necho \\\"\\\"\\necho \\\"=== Phase 3: Download Query ===\\\"\\nT_QDL_S=$(date +%s)\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/queries/sars_cov2_orf1ab.fa\\\" \\\"${QUERY_DIR}/query.fa\\\"               --log-level=WARNING 2\\u003e/dev/null\\nT_QDL_E=$(date +%s)\\nQDL_SEC=$((T_QDL_E - T_QDL_S))\\nQSEQS=$(grep -c '^\\u003e' ${QUERY_DIR}/query.fa)\\nQLEN=$(grep -v '^\\u003e' ${QUERY_DIR}/query.fa | tr -d '\\\\n' | wc -c)\\necho \\\"TIMING query-download $QDL_SEC seconds\\\"\\necho \\\"Query: $QSEQS sequence(s), $QLEN bp\\\"\\n\\n# ── Phase 4: BLAST × N runs ──\\necho \\\"\\\"\\necho \\\"=== Phase 4: BLAST Execution (5 runs) ===\\\"\\nNCPU=$(nproc)\\necho \\\"CPUs: $NCPU\\\"\\n\\nfor ((R=1; R\\u003c=5; R++)); do\\n    echo \\\"\\\"\\n    echo \\\"--- Run $R/5 ---\\\"\\n    OUTFILE=\\\"${RES_DIR}/shard_06_run${R}.out\\\"\\n\\n    T_BL_S=$(date +%s)\\n    blastn -db \\\"$VOLPATHS\\\"                   -query \\\"${QUERY_DIR}/query.fa\\\"                   -max_target_seqs 500 -evalue 0.05                   -word_size 28 -dust yes -soft_masking true                   -outfmt 7                   -dbsize 978954058562                   -num_threads $NCPU                   -out \\\"$OUTFILE\\\" 2\\u003e\\u00261\\n    T_BL_E=$(date +%s)\\n\\n    BL_SEC=$((T_BL_E - T_BL_S))\\n    HITS=$(grep -vc '^#' \\\"$OUTFILE\\\" 2\\u003e/dev/null || echo 0)\\n    OUT_SIZE=$(wc -c \\u003c \\\"$OUTFILE\\\" 2\\u003e/dev/null || echo 0)\\n    echo \\\"TIMING blast-run-$R $BL_SEC seconds\\\"\\n    echo \\\"HITS run-$R $HITS\\\"\\n    echo \\\"OUTPUT_SIZE run-$R $OUT_SIZE bytes\\\"\\ndone\\n\\n# ── Phase 5: Upload results ──\\necho \\\"\\\"\\necho \\\"=== Phase 5: Upload Results ===\\\"\\nT_UP_S=$(date +%s)\\nfor ((R=1; R\\u003c=5; R++)); do\\n    OUTFILE=\\\"${RES_DIR}/shard_06_run${R}.out\\\"\\n    gzip -f \\\"$OUTFILE\\\"\\n    azcopy cp \\\"${OUTFILE}.gz\\\"                   \\\"https://stgelb.blob.core.windows.net/results/v4/V4-SARS-S10/shard_06_run${R}.out.gz\\\"                   --log-level=WARNING 2\\u003e/dev/null || true\\ndone\\nT_UP_E=$(date +%s)\\nUP_SEC=$((T_UP_E - T_UP_S))\\necho \\\"TIMING upload $UP_SEC seconds\\\"\\n\\n# ── Summary ──\\necho \\\"\\\"\\necho \\\"================================================================\\\"\\necho \\\"  SHARD $SHARD_IDX COMPLETE\\\"\\necho \\\"================================================================\\\"\\necho \\\"TIMING_SUMMARY auth=$AUTH_SEC db_download=$DL_TOTAL query_download=$QDL_SEC upload=$UP_SEC\\\"\\necho \\\"SHARD_COMPLETE $SHARD_IDX\\\"\\n\"],\"command\":[\"/bin/bash\",\"-c\"],\"image\":\"elbacr.azurecr.io/ncbi/elb:1.4.0\",\"name\":\"blast\",\"resources\":{\"limits\":{\"cpu\":\"15\",\"memory\":\"110Gi\"},\"requests\":{\"cpu\":\"8\",\"memory\":\"80Gi\"}},\"volumeMounts\":[{\"mountPath\":\"/workspace\",\"name\":\"workspace\"}]}],\"nodeName\":\"aks-nodepool1-46214719-vmss000006\",\"restartPolicy\":\"Never\",\"volumes\":[{\"hostPath\":{\"path\":\"/mnt/workspace-v4-shard-06\",\"type\":\"DirectoryOrCreate\"},\"name\":\"workspace\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-04-30T08:54:56Z",
+                "generation": 1,
+                "labels": {
+                    "app": "v4-sars-blast",
+                    "shard": "06"
+                },
+                "name": "v4-sars-06",
+                "namespace": "default",
+                "resourceVersion": "8507",
+                "uid": "e635d52d-10b4-44c8-84aa-1f5457332cc6"
+            },
+            "spec": {
+                "activeDeadlineSeconds": 10800,
+                "backoffLimit": 1,
+                "completionMode": "NonIndexed",
+                "completions": 1,
+                "manualSelector": false,
+                "parallelism": 1,
+                "podReplacementPolicy": "TerminatingOrFailed",
+                "selector": {
+                    "matchLabels": {
+                        "batch.kubernetes.io/controller-uid": "e635d52d-10b4-44c8-84aa-1f5457332cc6"
+                    }
+                },
+                "suspend": false,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "v4-sars-blast",
+                            "batch.kubernetes.io/controller-uid": "e635d52d-10b4-44c8-84aa-1f5457332cc6",
+                            "batch.kubernetes.io/job-name": "v4-sars-06",
+                            "controller-uid": "e635d52d-10b4-44c8-84aa-1f5457332cc6",
+                            "job-name": "v4-sars-06",
+                            "shard": "06"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "set -eo pipefail\nSHARD_IDX=6\nSHARD_NAME=core_nt_shard_06\nDB_DIR=/workspace/blastdb\nQUERY_DIR=/workspace/queries\nRES_DIR=/workspace/results\nBLAST_RUNS=5\nmkdir -p $DB_DIR $QUERY_DIR $RES_DIR\n\necho \"================================================================\"\necho \"  V4 SARS-CoV-2 ORF1ab Benchmark — Shard $SHARD_IDX\"\necho \"  Query: NC_045512.2:266-21555 (21,290 bp)\"\necho \"  BLAST runs: $BLAST_RUNS\"\necho \"================================================================\"\n\n# ── Phase 1: Managed Identity Login ──\necho \"\"\necho \"=== Phase 1: Auth ===\"\nT_AUTH_S=$(date +%s)\nazcopy login --identity 2\u003e/dev/null || echo \"azcopy login warning\"\nT_AUTH_E=$(date +%s)\nAUTH_SEC=$((T_AUTH_E - T_AUTH_S))\necho \"TIMING auth $AUTH_SEC seconds\"\n\n# ── Phase 2: Download DB shard ──\necho \"\"\necho \"=== Phase 2: Download DB Shard ===\"\nT_DL_S=$(date +%s)\n\n# Download manifest\nT_MANIFEST_S=$(date +%s)\nazcopy cp \"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_06/core_nt_shard_06.manifest\"               /tmp/manifest.txt --log-level=WARNING 2\u003e/dev/null\nT_MANIFEST_E=$(date +%s)\nVOLUMES=$(cat /tmp/manifest.txt)\necho \"Manifest download: $((T_MANIFEST_E - T_MANIFEST_S))s\"\necho \"Volumes: $VOLUMES\"\n\n# Download each volume\nT_VOL_S=$(date +%s)\nVOL_COUNT=0\nfor VOL in $VOLUMES; do\n    echo \"  Downloading $VOL...\"\n    for EXT in nsq nhr nin nnd nni nog nos not; do\n        azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\" \"${DB_DIR}/${VOL}.${EXT}\"                       --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\n    done\n    VOL_COUNT=$((VOL_COUNT + 1))\ndone\nT_VOL_E=$(date +%s)\nVOL_SEC=$((T_VOL_E - T_VOL_S))\necho \"Volume download: ${VOL_SEC}s (${VOL_COUNT} volumes)\"\n\n# Build volume paths\nVOLPATHS=\"\"\nfor VOL in $VOLUMES; do\n    [ -n \"$VOLPATHS\" ] \u0026\u0026 VOLPATHS=\"$VOLPATHS \"\n    VOLPATHS=\"${VOLPATHS}${DB_DIR}/${VOL}\"\ndone\n\n# Download taxonomy files\nT_TAX_S=$(date +%s)\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\n    echo \"  Downloading $F...\"\n    azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\" \"${DB_DIR}/${F}\"                   --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\ndone\nT_TAX_E=$(date +%s)\nTAX_SEC=$((T_TAX_E - T_TAX_S))\necho \"Taxonomy download: ${TAX_SEC}s\"\n\nT_DL_E=$(date +%s)\nDL_TOTAL=$((T_DL_E - T_DL_S))\nDB_SIZE=$(du -sh $DB_DIR 2\u003e/dev/null | cut -f1)\nDB_FILES=$(ls ${DB_DIR}/*.nsq 2\u003e/dev/null | wc -l)\necho \"\"\necho \"TIMING db-download $DL_TOTAL seconds\"\necho \"DB size: $DB_SIZE (${DB_FILES} nsq volumes)\"\n\n# ── Phase 3: Download query ──\necho \"\"\necho \"=== Phase 3: Download Query ===\"\nT_QDL_S=$(date +%s)\nazcopy cp \"https://stgelb.blob.core.windows.net/queries/sars_cov2_orf1ab.fa\" \"${QUERY_DIR}/query.fa\"               --log-level=WARNING 2\u003e/dev/null\nT_QDL_E=$(date +%s)\nQDL_SEC=$((T_QDL_E - T_QDL_S))\nQSEQS=$(grep -c '^\u003e' ${QUERY_DIR}/query.fa)\nQLEN=$(grep -v '^\u003e' ${QUERY_DIR}/query.fa | tr -d '\\n' | wc -c)\necho \"TIMING query-download $QDL_SEC seconds\"\necho \"Query: $QSEQS sequence(s), $QLEN bp\"\n\n# ── Phase 4: BLAST × N runs ──\necho \"\"\necho \"=== Phase 4: BLAST Execution (5 runs) ===\"\nNCPU=$(nproc)\necho \"CPUs: $NCPU\"\n\nfor ((R=1; R\u003c=5; R++)); do\n    echo \"\"\n    echo \"--- Run $R/5 ---\"\n    OUTFILE=\"${RES_DIR}/shard_06_run${R}.out\"\n\n    T_BL_S=$(date +%s)\n    blastn -db \"$VOLPATHS\"                   -query \"${QUERY_DIR}/query.fa\"                   -max_target_seqs 500 -evalue 0.05                   -word_size 28 -dust yes -soft_masking true                   -outfmt 7                   -dbsize 978954058562                   -num_threads $NCPU                   -out \"$OUTFILE\" 2\u003e\u00261\n    T_BL_E=$(date +%s)\n\n    BL_SEC=$((T_BL_E - T_BL_S))\n    HITS=$(grep -vc '^#' \"$OUTFILE\" 2\u003e/dev/null || echo 0)\n    OUT_SIZE=$(wc -c \u003c \"$OUTFILE\" 2\u003e/dev/null || echo 0)\n    echo \"TIMING blast-run-$R $BL_SEC seconds\"\n    echo \"HITS run-$R $HITS\"\n    echo \"OUTPUT_SIZE run-$R $OUT_SIZE bytes\"\ndone\n\n# ── Phase 5: Upload results ──\necho \"\"\necho \"=== Phase 5: Upload Results ===\"\nT_UP_S=$(date +%s)\nfor ((R=1; R\u003c=5; R++)); do\n    OUTFILE=\"${RES_DIR}/shard_06_run${R}.out\"\n    gzip -f \"$OUTFILE\"\n    azcopy cp \"${OUTFILE}.gz\"                   \"https://stgelb.blob.core.windows.net/results/v4/V4-SARS-S10/shard_06_run${R}.out.gz\"                   --log-level=WARNING 2\u003e/dev/null || true\ndone\nT_UP_E=$(date +%s)\nUP_SEC=$((T_UP_E - T_UP_S))\necho \"TIMING upload $UP_SEC seconds\"\n\n# ── Summary ──\necho \"\"\necho \"================================================================\"\necho \"  SHARD $SHARD_IDX COMPLETE\"\necho \"================================================================\"\necho \"TIMING_SUMMARY auth=$AUTH_SEC db_download=$DL_TOTAL query_download=$QDL_SEC upload=$UP_SEC\"\necho \"SHARD_COMPLETE $SHARD_IDX\"\n"
+                                ],
+                                "command": [
+                                    "/bin/bash",
+                                    "-c"
+                                ],
+                                "image": "elbacr.azurecr.io/ncbi/elb:1.4.0",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "blast",
+                                "resources": {
+                                    "limits": {
+                                        "cpu": "15",
+                                        "memory": "110Gi"
+                                    },
+                                    "requests": {
+                                        "cpu": "8",
+                                        "memory": "80Gi"
+                                    }
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/workspace",
+                                        "name": "workspace"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeName": "aks-nodepool1-46214719-vmss000006",
+                        "restartPolicy": "Never",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30,
+                        "volumes": [
+                            {
+                                "hostPath": {
+                                    "path": "/mnt/workspace-v4-shard-06",
+                                    "type": "DirectoryOrCreate"
+                                },
+                                "name": "workspace"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "completionTime": "2026-04-30T09:01:20Z",
+                "conditions": [
+                    {
+                        "lastProbeTime": "2026-04-30T09:01:20Z",
+                        "lastTransitionTime": "2026-04-30T09:01:20Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "SuccessCriteriaMet"
+                    },
+                    {
+                        "lastProbeTime": "2026-04-30T09:01:20Z",
+                        "lastTransitionTime": "2026-04-30T09:01:20Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "Complete"
+                    }
+                ],
+                "ready": 0,
+                "startTime": "2026-04-30T08:54:56Z",
+                "succeeded": 1,
+                "terminating": 0,
+                "uncountedTerminatedPods": {}
+            }
+        },
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\",\"kind\":\"Job\",\"metadata\":{\"annotations\":{},\"labels\":{\"app\":\"v4-sars-blast\",\"shard\":\"07\"},\"name\":\"v4-sars-07\",\"namespace\":\"default\"},\"spec\":{\"activeDeadlineSeconds\":10800,\"backoffLimit\":1,\"template\":{\"metadata\":{\"labels\":{\"app\":\"v4-sars-blast\",\"shard\":\"07\"}},\"spec\":{\"containers\":[{\"args\":[\"set -eo pipefail\\nSHARD_IDX=7\\nSHARD_NAME=core_nt_shard_07\\nDB_DIR=/workspace/blastdb\\nQUERY_DIR=/workspace/queries\\nRES_DIR=/workspace/results\\nBLAST_RUNS=5\\nmkdir -p $DB_DIR $QUERY_DIR $RES_DIR\\n\\necho \\\"================================================================\\\"\\necho \\\"  V4 SARS-CoV-2 ORF1ab Benchmark — Shard $SHARD_IDX\\\"\\necho \\\"  Query: NC_045512.2:266-21555 (21,290 bp)\\\"\\necho \\\"  BLAST runs: $BLAST_RUNS\\\"\\necho \\\"================================================================\\\"\\n\\n# ── Phase 1: Managed Identity Login ──\\necho \\\"\\\"\\necho \\\"=== Phase 1: Auth ===\\\"\\nT_AUTH_S=$(date +%s)\\nazcopy login --identity 2\\u003e/dev/null || echo \\\"azcopy login warning\\\"\\nT_AUTH_E=$(date +%s)\\nAUTH_SEC=$((T_AUTH_E - T_AUTH_S))\\necho \\\"TIMING auth $AUTH_SEC seconds\\\"\\n\\n# ── Phase 2: Download DB shard ──\\necho \\\"\\\"\\necho \\\"=== Phase 2: Download DB Shard ===\\\"\\nT_DL_S=$(date +%s)\\n\\n# Download manifest\\nT_MANIFEST_S=$(date +%s)\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_07/core_nt_shard_07.manifest\\\"               /tmp/manifest.txt --log-level=WARNING 2\\u003e/dev/null\\nT_MANIFEST_E=$(date +%s)\\nVOLUMES=$(cat /tmp/manifest.txt)\\necho \\\"Manifest download: $((T_MANIFEST_E - T_MANIFEST_S))s\\\"\\necho \\\"Volumes: $VOLUMES\\\"\\n\\n# Download each volume\\nT_VOL_S=$(date +%s)\\nVOL_COUNT=0\\nfor VOL in $VOLUMES; do\\n    echo \\\"  Downloading $VOL...\\\"\\n    for EXT in nsq nhr nin nnd nni nog nos not; do\\n        azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\\\" \\\"${DB_DIR}/${VOL}.${EXT}\\\"                       --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\n    done\\n    VOL_COUNT=$((VOL_COUNT + 1))\\ndone\\nT_VOL_E=$(date +%s)\\nVOL_SEC=$((T_VOL_E - T_VOL_S))\\necho \\\"Volume download: ${VOL_SEC}s (${VOL_COUNT} volumes)\\\"\\n\\n# Build volume paths\\nVOLPATHS=\\\"\\\"\\nfor VOL in $VOLUMES; do\\n    [ -n \\\"$VOLPATHS\\\" ] \\u0026\\u0026 VOLPATHS=\\\"$VOLPATHS \\\"\\n    VOLPATHS=\\\"${VOLPATHS}${DB_DIR}/${VOL}\\\"\\ndone\\n\\n# Download taxonomy files\\nT_TAX_S=$(date +%s)\\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\\n    echo \\\"  Downloading $F...\\\"\\n    azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\\\" \\\"${DB_DIR}/${F}\\\"                   --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\ndone\\nT_TAX_E=$(date +%s)\\nTAX_SEC=$((T_TAX_E - T_TAX_S))\\necho \\\"Taxonomy download: ${TAX_SEC}s\\\"\\n\\nT_DL_E=$(date +%s)\\nDL_TOTAL=$((T_DL_E - T_DL_S))\\nDB_SIZE=$(du -sh $DB_DIR 2\\u003e/dev/null | cut -f1)\\nDB_FILES=$(ls ${DB_DIR}/*.nsq 2\\u003e/dev/null | wc -l)\\necho \\\"\\\"\\necho \\\"TIMING db-download $DL_TOTAL seconds\\\"\\necho \\\"DB size: $DB_SIZE (${DB_FILES} nsq volumes)\\\"\\n\\n# ── Phase 3: Download query ──\\necho \\\"\\\"\\necho \\\"=== Phase 3: Download Query ===\\\"\\nT_QDL_S=$(date +%s)\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/queries/sars_cov2_orf1ab.fa\\\" \\\"${QUERY_DIR}/query.fa\\\"               --log-level=WARNING 2\\u003e/dev/null\\nT_QDL_E=$(date +%s)\\nQDL_SEC=$((T_QDL_E - T_QDL_S))\\nQSEQS=$(grep -c '^\\u003e' ${QUERY_DIR}/query.fa)\\nQLEN=$(grep -v '^\\u003e' ${QUERY_DIR}/query.fa | tr -d '\\\\n' | wc -c)\\necho \\\"TIMING query-download $QDL_SEC seconds\\\"\\necho \\\"Query: $QSEQS sequence(s), $QLEN bp\\\"\\n\\n# ── Phase 4: BLAST × N runs ──\\necho \\\"\\\"\\necho \\\"=== Phase 4: BLAST Execution (5 runs) ===\\\"\\nNCPU=$(nproc)\\necho \\\"CPUs: $NCPU\\\"\\n\\nfor ((R=1; R\\u003c=5; R++)); do\\n    echo \\\"\\\"\\n    echo \\\"--- Run $R/5 ---\\\"\\n    OUTFILE=\\\"${RES_DIR}/shard_07_run${R}.out\\\"\\n\\n    T_BL_S=$(date +%s)\\n    blastn -db \\\"$VOLPATHS\\\"                   -query \\\"${QUERY_DIR}/query.fa\\\"                   -max_target_seqs 500 -evalue 0.05                   -word_size 28 -dust yes -soft_masking true                   -outfmt 7                   -dbsize 978954058562                   -num_threads $NCPU                   -out \\\"$OUTFILE\\\" 2\\u003e\\u00261\\n    T_BL_E=$(date +%s)\\n\\n    BL_SEC=$((T_BL_E - T_BL_S))\\n    HITS=$(grep -vc '^#' \\\"$OUTFILE\\\" 2\\u003e/dev/null || echo 0)\\n    OUT_SIZE=$(wc -c \\u003c \\\"$OUTFILE\\\" 2\\u003e/dev/null || echo 0)\\n    echo \\\"TIMING blast-run-$R $BL_SEC seconds\\\"\\n    echo \\\"HITS run-$R $HITS\\\"\\n    echo \\\"OUTPUT_SIZE run-$R $OUT_SIZE bytes\\\"\\ndone\\n\\n# ── Phase 5: Upload results ──\\necho \\\"\\\"\\necho \\\"=== Phase 5: Upload Results ===\\\"\\nT_UP_S=$(date +%s)\\nfor ((R=1; R\\u003c=5; R++)); do\\n    OUTFILE=\\\"${RES_DIR}/shard_07_run${R}.out\\\"\\n    gzip -f \\\"$OUTFILE\\\"\\n    azcopy cp \\\"${OUTFILE}.gz\\\"                   \\\"https://stgelb.blob.core.windows.net/results/v4/V4-SARS-S10/shard_07_run${R}.out.gz\\\"                   --log-level=WARNING 2\\u003e/dev/null || true\\ndone\\nT_UP_E=$(date +%s)\\nUP_SEC=$((T_UP_E - T_UP_S))\\necho \\\"TIMING upload $UP_SEC seconds\\\"\\n\\n# ── Summary ──\\necho \\\"\\\"\\necho \\\"================================================================\\\"\\necho \\\"  SHARD $SHARD_IDX COMPLETE\\\"\\necho \\\"================================================================\\\"\\necho \\\"TIMING_SUMMARY auth=$AUTH_SEC db_download=$DL_TOTAL query_download=$QDL_SEC upload=$UP_SEC\\\"\\necho \\\"SHARD_COMPLETE $SHARD_IDX\\\"\\n\"],\"command\":[\"/bin/bash\",\"-c\"],\"image\":\"elbacr.azurecr.io/ncbi/elb:1.4.0\",\"name\":\"blast\",\"resources\":{\"limits\":{\"cpu\":\"15\",\"memory\":\"110Gi\"},\"requests\":{\"cpu\":\"8\",\"memory\":\"80Gi\"}},\"volumeMounts\":[{\"mountPath\":\"/workspace\",\"name\":\"workspace\"}]}],\"nodeName\":\"aks-nodepool1-46214719-vmss000007\",\"restartPolicy\":\"Never\",\"volumes\":[{\"hostPath\":{\"path\":\"/mnt/workspace-v4-shard-07\",\"type\":\"DirectoryOrCreate\"},\"name\":\"workspace\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-04-30T08:54:56Z",
+                "generation": 1,
+                "labels": {
+                    "app": "v4-sars-blast",
+                    "shard": "07"
+                },
+                "name": "v4-sars-07",
+                "namespace": "default",
+                "resourceVersion": "9354",
+                "uid": "6985b027-d9cf-48ec-a670-29733e594cb1"
+            },
+            "spec": {
+                "activeDeadlineSeconds": 10800,
+                "backoffLimit": 1,
+                "completionMode": "NonIndexed",
+                "completions": 1,
+                "manualSelector": false,
+                "parallelism": 1,
+                "podReplacementPolicy": "TerminatingOrFailed",
+                "selector": {
+                    "matchLabels": {
+                        "batch.kubernetes.io/controller-uid": "6985b027-d9cf-48ec-a670-29733e594cb1"
+                    }
+                },
+                "suspend": false,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "v4-sars-blast",
+                            "batch.kubernetes.io/controller-uid": "6985b027-d9cf-48ec-a670-29733e594cb1",
+                            "batch.kubernetes.io/job-name": "v4-sars-07",
+                            "controller-uid": "6985b027-d9cf-48ec-a670-29733e594cb1",
+                            "job-name": "v4-sars-07",
+                            "shard": "07"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "set -eo pipefail\nSHARD_IDX=7\nSHARD_NAME=core_nt_shard_07\nDB_DIR=/workspace/blastdb\nQUERY_DIR=/workspace/queries\nRES_DIR=/workspace/results\nBLAST_RUNS=5\nmkdir -p $DB_DIR $QUERY_DIR $RES_DIR\n\necho \"================================================================\"\necho \"  V4 SARS-CoV-2 ORF1ab Benchmark — Shard $SHARD_IDX\"\necho \"  Query: NC_045512.2:266-21555 (21,290 bp)\"\necho \"  BLAST runs: $BLAST_RUNS\"\necho \"================================================================\"\n\n# ── Phase 1: Managed Identity Login ──\necho \"\"\necho \"=== Phase 1: Auth ===\"\nT_AUTH_S=$(date +%s)\nazcopy login --identity 2\u003e/dev/null || echo \"azcopy login warning\"\nT_AUTH_E=$(date +%s)\nAUTH_SEC=$((T_AUTH_E - T_AUTH_S))\necho \"TIMING auth $AUTH_SEC seconds\"\n\n# ── Phase 2: Download DB shard ──\necho \"\"\necho \"=== Phase 2: Download DB Shard ===\"\nT_DL_S=$(date +%s)\n\n# Download manifest\nT_MANIFEST_S=$(date +%s)\nazcopy cp \"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_07/core_nt_shard_07.manifest\"               /tmp/manifest.txt --log-level=WARNING 2\u003e/dev/null\nT_MANIFEST_E=$(date +%s)\nVOLUMES=$(cat /tmp/manifest.txt)\necho \"Manifest download: $((T_MANIFEST_E - T_MANIFEST_S))s\"\necho \"Volumes: $VOLUMES\"\n\n# Download each volume\nT_VOL_S=$(date +%s)\nVOL_COUNT=0\nfor VOL in $VOLUMES; do\n    echo \"  Downloading $VOL...\"\n    for EXT in nsq nhr nin nnd nni nog nos not; do\n        azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\" \"${DB_DIR}/${VOL}.${EXT}\"                       --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\n    done\n    VOL_COUNT=$((VOL_COUNT + 1))\ndone\nT_VOL_E=$(date +%s)\nVOL_SEC=$((T_VOL_E - T_VOL_S))\necho \"Volume download: ${VOL_SEC}s (${VOL_COUNT} volumes)\"\n\n# Build volume paths\nVOLPATHS=\"\"\nfor VOL in $VOLUMES; do\n    [ -n \"$VOLPATHS\" ] \u0026\u0026 VOLPATHS=\"$VOLPATHS \"\n    VOLPATHS=\"${VOLPATHS}${DB_DIR}/${VOL}\"\ndone\n\n# Download taxonomy files\nT_TAX_S=$(date +%s)\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\n    echo \"  Downloading $F...\"\n    azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\" \"${DB_DIR}/${F}\"                   --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\ndone\nT_TAX_E=$(date +%s)\nTAX_SEC=$((T_TAX_E - T_TAX_S))\necho \"Taxonomy download: ${TAX_SEC}s\"\n\nT_DL_E=$(date +%s)\nDL_TOTAL=$((T_DL_E - T_DL_S))\nDB_SIZE=$(du -sh $DB_DIR 2\u003e/dev/null | cut -f1)\nDB_FILES=$(ls ${DB_DIR}/*.nsq 2\u003e/dev/null | wc -l)\necho \"\"\necho \"TIMING db-download $DL_TOTAL seconds\"\necho \"DB size: $DB_SIZE (${DB_FILES} nsq volumes)\"\n\n# ── Phase 3: Download query ──\necho \"\"\necho \"=== Phase 3: Download Query ===\"\nT_QDL_S=$(date +%s)\nazcopy cp \"https://stgelb.blob.core.windows.net/queries/sars_cov2_orf1ab.fa\" \"${QUERY_DIR}/query.fa\"               --log-level=WARNING 2\u003e/dev/null\nT_QDL_E=$(date +%s)\nQDL_SEC=$((T_QDL_E - T_QDL_S))\nQSEQS=$(grep -c '^\u003e' ${QUERY_DIR}/query.fa)\nQLEN=$(grep -v '^\u003e' ${QUERY_DIR}/query.fa | tr -d '\\n' | wc -c)\necho \"TIMING query-download $QDL_SEC seconds\"\necho \"Query: $QSEQS sequence(s), $QLEN bp\"\n\n# ── Phase 4: BLAST × N runs ──\necho \"\"\necho \"=== Phase 4: BLAST Execution (5 runs) ===\"\nNCPU=$(nproc)\necho \"CPUs: $NCPU\"\n\nfor ((R=1; R\u003c=5; R++)); do\n    echo \"\"\n    echo \"--- Run $R/5 ---\"\n    OUTFILE=\"${RES_DIR}/shard_07_run${R}.out\"\n\n    T_BL_S=$(date +%s)\n    blastn -db \"$VOLPATHS\"                   -query \"${QUERY_DIR}/query.fa\"                   -max_target_seqs 500 -evalue 0.05                   -word_size 28 -dust yes -soft_masking true                   -outfmt 7                   -dbsize 978954058562                   -num_threads $NCPU                   -out \"$OUTFILE\" 2\u003e\u00261\n    T_BL_E=$(date +%s)\n\n    BL_SEC=$((T_BL_E - T_BL_S))\n    HITS=$(grep -vc '^#' \"$OUTFILE\" 2\u003e/dev/null || echo 0)\n    OUT_SIZE=$(wc -c \u003c \"$OUTFILE\" 2\u003e/dev/null || echo 0)\n    echo \"TIMING blast-run-$R $BL_SEC seconds\"\n    echo \"HITS run-$R $HITS\"\n    echo \"OUTPUT_SIZE run-$R $OUT_SIZE bytes\"\ndone\n\n# ── Phase 5: Upload results ──\necho \"\"\necho \"=== Phase 5: Upload Results ===\"\nT_UP_S=$(date +%s)\nfor ((R=1; R\u003c=5; R++)); do\n    OUTFILE=\"${RES_DIR}/shard_07_run${R}.out\"\n    gzip -f \"$OUTFILE\"\n    azcopy cp \"${OUTFILE}.gz\"                   \"https://stgelb.blob.core.windows.net/results/v4/V4-SARS-S10/shard_07_run${R}.out.gz\"                   --log-level=WARNING 2\u003e/dev/null || true\ndone\nT_UP_E=$(date +%s)\nUP_SEC=$((T_UP_E - T_UP_S))\necho \"TIMING upload $UP_SEC seconds\"\n\n# ── Summary ──\necho \"\"\necho \"================================================================\"\necho \"  SHARD $SHARD_IDX COMPLETE\"\necho \"================================================================\"\necho \"TIMING_SUMMARY auth=$AUTH_SEC db_download=$DL_TOTAL query_download=$QDL_SEC upload=$UP_SEC\"\necho \"SHARD_COMPLETE $SHARD_IDX\"\n"
+                                ],
+                                "command": [
+                                    "/bin/bash",
+                                    "-c"
+                                ],
+                                "image": "elbacr.azurecr.io/ncbi/elb:1.4.0",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "blast",
+                                "resources": {
+                                    "limits": {
+                                        "cpu": "15",
+                                        "memory": "110Gi"
+                                    },
+                                    "requests": {
+                                        "cpu": "8",
+                                        "memory": "80Gi"
+                                    }
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/workspace",
+                                        "name": "workspace"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeName": "aks-nodepool1-46214719-vmss000007",
+                        "restartPolicy": "Never",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30,
+                        "volumes": [
+                            {
+                                "hostPath": {
+                                    "path": "/mnt/workspace-v4-shard-07",
+                                    "type": "DirectoryOrCreate"
+                                },
+                                "name": "workspace"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "completionTime": "2026-04-30T09:03:55Z",
+                "conditions": [
+                    {
+                        "lastProbeTime": "2026-04-30T09:03:55Z",
+                        "lastTransitionTime": "2026-04-30T09:03:55Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "SuccessCriteriaMet"
+                    },
+                    {
+                        "lastProbeTime": "2026-04-30T09:03:55Z",
+                        "lastTransitionTime": "2026-04-30T09:03:55Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "Complete"
+                    }
+                ],
+                "ready": 0,
+                "startTime": "2026-04-30T08:54:56Z",
+                "succeeded": 1,
+                "terminating": 0,
+                "uncountedTerminatedPods": {}
+            }
+        },
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\",\"kind\":\"Job\",\"metadata\":{\"annotations\":{},\"labels\":{\"app\":\"v4-sars-blast\",\"shard\":\"08\"},\"name\":\"v4-sars-08\",\"namespace\":\"default\"},\"spec\":{\"activeDeadlineSeconds\":10800,\"backoffLimit\":1,\"template\":{\"metadata\":{\"labels\":{\"app\":\"v4-sars-blast\",\"shard\":\"08\"}},\"spec\":{\"containers\":[{\"args\":[\"set -eo pipefail\\nSHARD_IDX=8\\nSHARD_NAME=core_nt_shard_08\\nDB_DIR=/workspace/blastdb\\nQUERY_DIR=/workspace/queries\\nRES_DIR=/workspace/results\\nBLAST_RUNS=5\\nmkdir -p $DB_DIR $QUERY_DIR $RES_DIR\\n\\necho \\\"================================================================\\\"\\necho \\\"  V4 SARS-CoV-2 ORF1ab Benchmark — Shard $SHARD_IDX\\\"\\necho \\\"  Query: NC_045512.2:266-21555 (21,290 bp)\\\"\\necho \\\"  BLAST runs: $BLAST_RUNS\\\"\\necho \\\"================================================================\\\"\\n\\n# ── Phase 1: Managed Identity Login ──\\necho \\\"\\\"\\necho \\\"=== Phase 1: Auth ===\\\"\\nT_AUTH_S=$(date +%s)\\nazcopy login --identity 2\\u003e/dev/null || echo \\\"azcopy login warning\\\"\\nT_AUTH_E=$(date +%s)\\nAUTH_SEC=$((T_AUTH_E - T_AUTH_S))\\necho \\\"TIMING auth $AUTH_SEC seconds\\\"\\n\\n# ── Phase 2: Download DB shard ──\\necho \\\"\\\"\\necho \\\"=== Phase 2: Download DB Shard ===\\\"\\nT_DL_S=$(date +%s)\\n\\n# Download manifest\\nT_MANIFEST_S=$(date +%s)\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_08/core_nt_shard_08.manifest\\\"               /tmp/manifest.txt --log-level=WARNING 2\\u003e/dev/null\\nT_MANIFEST_E=$(date +%s)\\nVOLUMES=$(cat /tmp/manifest.txt)\\necho \\\"Manifest download: $((T_MANIFEST_E - T_MANIFEST_S))s\\\"\\necho \\\"Volumes: $VOLUMES\\\"\\n\\n# Download each volume\\nT_VOL_S=$(date +%s)\\nVOL_COUNT=0\\nfor VOL in $VOLUMES; do\\n    echo \\\"  Downloading $VOL...\\\"\\n    for EXT in nsq nhr nin nnd nni nog nos not; do\\n        azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\\\" \\\"${DB_DIR}/${VOL}.${EXT}\\\"                       --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\n    done\\n    VOL_COUNT=$((VOL_COUNT + 1))\\ndone\\nT_VOL_E=$(date +%s)\\nVOL_SEC=$((T_VOL_E - T_VOL_S))\\necho \\\"Volume download: ${VOL_SEC}s (${VOL_COUNT} volumes)\\\"\\n\\n# Build volume paths\\nVOLPATHS=\\\"\\\"\\nfor VOL in $VOLUMES; do\\n    [ -n \\\"$VOLPATHS\\\" ] \\u0026\\u0026 VOLPATHS=\\\"$VOLPATHS \\\"\\n    VOLPATHS=\\\"${VOLPATHS}${DB_DIR}/${VOL}\\\"\\ndone\\n\\n# Download taxonomy files\\nT_TAX_S=$(date +%s)\\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\\n    echo \\\"  Downloading $F...\\\"\\n    azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\\\" \\\"${DB_DIR}/${F}\\\"                   --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\ndone\\nT_TAX_E=$(date +%s)\\nTAX_SEC=$((T_TAX_E - T_TAX_S))\\necho \\\"Taxonomy download: ${TAX_SEC}s\\\"\\n\\nT_DL_E=$(date +%s)\\nDL_TOTAL=$((T_DL_E - T_DL_S))\\nDB_SIZE=$(du -sh $DB_DIR 2\\u003e/dev/null | cut -f1)\\nDB_FILES=$(ls ${DB_DIR}/*.nsq 2\\u003e/dev/null | wc -l)\\necho \\\"\\\"\\necho \\\"TIMING db-download $DL_TOTAL seconds\\\"\\necho \\\"DB size: $DB_SIZE (${DB_FILES} nsq volumes)\\\"\\n\\n# ── Phase 3: Download query ──\\necho \\\"\\\"\\necho \\\"=== Phase 3: Download Query ===\\\"\\nT_QDL_S=$(date +%s)\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/queries/sars_cov2_orf1ab.fa\\\" \\\"${QUERY_DIR}/query.fa\\\"               --log-level=WARNING 2\\u003e/dev/null\\nT_QDL_E=$(date +%s)\\nQDL_SEC=$((T_QDL_E - T_QDL_S))\\nQSEQS=$(grep -c '^\\u003e' ${QUERY_DIR}/query.fa)\\nQLEN=$(grep -v '^\\u003e' ${QUERY_DIR}/query.fa | tr -d '\\\\n' | wc -c)\\necho \\\"TIMING query-download $QDL_SEC seconds\\\"\\necho \\\"Query: $QSEQS sequence(s), $QLEN bp\\\"\\n\\n# ── Phase 4: BLAST × N runs ──\\necho \\\"\\\"\\necho \\\"=== Phase 4: BLAST Execution (5 runs) ===\\\"\\nNCPU=$(nproc)\\necho \\\"CPUs: $NCPU\\\"\\n\\nfor ((R=1; R\\u003c=5; R++)); do\\n    echo \\\"\\\"\\n    echo \\\"--- Run $R/5 ---\\\"\\n    OUTFILE=\\\"${RES_DIR}/shard_08_run${R}.out\\\"\\n\\n    T_BL_S=$(date +%s)\\n    blastn -db \\\"$VOLPATHS\\\"                   -query \\\"${QUERY_DIR}/query.fa\\\"                   -max_target_seqs 500 -evalue 0.05                   -word_size 28 -dust yes -soft_masking true                   -outfmt 7                   -dbsize 978954058562                   -num_threads $NCPU                   -out \\\"$OUTFILE\\\" 2\\u003e\\u00261\\n    T_BL_E=$(date +%s)\\n\\n    BL_SEC=$((T_BL_E - T_BL_S))\\n    HITS=$(grep -vc '^#' \\\"$OUTFILE\\\" 2\\u003e/dev/null || echo 0)\\n    OUT_SIZE=$(wc -c \\u003c \\\"$OUTFILE\\\" 2\\u003e/dev/null || echo 0)\\n    echo \\\"TIMING blast-run-$R $BL_SEC seconds\\\"\\n    echo \\\"HITS run-$R $HITS\\\"\\n    echo \\\"OUTPUT_SIZE run-$R $OUT_SIZE bytes\\\"\\ndone\\n\\n# ── Phase 5: Upload results ──\\necho \\\"\\\"\\necho \\\"=== Phase 5: Upload Results ===\\\"\\nT_UP_S=$(date +%s)\\nfor ((R=1; R\\u003c=5; R++)); do\\n    OUTFILE=\\\"${RES_DIR}/shard_08_run${R}.out\\\"\\n    gzip -f \\\"$OUTFILE\\\"\\n    azcopy cp \\\"${OUTFILE}.gz\\\"                   \\\"https://stgelb.blob.core.windows.net/results/v4/V4-SARS-S10/shard_08_run${R}.out.gz\\\"                   --log-level=WARNING 2\\u003e/dev/null || true\\ndone\\nT_UP_E=$(date +%s)\\nUP_SEC=$((T_UP_E - T_UP_S))\\necho \\\"TIMING upload $UP_SEC seconds\\\"\\n\\n# ── Summary ──\\necho \\\"\\\"\\necho \\\"================================================================\\\"\\necho \\\"  SHARD $SHARD_IDX COMPLETE\\\"\\necho \\\"================================================================\\\"\\necho \\\"TIMING_SUMMARY auth=$AUTH_SEC db_download=$DL_TOTAL query_download=$QDL_SEC upload=$UP_SEC\\\"\\necho \\\"SHARD_COMPLETE $SHARD_IDX\\\"\\n\"],\"command\":[\"/bin/bash\",\"-c\"],\"image\":\"elbacr.azurecr.io/ncbi/elb:1.4.0\",\"name\":\"blast\",\"resources\":{\"limits\":{\"cpu\":\"15\",\"memory\":\"110Gi\"},\"requests\":{\"cpu\":\"8\",\"memory\":\"80Gi\"}},\"volumeMounts\":[{\"mountPath\":\"/workspace\",\"name\":\"workspace\"}]}],\"nodeName\":\"aks-nodepool1-46214719-vmss000008\",\"restartPolicy\":\"Never\",\"volumes\":[{\"hostPath\":{\"path\":\"/mnt/workspace-v4-shard-08\",\"type\":\"DirectoryOrCreate\"},\"name\":\"workspace\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-04-30T08:54:57Z",
+                "generation": 1,
+                "labels": {
+                    "app": "v4-sars-blast",
+                    "shard": "08"
+                },
+                "name": "v4-sars-08",
+                "namespace": "default",
+                "resourceVersion": "8248",
+                "uid": "3b9642f9-62c4-4a06-9fee-e761e237e3ba"
+            },
+            "spec": {
+                "activeDeadlineSeconds": 10800,
+                "backoffLimit": 1,
+                "completionMode": "NonIndexed",
+                "completions": 1,
+                "manualSelector": false,
+                "parallelism": 1,
+                "podReplacementPolicy": "TerminatingOrFailed",
+                "selector": {
+                    "matchLabels": {
+                        "batch.kubernetes.io/controller-uid": "3b9642f9-62c4-4a06-9fee-e761e237e3ba"
+                    }
+                },
+                "suspend": false,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "v4-sars-blast",
+                            "batch.kubernetes.io/controller-uid": "3b9642f9-62c4-4a06-9fee-e761e237e3ba",
+                            "batch.kubernetes.io/job-name": "v4-sars-08",
+                            "controller-uid": "3b9642f9-62c4-4a06-9fee-e761e237e3ba",
+                            "job-name": "v4-sars-08",
+                            "shard": "08"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "set -eo pipefail\nSHARD_IDX=8\nSHARD_NAME=core_nt_shard_08\nDB_DIR=/workspace/blastdb\nQUERY_DIR=/workspace/queries\nRES_DIR=/workspace/results\nBLAST_RUNS=5\nmkdir -p $DB_DIR $QUERY_DIR $RES_DIR\n\necho \"================================================================\"\necho \"  V4 SARS-CoV-2 ORF1ab Benchmark — Shard $SHARD_IDX\"\necho \"  Query: NC_045512.2:266-21555 (21,290 bp)\"\necho \"  BLAST runs: $BLAST_RUNS\"\necho \"================================================================\"\n\n# ── Phase 1: Managed Identity Login ──\necho \"\"\necho \"=== Phase 1: Auth ===\"\nT_AUTH_S=$(date +%s)\nazcopy login --identity 2\u003e/dev/null || echo \"azcopy login warning\"\nT_AUTH_E=$(date +%s)\nAUTH_SEC=$((T_AUTH_E - T_AUTH_S))\necho \"TIMING auth $AUTH_SEC seconds\"\n\n# ── Phase 2: Download DB shard ──\necho \"\"\necho \"=== Phase 2: Download DB Shard ===\"\nT_DL_S=$(date +%s)\n\n# Download manifest\nT_MANIFEST_S=$(date +%s)\nazcopy cp \"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_08/core_nt_shard_08.manifest\"               /tmp/manifest.txt --log-level=WARNING 2\u003e/dev/null\nT_MANIFEST_E=$(date +%s)\nVOLUMES=$(cat /tmp/manifest.txt)\necho \"Manifest download: $((T_MANIFEST_E - T_MANIFEST_S))s\"\necho \"Volumes: $VOLUMES\"\n\n# Download each volume\nT_VOL_S=$(date +%s)\nVOL_COUNT=0\nfor VOL in $VOLUMES; do\n    echo \"  Downloading $VOL...\"\n    for EXT in nsq nhr nin nnd nni nog nos not; do\n        azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\" \"${DB_DIR}/${VOL}.${EXT}\"                       --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\n    done\n    VOL_COUNT=$((VOL_COUNT + 1))\ndone\nT_VOL_E=$(date +%s)\nVOL_SEC=$((T_VOL_E - T_VOL_S))\necho \"Volume download: ${VOL_SEC}s (${VOL_COUNT} volumes)\"\n\n# Build volume paths\nVOLPATHS=\"\"\nfor VOL in $VOLUMES; do\n    [ -n \"$VOLPATHS\" ] \u0026\u0026 VOLPATHS=\"$VOLPATHS \"\n    VOLPATHS=\"${VOLPATHS}${DB_DIR}/${VOL}\"\ndone\n\n# Download taxonomy files\nT_TAX_S=$(date +%s)\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\n    echo \"  Downloading $F...\"\n    azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\" \"${DB_DIR}/${F}\"                   --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\ndone\nT_TAX_E=$(date +%s)\nTAX_SEC=$((T_TAX_E - T_TAX_S))\necho \"Taxonomy download: ${TAX_SEC}s\"\n\nT_DL_E=$(date +%s)\nDL_TOTAL=$((T_DL_E - T_DL_S))\nDB_SIZE=$(du -sh $DB_DIR 2\u003e/dev/null | cut -f1)\nDB_FILES=$(ls ${DB_DIR}/*.nsq 2\u003e/dev/null | wc -l)\necho \"\"\necho \"TIMING db-download $DL_TOTAL seconds\"\necho \"DB size: $DB_SIZE (${DB_FILES} nsq volumes)\"\n\n# ── Phase 3: Download query ──\necho \"\"\necho \"=== Phase 3: Download Query ===\"\nT_QDL_S=$(date +%s)\nazcopy cp \"https://stgelb.blob.core.windows.net/queries/sars_cov2_orf1ab.fa\" \"${QUERY_DIR}/query.fa\"               --log-level=WARNING 2\u003e/dev/null\nT_QDL_E=$(date +%s)\nQDL_SEC=$((T_QDL_E - T_QDL_S))\nQSEQS=$(grep -c '^\u003e' ${QUERY_DIR}/query.fa)\nQLEN=$(grep -v '^\u003e' ${QUERY_DIR}/query.fa | tr -d '\\n' | wc -c)\necho \"TIMING query-download $QDL_SEC seconds\"\necho \"Query: $QSEQS sequence(s), $QLEN bp\"\n\n# ── Phase 4: BLAST × N runs ──\necho \"\"\necho \"=== Phase 4: BLAST Execution (5 runs) ===\"\nNCPU=$(nproc)\necho \"CPUs: $NCPU\"\n\nfor ((R=1; R\u003c=5; R++)); do\n    echo \"\"\n    echo \"--- Run $R/5 ---\"\n    OUTFILE=\"${RES_DIR}/shard_08_run${R}.out\"\n\n    T_BL_S=$(date +%s)\n    blastn -db \"$VOLPATHS\"                   -query \"${QUERY_DIR}/query.fa\"                   -max_target_seqs 500 -evalue 0.05                   -word_size 28 -dust yes -soft_masking true                   -outfmt 7                   -dbsize 978954058562                   -num_threads $NCPU                   -out \"$OUTFILE\" 2\u003e\u00261\n    T_BL_E=$(date +%s)\n\n    BL_SEC=$((T_BL_E - T_BL_S))\n    HITS=$(grep -vc '^#' \"$OUTFILE\" 2\u003e/dev/null || echo 0)\n    OUT_SIZE=$(wc -c \u003c \"$OUTFILE\" 2\u003e/dev/null || echo 0)\n    echo \"TIMING blast-run-$R $BL_SEC seconds\"\n    echo \"HITS run-$R $HITS\"\n    echo \"OUTPUT_SIZE run-$R $OUT_SIZE bytes\"\ndone\n\n# ── Phase 5: Upload results ──\necho \"\"\necho \"=== Phase 5: Upload Results ===\"\nT_UP_S=$(date +%s)\nfor ((R=1; R\u003c=5; R++)); do\n    OUTFILE=\"${RES_DIR}/shard_08_run${R}.out\"\n    gzip -f \"$OUTFILE\"\n    azcopy cp \"${OUTFILE}.gz\"                   \"https://stgelb.blob.core.windows.net/results/v4/V4-SARS-S10/shard_08_run${R}.out.gz\"                   --log-level=WARNING 2\u003e/dev/null || true\ndone\nT_UP_E=$(date +%s)\nUP_SEC=$((T_UP_E - T_UP_S))\necho \"TIMING upload $UP_SEC seconds\"\n\n# ── Summary ──\necho \"\"\necho \"================================================================\"\necho \"  SHARD $SHARD_IDX COMPLETE\"\necho \"================================================================\"\necho \"TIMING_SUMMARY auth=$AUTH_SEC db_download=$DL_TOTAL query_download=$QDL_SEC upload=$UP_SEC\"\necho \"SHARD_COMPLETE $SHARD_IDX\"\n"
+                                ],
+                                "command": [
+                                    "/bin/bash",
+                                    "-c"
+                                ],
+                                "image": "elbacr.azurecr.io/ncbi/elb:1.4.0",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "blast",
+                                "resources": {
+                                    "limits": {
+                                        "cpu": "15",
+                                        "memory": "110Gi"
+                                    },
+                                    "requests": {
+                                        "cpu": "8",
+                                        "memory": "80Gi"
+                                    }
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/workspace",
+                                        "name": "workspace"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeName": "aks-nodepool1-46214719-vmss000008",
+                        "restartPolicy": "Never",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30,
+                        "volumes": [
+                            {
+                                "hostPath": {
+                                    "path": "/mnt/workspace-v4-shard-08",
+                                    "type": "DirectoryOrCreate"
+                                },
+                                "name": "workspace"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "completionTime": "2026-04-30T09:00:35Z",
+                "conditions": [
+                    {
+                        "lastProbeTime": "2026-04-30T09:00:35Z",
+                        "lastTransitionTime": "2026-04-30T09:00:35Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "SuccessCriteriaMet"
+                    },
+                    {
+                        "lastProbeTime": "2026-04-30T09:00:35Z",
+                        "lastTransitionTime": "2026-04-30T09:00:35Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "Complete"
+                    }
+                ],
+                "ready": 0,
+                "startTime": "2026-04-30T08:54:57Z",
+                "succeeded": 1,
+                "terminating": 0,
+                "uncountedTerminatedPods": {}
+            }
+        },
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\",\"kind\":\"Job\",\"metadata\":{\"annotations\":{},\"labels\":{\"app\":\"v4-sars-blast\",\"shard\":\"09\"},\"name\":\"v4-sars-09\",\"namespace\":\"default\"},\"spec\":{\"activeDeadlineSeconds\":10800,\"backoffLimit\":1,\"template\":{\"metadata\":{\"labels\":{\"app\":\"v4-sars-blast\",\"shard\":\"09\"}},\"spec\":{\"containers\":[{\"args\":[\"set -eo pipefail\\nSHARD_IDX=9\\nSHARD_NAME=core_nt_shard_09\\nDB_DIR=/workspace/blastdb\\nQUERY_DIR=/workspace/queries\\nRES_DIR=/workspace/results\\nBLAST_RUNS=5\\nmkdir -p $DB_DIR $QUERY_DIR $RES_DIR\\n\\necho \\\"================================================================\\\"\\necho \\\"  V4 SARS-CoV-2 ORF1ab Benchmark — Shard $SHARD_IDX\\\"\\necho \\\"  Query: NC_045512.2:266-21555 (21,290 bp)\\\"\\necho \\\"  BLAST runs: $BLAST_RUNS\\\"\\necho \\\"================================================================\\\"\\n\\n# ── Phase 1: Managed Identity Login ──\\necho \\\"\\\"\\necho \\\"=== Phase 1: Auth ===\\\"\\nT_AUTH_S=$(date +%s)\\nazcopy login --identity 2\\u003e/dev/null || echo \\\"azcopy login warning\\\"\\nT_AUTH_E=$(date +%s)\\nAUTH_SEC=$((T_AUTH_E - T_AUTH_S))\\necho \\\"TIMING auth $AUTH_SEC seconds\\\"\\n\\n# ── Phase 2: Download DB shard ──\\necho \\\"\\\"\\necho \\\"=== Phase 2: Download DB Shard ===\\\"\\nT_DL_S=$(date +%s)\\n\\n# Download manifest\\nT_MANIFEST_S=$(date +%s)\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_09/core_nt_shard_09.manifest\\\"               /tmp/manifest.txt --log-level=WARNING 2\\u003e/dev/null\\nT_MANIFEST_E=$(date +%s)\\nVOLUMES=$(cat /tmp/manifest.txt)\\necho \\\"Manifest download: $((T_MANIFEST_E - T_MANIFEST_S))s\\\"\\necho \\\"Volumes: $VOLUMES\\\"\\n\\n# Download each volume\\nT_VOL_S=$(date +%s)\\nVOL_COUNT=0\\nfor VOL in $VOLUMES; do\\n    echo \\\"  Downloading $VOL...\\\"\\n    for EXT in nsq nhr nin nnd nni nog nos not; do\\n        azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\\\" \\\"${DB_DIR}/${VOL}.${EXT}\\\"                       --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\n    done\\n    VOL_COUNT=$((VOL_COUNT + 1))\\ndone\\nT_VOL_E=$(date +%s)\\nVOL_SEC=$((T_VOL_E - T_VOL_S))\\necho \\\"Volume download: ${VOL_SEC}s (${VOL_COUNT} volumes)\\\"\\n\\n# Build volume paths\\nVOLPATHS=\\\"\\\"\\nfor VOL in $VOLUMES; do\\n    [ -n \\\"$VOLPATHS\\\" ] \\u0026\\u0026 VOLPATHS=\\\"$VOLPATHS \\\"\\n    VOLPATHS=\\\"${VOLPATHS}${DB_DIR}/${VOL}\\\"\\ndone\\n\\n# Download taxonomy files\\nT_TAX_S=$(date +%s)\\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\\n    echo \\\"  Downloading $F...\\\"\\n    azcopy cp \\\"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\\\" \\\"${DB_DIR}/${F}\\\"                   --block-size-mb=256 --log-level=ERROR 2\\u003e/dev/null || true\\ndone\\nT_TAX_E=$(date +%s)\\nTAX_SEC=$((T_TAX_E - T_TAX_S))\\necho \\\"Taxonomy download: ${TAX_SEC}s\\\"\\n\\nT_DL_E=$(date +%s)\\nDL_TOTAL=$((T_DL_E - T_DL_S))\\nDB_SIZE=$(du -sh $DB_DIR 2\\u003e/dev/null | cut -f1)\\nDB_FILES=$(ls ${DB_DIR}/*.nsq 2\\u003e/dev/null | wc -l)\\necho \\\"\\\"\\necho \\\"TIMING db-download $DL_TOTAL seconds\\\"\\necho \\\"DB size: $DB_SIZE (${DB_FILES} nsq volumes)\\\"\\n\\n# ── Phase 3: Download query ──\\necho \\\"\\\"\\necho \\\"=== Phase 3: Download Query ===\\\"\\nT_QDL_S=$(date +%s)\\nazcopy cp \\\"https://stgelb.blob.core.windows.net/queries/sars_cov2_orf1ab.fa\\\" \\\"${QUERY_DIR}/query.fa\\\"               --log-level=WARNING 2\\u003e/dev/null\\nT_QDL_E=$(date +%s)\\nQDL_SEC=$((T_QDL_E - T_QDL_S))\\nQSEQS=$(grep -c '^\\u003e' ${QUERY_DIR}/query.fa)\\nQLEN=$(grep -v '^\\u003e' ${QUERY_DIR}/query.fa | tr -d '\\\\n' | wc -c)\\necho \\\"TIMING query-download $QDL_SEC seconds\\\"\\necho \\\"Query: $QSEQS sequence(s), $QLEN bp\\\"\\n\\n# ── Phase 4: BLAST × N runs ──\\necho \\\"\\\"\\necho \\\"=== Phase 4: BLAST Execution (5 runs) ===\\\"\\nNCPU=$(nproc)\\necho \\\"CPUs: $NCPU\\\"\\n\\nfor ((R=1; R\\u003c=5; R++)); do\\n    echo \\\"\\\"\\n    echo \\\"--- Run $R/5 ---\\\"\\n    OUTFILE=\\\"${RES_DIR}/shard_09_run${R}.out\\\"\\n\\n    T_BL_S=$(date +%s)\\n    blastn -db \\\"$VOLPATHS\\\"                   -query \\\"${QUERY_DIR}/query.fa\\\"                   -max_target_seqs 500 -evalue 0.05                   -word_size 28 -dust yes -soft_masking true                   -outfmt 7                   -dbsize 978954058562                   -num_threads $NCPU                   -out \\\"$OUTFILE\\\" 2\\u003e\\u00261\\n    T_BL_E=$(date +%s)\\n\\n    BL_SEC=$((T_BL_E - T_BL_S))\\n    HITS=$(grep -vc '^#' \\\"$OUTFILE\\\" 2\\u003e/dev/null || echo 0)\\n    OUT_SIZE=$(wc -c \\u003c \\\"$OUTFILE\\\" 2\\u003e/dev/null || echo 0)\\n    echo \\\"TIMING blast-run-$R $BL_SEC seconds\\\"\\n    echo \\\"HITS run-$R $HITS\\\"\\n    echo \\\"OUTPUT_SIZE run-$R $OUT_SIZE bytes\\\"\\ndone\\n\\n# ── Phase 5: Upload results ──\\necho \\\"\\\"\\necho \\\"=== Phase 5: Upload Results ===\\\"\\nT_UP_S=$(date +%s)\\nfor ((R=1; R\\u003c=5; R++)); do\\n    OUTFILE=\\\"${RES_DIR}/shard_09_run${R}.out\\\"\\n    gzip -f \\\"$OUTFILE\\\"\\n    azcopy cp \\\"${OUTFILE}.gz\\\"                   \\\"https://stgelb.blob.core.windows.net/results/v4/V4-SARS-S10/shard_09_run${R}.out.gz\\\"                   --log-level=WARNING 2\\u003e/dev/null || true\\ndone\\nT_UP_E=$(date +%s)\\nUP_SEC=$((T_UP_E - T_UP_S))\\necho \\\"TIMING upload $UP_SEC seconds\\\"\\n\\n# ── Summary ──\\necho \\\"\\\"\\necho \\\"================================================================\\\"\\necho \\\"  SHARD $SHARD_IDX COMPLETE\\\"\\necho \\\"================================================================\\\"\\necho \\\"TIMING_SUMMARY auth=$AUTH_SEC db_download=$DL_TOTAL query_download=$QDL_SEC upload=$UP_SEC\\\"\\necho \\\"SHARD_COMPLETE $SHARD_IDX\\\"\\n\"],\"command\":[\"/bin/bash\",\"-c\"],\"image\":\"elbacr.azurecr.io/ncbi/elb:1.4.0\",\"name\":\"blast\",\"resources\":{\"limits\":{\"cpu\":\"15\",\"memory\":\"110Gi\"},\"requests\":{\"cpu\":\"8\",\"memory\":\"80Gi\"}},\"volumeMounts\":[{\"mountPath\":\"/workspace\",\"name\":\"workspace\"}]}],\"nodeName\":\"aks-nodepool1-46214719-vmss000009\",\"restartPolicy\":\"Never\",\"volumes\":[{\"hostPath\":{\"path\":\"/mnt/workspace-v4-shard-09\",\"type\":\"DirectoryOrCreate\"},\"name\":\"workspace\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-04-30T08:54:57Z",
+                "generation": 1,
+                "labels": {
+                    "app": "v4-sars-blast",
+                    "shard": "09"
+                },
+                "name": "v4-sars-09",
+                "namespace": "default",
+                "resourceVersion": "6974",
+                "uid": "b86a533c-fd5f-49cc-b17b-b09ac673ea5c"
+            },
+            "spec": {
+                "activeDeadlineSeconds": 10800,
+                "backoffLimit": 1,
+                "completionMode": "NonIndexed",
+                "completions": 1,
+                "manualSelector": false,
+                "parallelism": 1,
+                "podReplacementPolicy": "TerminatingOrFailed",
+                "selector": {
+                    "matchLabels": {
+                        "batch.kubernetes.io/controller-uid": "b86a533c-fd5f-49cc-b17b-b09ac673ea5c"
+                    }
+                },
+                "suspend": false,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "v4-sars-blast",
+                            "batch.kubernetes.io/controller-uid": "b86a533c-fd5f-49cc-b17b-b09ac673ea5c",
+                            "batch.kubernetes.io/job-name": "v4-sars-09",
+                            "controller-uid": "b86a533c-fd5f-49cc-b17b-b09ac673ea5c",
+                            "job-name": "v4-sars-09",
+                            "shard": "09"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "set -eo pipefail\nSHARD_IDX=9\nSHARD_NAME=core_nt_shard_09\nDB_DIR=/workspace/blastdb\nQUERY_DIR=/workspace/queries\nRES_DIR=/workspace/results\nBLAST_RUNS=5\nmkdir -p $DB_DIR $QUERY_DIR $RES_DIR\n\necho \"================================================================\"\necho \"  V4 SARS-CoV-2 ORF1ab Benchmark — Shard $SHARD_IDX\"\necho \"  Query: NC_045512.2:266-21555 (21,290 bp)\"\necho \"  BLAST runs: $BLAST_RUNS\"\necho \"================================================================\"\n\n# ── Phase 1: Managed Identity Login ──\necho \"\"\necho \"=== Phase 1: Auth ===\"\nT_AUTH_S=$(date +%s)\nazcopy login --identity 2\u003e/dev/null || echo \"azcopy login warning\"\nT_AUTH_E=$(date +%s)\nAUTH_SEC=$((T_AUTH_E - T_AUTH_S))\necho \"TIMING auth $AUTH_SEC seconds\"\n\n# ── Phase 2: Download DB shard ──\necho \"\"\necho \"=== Phase 2: Download DB Shard ===\"\nT_DL_S=$(date +%s)\n\n# Download manifest\nT_MANIFEST_S=$(date +%s)\nazcopy cp \"https://stgelb.blob.core.windows.net/blast-db/10shards/core_nt_shard_09/core_nt_shard_09.manifest\"               /tmp/manifest.txt --log-level=WARNING 2\u003e/dev/null\nT_MANIFEST_E=$(date +%s)\nVOLUMES=$(cat /tmp/manifest.txt)\necho \"Manifest download: $((T_MANIFEST_E - T_MANIFEST_S))s\"\necho \"Volumes: $VOLUMES\"\n\n# Download each volume\nT_VOL_S=$(date +%s)\nVOL_COUNT=0\nfor VOL in $VOLUMES; do\n    echo \"  Downloading $VOL...\"\n    for EXT in nsq nhr nin nnd nni nog nos not; do\n        azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${VOL}.${EXT}\" \"${DB_DIR}/${VOL}.${EXT}\"                       --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\n    done\n    VOL_COUNT=$((VOL_COUNT + 1))\ndone\nT_VOL_E=$(date +%s)\nVOL_SEC=$((T_VOL_E - T_VOL_S))\necho \"Volume download: ${VOL_SEC}s (${VOL_COUNT} volumes)\"\n\n# Build volume paths\nVOLPATHS=\"\"\nfor VOL in $VOLUMES; do\n    [ -n \"$VOLPATHS\" ] \u0026\u0026 VOLPATHS=\"$VOLPATHS \"\n    VOLPATHS=\"${VOLPATHS}${DB_DIR}/${VOL}\"\ndone\n\n# Download taxonomy files\nT_TAX_S=$(date +%s)\nfor F in taxdb.btd taxdb.bti core_nt.ndb core_nt.ntf core_nt.nto; do\n    echo \"  Downloading $F...\"\n    azcopy cp \"https://stgelb.blob.core.windows.net/blast-db/core_nt/${F}\" \"${DB_DIR}/${F}\"                   --block-size-mb=256 --log-level=ERROR 2\u003e/dev/null || true\ndone\nT_TAX_E=$(date +%s)\nTAX_SEC=$((T_TAX_E - T_TAX_S))\necho \"Taxonomy download: ${TAX_SEC}s\"\n\nT_DL_E=$(date +%s)\nDL_TOTAL=$((T_DL_E - T_DL_S))\nDB_SIZE=$(du -sh $DB_DIR 2\u003e/dev/null | cut -f1)\nDB_FILES=$(ls ${DB_DIR}/*.nsq 2\u003e/dev/null | wc -l)\necho \"\"\necho \"TIMING db-download $DL_TOTAL seconds\"\necho \"DB size: $DB_SIZE (${DB_FILES} nsq volumes)\"\n\n# ── Phase 3: Download query ──\necho \"\"\necho \"=== Phase 3: Download Query ===\"\nT_QDL_S=$(date +%s)\nazcopy cp \"https://stgelb.blob.core.windows.net/queries/sars_cov2_orf1ab.fa\" \"${QUERY_DIR}/query.fa\"               --log-level=WARNING 2\u003e/dev/null\nT_QDL_E=$(date +%s)\nQDL_SEC=$((T_QDL_E - T_QDL_S))\nQSEQS=$(grep -c '^\u003e' ${QUERY_DIR}/query.fa)\nQLEN=$(grep -v '^\u003e' ${QUERY_DIR}/query.fa | tr -d '\\n' | wc -c)\necho \"TIMING query-download $QDL_SEC seconds\"\necho \"Query: $QSEQS sequence(s), $QLEN bp\"\n\n# ── Phase 4: BLAST × N runs ──\necho \"\"\necho \"=== Phase 4: BLAST Execution (5 runs) ===\"\nNCPU=$(nproc)\necho \"CPUs: $NCPU\"\n\nfor ((R=1; R\u003c=5; R++)); do\n    echo \"\"\n    echo \"--- Run $R/5 ---\"\n    OUTFILE=\"${RES_DIR}/shard_09_run${R}.out\"\n\n    T_BL_S=$(date +%s)\n    blastn -db \"$VOLPATHS\"                   -query \"${QUERY_DIR}/query.fa\"                   -max_target_seqs 500 -evalue 0.05                   -word_size 28 -dust yes -soft_masking true                   -outfmt 7                   -dbsize 978954058562                   -num_threads $NCPU                   -out \"$OUTFILE\" 2\u003e\u00261\n    T_BL_E=$(date +%s)\n\n    BL_SEC=$((T_BL_E - T_BL_S))\n    HITS=$(grep -vc '^#' \"$OUTFILE\" 2\u003e/dev/null || echo 0)\n    OUT_SIZE=$(wc -c \u003c \"$OUTFILE\" 2\u003e/dev/null || echo 0)\n    echo \"TIMING blast-run-$R $BL_SEC seconds\"\n    echo \"HITS run-$R $HITS\"\n    echo \"OUTPUT_SIZE run-$R $OUT_SIZE bytes\"\ndone\n\n# ── Phase 5: Upload results ──\necho \"\"\necho \"=== Phase 5: Upload Results ===\"\nT_UP_S=$(date +%s)\nfor ((R=1; R\u003c=5; R++)); do\n    OUTFILE=\"${RES_DIR}/shard_09_run${R}.out\"\n    gzip -f \"$OUTFILE\"\n    azcopy cp \"${OUTFILE}.gz\"                   \"https://stgelb.blob.core.windows.net/results/v4/V4-SARS-S10/shard_09_run${R}.out.gz\"                   --log-level=WARNING 2\u003e/dev/null || true\ndone\nT_UP_E=$(date +%s)\nUP_SEC=$((T_UP_E - T_UP_S))\necho \"TIMING upload $UP_SEC seconds\"\n\n# ── Summary ──\necho \"\"\necho \"================================================================\"\necho \"  SHARD $SHARD_IDX COMPLETE\"\necho \"================================================================\"\necho \"TIMING_SUMMARY auth=$AUTH_SEC db_download=$DL_TOTAL query_download=$QDL_SEC upload=$UP_SEC\"\necho \"SHARD_COMPLETE $SHARD_IDX\"\n"
+                                ],
+                                "command": [
+                                    "/bin/bash",
+                                    "-c"
+                                ],
+                                "image": "elbacr.azurecr.io/ncbi/elb:1.4.0",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "blast",
+                                "resources": {
+                                    "limits": {
+                                        "cpu": "15",
+                                        "memory": "110Gi"
+                                    },
+                                    "requests": {
+                                        "cpu": "8",
+                                        "memory": "80Gi"
+                                    }
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/workspace",
+                                        "name": "workspace"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeName": "aks-nodepool1-46214719-vmss000009",
+                        "restartPolicy": "Never",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30,
+                        "volumes": [
+                            {
+                                "hostPath": {
+                                    "path": "/mnt/workspace-v4-shard-09",
+                                    "type": "DirectoryOrCreate"
+                                },
+                                "name": "workspace"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "completionTime": "2026-04-30T08:56:36Z",
+                "conditions": [
+                    {
+                        "lastProbeTime": "2026-04-30T08:56:36Z",
+                        "lastTransitionTime": "2026-04-30T08:56:36Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "SuccessCriteriaMet"
+                    },
+                    {
+                        "lastProbeTime": "2026-04-30T08:56:36Z",
+                        "lastTransitionTime": "2026-04-30T08:56:36Z",
+                        "message": "Reached expected number of succeeded pods",
+                        "reason": "CompletionsReached",
+                        "status": "True",
+                        "type": "Complete"
+                    }
+                ],
+                "ready": 0,
+                "startTime": "2026-04-30T08:54:57Z",
+                "succeeded": 1,
+                "terminating": 0,
+                "uncountedTerminatedPods": {}
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}
