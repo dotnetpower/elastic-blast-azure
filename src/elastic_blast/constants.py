@@ -349,6 +349,7 @@ CFG_BLAST_TAXIDLIST = 'taxidlist'
 CFG_BLAST_MIN_QSIZE_TO_SPLIT_ON_CLIENT_COMPRESSED = 'min-qsize-for-client-split-compressed'
 CFG_BLAST_MIN_QSIZE_TO_SPLIT_ON_CLIENT_UNCOMPRESSED = 'min-qsize-for-client-split-uncompressed'
 # DB Partitioning (Azure-only)
+CFG_BLAST_DB_AUTO_PARTITION = 'db-auto-partition'
 CFG_BLAST_DB_PARTITIONS = 'db-partitions'
 CFG_BLAST_DB_PARTITION_PREFIX = 'db-partition-prefix'
 # Timeouts

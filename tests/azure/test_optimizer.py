@@ -9,7 +9,7 @@ Author: Moon Hyuk Choi moonchoi@microsoft.com
 import os
 from unittest.mock import patch, MagicMock
 import pytest
-from elastic_blast.azure_optimizer import (
+from elastic_blast.azure import (
     OptimizationProfile, get_profile, predict, predict_all_profiles, apply_profile
 )
 
@@ -82,13 +82,11 @@ class TestPredictAllProfiles:
         assert 'COST' in output
         assert 'BALANCED' in output
         assert 'PERFORMANCE' in output
-        assert '±30%' in output
 
     def test_output_shows_estimates(self):
         output = predict_all_profiles(query_size_gb=1, db_size_gb=50)
-        assert 'Time:' in output
-        assert 'Cost:' in output
         assert '$' in output
+        assert 'cache=' in output
 
 
 class TestApplyProfile:

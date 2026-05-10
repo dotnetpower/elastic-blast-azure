@@ -397,12 +397,22 @@ pytest tests/azure_traits/ -v
 
 ### Code Fixes Applied
 
-| Issue                                        | Fix                                                        |
-| -------------------------------------------- | ---------------------------------------------------------- |
-| `JSONEnumEncoder.default()` wrong super call | `json.JSONEncoder(self, o)` -> `super().default(o)`        |
-| `bytes` type in Azure user field             | Added `isinstance(o, bytes)` handling in `JSONEnumEncoder` |
-| `cfg.gcp.project` error on Azure             | Added `if cfg.gcp:` guard in `enable_service_account()`    |
-| `extglob` pattern matching fails on K8s 1.31 | Rewrote job completion check in `cloud-job-submit-aks.sh`  |
+| Issue                                                | Fix                                                                         |
+| ---------------------------------------------------- | --------------------------------------------------------------------------- |
+| `JSONEnumEncoder.default()` wrong super call         | `json.JSONEncoder(self, o)` -> `super().default(o)`                         |
+| `bytes` type in Azure user field                     | Added `isinstance(o, bytes)` handling in `JSONEnumEncoder`                  |
+| `cfg.gcp.project` error on Azure                     | Added `if cfg.gcp:` guard in `enable_service_account()`                     |
+| `extglob` pattern matching fails on K8s 1.31         | Rewrote job completion check in `cloud-job-submit-aks.sh`                   |
+| `label_persistent_disk` calls GCP API on Azure       | Added `if cfg.cloud_provider != CSP.AZURE` guard in `kubernetes.py`         |
+| PVC snapshot/clone block fails on Azure              | Added Azure skip in `setup_pv()` snapshot/clone logic in `kubernetes.py`    |
+| Azure NFS PV mode uses wrong job template            | Fixed template selection in `jobs.py` for Azure NFS PV mode                 |
+| `_save_persistent_disk_ids` fails on Azure           | Made `_save_persistent_disk_ids()` a no-op in `azure.py` (GCP-only concept) |
+| jsonpath quoting in `initialize_storage_partitioned` | Removed shell single-quotes from jsonpath (safe_exec doesn't use shell)     |
+| `init-db-partitioned-aks.sh` duplicate download loop | Removed copy-paste duplicate download loop                                  |
+| `init-pv-partitioned` missing `subPath: queries`     | Added `subPath: queries` to QS container mount (matches standard init-pv)   |
+| `ELB_DB` with `/` invalid in K8s labels              | Changed job template to use `ELB_DB_LABEL` for labels instead of `ELB_DB`   |
+| `ELB_DB` with `/` breaks output filenames            | Added `ELB_DB_SAFE` (replace `/` with `-`) in blast-run and results-export  |
+| Partitioned jobs use wrong DB name                   | Use actual DB name from config, not partition prefix basename               |
 
 ---
 

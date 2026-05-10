@@ -80,23 +80,23 @@ class TestGetDisks:
 
     def test_returns_disk_names(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.get_disks', return_value=['disk-1', 'disk-2']):
+        with patch('elastic_blast.azure._sdk_get_disks', return_value=['disk-1', 'disk-2']):
             assert get_disks(cfg) == ['disk-1', 'disk-2']
 
     def test_returns_empty_list(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.get_disks', return_value=[]):
+        with patch('elastic_blast.azure._sdk_get_disks', return_value=[]):
             assert get_disks(cfg) == []
 
     def test_raises_runtime_error_on_bad_json(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.get_disks', side_effect=RuntimeError('SDK error')):
+        with patch('elastic_blast.azure._sdk_get_disks', side_effect=RuntimeError('SDK error')):
             with pytest.raises(RuntimeError):
                 get_disks(cfg)
 
     def test_dry_run_returns_empty(self):
         cfg = _make_cfg(dry_run=True)
-        with patch('elastic_blast.azure_sdk.get_disks', return_value=[]) as m:
+        with patch('elastic_blast.azure._sdk_get_disks', return_value=[]) as m:
             assert get_disks(cfg, dry_run=True) == []
             m.assert_called_once()
 
@@ -106,12 +106,12 @@ class TestGetSnapshots:
 
     def test_returns_snapshot_names(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.get_snapshots', return_value=['snap-1']):
+        with patch('elastic_blast.azure._sdk_get_snapshots', return_value=['snap-1']):
             assert get_snapshots(cfg) == ['snap-1']
 
     def test_raises_runtime_error_on_bad_json(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.get_snapshots', side_effect=RuntimeError('SDK error')):
+        with patch('elastic_blast.azure._sdk_get_snapshots', side_effect=RuntimeError('SDK error')):
             with pytest.raises(RuntimeError):
                 get_snapshots(cfg)
 
@@ -121,7 +121,7 @@ class TestDeleteDisk:
 
     def test_calls_az_disk_delete(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.delete_disk') as mock:
+        with patch('elastic_blast.azure._sdk_delete_disk') as mock:
             delete_disk('my-disk', cfg)
         mock.assert_called_once_with(cfg.azure.resourcegroup, 'my-disk')
 
@@ -136,7 +136,7 @@ class TestDeleteDisk:
 
     def test_propagates_safe_exec_error(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.delete_disk',
+        with patch('elastic_blast.azure._sdk_delete_disk',
                    side_effect=Exception('disk not found')):
             with pytest.raises(Exception):
                 delete_disk('nonexistent-disk', cfg)
@@ -147,7 +147,7 @@ class TestDeleteSnapshot:
 
     def test_calls_az_snapshot_delete(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.delete_snapshot') as mock:
+        with patch('elastic_blast.azure._sdk_delete_snapshot') as mock:
             delete_snapshot('my-snap', cfg)
         mock.assert_called_once_with(cfg.azure.resourcegroup, 'my-snap')
 
@@ -166,23 +166,23 @@ class TestGetAksClusters:
 
     def test_returns_cluster_names(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.get_aks_clusters', return_value=['cluster-a', 'cluster-b']):
+        with patch('elastic_blast.azure._sdk_get_aks_clusters', return_value=['cluster-a', 'cluster-b']):
             assert get_aks_clusters(cfg) == ['cluster-a', 'cluster-b']
 
     def test_returns_empty_list(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.get_aks_clusters', return_value=[]):
+        with patch('elastic_blast.azure._sdk_get_aks_clusters', return_value=[]):
             assert get_aks_clusters(cfg) == []
 
     def test_raises_runtime_error_on_bad_json(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.get_aks_clusters', side_effect=RuntimeError('parse error')):
+        with patch('elastic_blast.azure._sdk_get_aks_clusters', side_effect=RuntimeError('parse error')):
             with pytest.raises(RuntimeError):
                 get_aks_clusters(cfg)
 
     def test_calls_az_aks_list_with_resource_group(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.get_aks_clusters', return_value=[]) as mock:
+        with patch('elastic_blast.azure._sdk_get_aks_clusters', return_value=[]) as mock:
             get_aks_clusters(cfg)
         mock.assert_called_once_with(cfg.azure.resourcegroup, cfg.cluster.dry_run)
 
@@ -192,12 +192,12 @@ class TestGetAksCredentials:
 
     def test_returns_kubernetes_context(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.get_aks_credentials', return_value='my-aks-context'):
+        with patch('elastic_blast.azure._sdk_get_aks_credentials', return_value='my-aks-context'):
             assert get_aks_credentials(cfg) == 'my-aks-context'
 
     def test_propagates_error_for_nonexistent_cluster(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.get_aks_credentials',
+        with patch('elastic_blast.azure._sdk_get_aks_credentials',
                    side_effect=UserReportError(1, 'cluster not found')):
             with pytest.raises(UserReportError):
                 get_aks_credentials(cfg)
@@ -393,18 +393,18 @@ class TestClusterNameValidation:
     """Tests for AKS cluster name validation in azure_sdk."""
 
     def test_valid_name(self):
-        from elastic_blast.azure_sdk import start_cluster
+        from elastic_blast.azure import _sdk_start_cluster as start_cluster
         start_cluster('rg', 'elb-test-01', location='eastus',
                       machine_type='Standard_D8s_v3', num_nodes=1, dry_run=True)
 
     def test_uppercase_rejected(self):
-        from elastic_blast.azure_sdk import start_cluster
+        from elastic_blast.azure import _sdk_start_cluster as start_cluster
         with pytest.raises(ValueError, match='Invalid AKS cluster name'):
             start_cluster('rg', 'ELB-Test', location='eastus',
                           machine_type='Standard_D8s_v3', num_nodes=1, dry_run=True)
 
     def test_spaces_rejected(self):
-        from elastic_blast.azure_sdk import start_cluster
+        from elastic_blast.azure import _sdk_start_cluster as start_cluster
         with pytest.raises(ValueError, match='Invalid AKS cluster name'):
             start_cluster('rg', 'elb test', location='eastus',
                           machine_type='Standard_D8s_v3', num_nodes=1, dry_run=True)
@@ -418,23 +418,23 @@ class TestCheckPrerequisites:
     """Tests for azure.check_prerequisites()."""
 
     def test_succeeds_when_all_tools_present(self):
-        with patch('elastic_blast.azure_sdk.check_prerequisites'):
+        with patch('elastic_blast.azure._sdk_check_prerequisites'):
             check_prerequisites()
 
     def test_raises_when_az_missing(self):
-        with patch('elastic_blast.azure_sdk.check_prerequisites',
+        with patch('elastic_blast.azure._sdk_check_prerequisites',
                    side_effect=UserReportError(1, 'Azure authentication failed')):
             with pytest.raises(UserReportError):
                 check_prerequisites()
 
     def test_raises_when_kubectl_missing(self):
-        with patch('elastic_blast.azure_sdk.check_prerequisites',
+        with patch('elastic_blast.azure._sdk_check_prerequisites',
                    side_effect=UserReportError(1, "kubectl doesn't work")):
             with pytest.raises(UserReportError):
                 check_prerequisites()
 
     def test_raises_when_azcopy_missing(self):
-        with patch('elastic_blast.azure_sdk.check_prerequisites',
+        with patch('elastic_blast.azure._sdk_check_prerequisites',
                    side_effect=UserReportError(1, 'azcopy is not installed')):
             with pytest.raises(UserReportError, match='azcopy'):
                 check_prerequisites()

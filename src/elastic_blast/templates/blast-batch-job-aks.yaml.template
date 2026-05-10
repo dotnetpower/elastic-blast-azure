@@ -5,13 +5,13 @@ metadata:
   name: ${ELB_BLAST_PROGRAM}-batch-${ELB_DB_LABEL}-job-${JOB_NUM}
   labels:
     app: blast
-    db: ${ELB_DB}
+    db: ${ELB_DB_LABEL}
 spec:
   template:
     metadata:
       labels:
         app: blast
-        db: ${ELB_DB}
+        db: ${ELB_DB_LABEL}
     spec:
       volumes:
       - name: blast-dbs

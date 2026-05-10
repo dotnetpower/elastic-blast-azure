@@ -27,7 +27,8 @@ if [ -f "$PERF_FILE" ]; then
 fi
 
 # Upload result file only if not already streamed by blast-run-aks.sh
-RESULT_FILE="$RESULTS_DIR/batch_${JOB_NUM}-${ELB_BLAST_PROGRAM}-${ELB_DB}.out.gz"
+ELB_DB_SAFE="${ELB_DB//\//-}"
+RESULT_FILE="$RESULTS_DIR/batch_${JOB_NUM}-${ELB_BLAST_PROGRAM}-${ELB_DB_SAFE}.out.gz"
 if [ -f "$RESULT_FILE" ]; then
     azcopy cp "$RESULT_FILE" "$ELB_RESULTS/"
 fi

@@ -195,7 +195,7 @@ class TestScaleNodes:
         cfg = _make_cfg(dry_run=False)
         elb = ElasticBlastAzure(cfg)
 
-        with patch('elastic_blast.azure_sdk.scale_node_pool') as mock:
+        with patch('elastic_blast.azure._sdk_scale_node_pool') as mock:
             elb.scale_nodes(0)
         mock.assert_called_once()
 
@@ -204,7 +204,7 @@ class TestScaleNodes:
         cfg = _make_cfg(dry_run=False)
         elb = ElasticBlastAzure(cfg)
 
-        with patch('elastic_blast.azure_sdk.scale_node_pool') as mock:
+        with patch('elastic_blast.azure._sdk_scale_node_pool') as mock:
             elb.scale_nodes(5)
         mock.assert_called_once()
 
@@ -213,7 +213,7 @@ class TestScaleNodes:
         cfg = _make_cfg(dry_run=True)
         elb = ElasticBlastAzure(cfg)
 
-        with patch('elastic_blast.azure_sdk.scale_node_pool') as mock:
+        with patch('elastic_blast.azure._sdk_scale_node_pool') as mock:
             elb.scale_nodes(0)
         mock.assert_called_once()
 

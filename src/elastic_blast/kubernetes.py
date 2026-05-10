@@ -677,16 +677,17 @@ def initialize_storage_partitioned(cfg: ElasticBlastConfig, query_files: list[st
     timeout = init_timeout
     sec2wait = 30
     while timeout > 0:
-        cmd = f'kubectl --context={k8s_ctx} get job init-pv-partitioned ' \
-              f'-o jsonpath=' + "'{.status.succeeded}{\"\\t\"}{.status.failed}'"
+        cmd = ['kubectl', f'--context={k8s_ctx}', 'get', 'job',
+               'init-pv-partitioned', '-o',
+               'jsonpath={.status.succeeded} {.status.failed}']
         if dry_run:
-            logging.info(cmd)
+            logging.info(' '.join(cmd))
             break
         else:
             try:
                 proc = safe_exec(cmd)
                 res = handle_error(proc.stdout)
-                parts = res.split('\t')
+                parts = res.split()
                 succeeded = parts[0].strip() if len(parts) > 0 else ''
                 failed = parts[1].strip() if len(parts) > 1 else ''
                 if failed and int(failed) > 0:
@@ -1165,7 +1166,9 @@ def initialize_persistent_disk(cfg: ElasticBlastConfig, query_files: list[str] =
         if wait != ElbExecutionMode.WAIT:
             return
 
-        label_persistent_disk(cfg, 'blast-dbs-pvc-rwo')
+        # label_persistent_disk is GCP-only (uses gcloud to label PDs)
+        if cfg.cloud_provider.cloud != CSP.AZURE:
+            label_persistent_disk(cfg, 'blast-dbs-pvc-rwo')
 
         _wait_for_job(k8s_ctx, job_init_pv, init_blastdb_minutes_timeout,
                       dry_run=dry_run)
@@ -1173,7 +1176,7 @@ def initialize_persistent_disk(cfg: ElasticBlastConfig, query_files: list[str] =
         logging.debug(f'RUNTIME init-pv {end-start} seconds')
 
         if not 'ELB_DONT_DELETE_SETUP_JOBS' in os.environ:
-            cmd = f"kubectl --context={k8s_ctx} delete -f {job_init_pv}"
+            cmd = f"kubectl --context={k8s_ctx} delete -f {job_init_pv} --ignore-not-found=true"
             if dry_run:
                 logging.info(cmd)
             else:
@@ -1188,58 +1191,59 @@ def initialize_persistent_disk(cfg: ElasticBlastConfig, query_files: list[str] =
             secs2sleep = int(os.getenv('ELB_PAUSE_AFTER_INIT_PV', str(ELB_PAUSE_AFTER_INIT_PV)))
             time.sleep(secs2sleep)
 
-        # PVC snapshot
-        logging.debug('Creating PVC snapshot')
-        start = timer()
-        ref = files('elastic_blast') / 'templates/volume-snapshot-class.yaml'
-        with as_file(ref) as snapshot_class:
-            cmd = f"kubectl --context={k8s_ctx} apply -f {snapshot_class}"
+        # PVC snapshot (GCP-only — VolumeSnapshot not available on Azure Blob NFS)
+        if cfg.cloud_provider.cloud != CSP.AZURE:
+            logging.debug('Creating PVC snapshot')
+            start = timer()
+            ref = files('elastic_blast') / 'templates/volume-snapshot-class.yaml'
+            with as_file(ref) as snapshot_class:
+                cmd = f"kubectl --context={k8s_ctx} apply -f {snapshot_class}"
+                if dry_run:
+                    logging.info(cmd)
+                else:
+                    safe_exec(cmd)
+
+            ref = files('elastic_blast') / 'templates/volume-snapshot.yaml'
+            with as_file(ref) as snapshot:
+                cmd = f"kubectl --context={k8s_ctx} apply -f {snapshot}"
+                if dry_run:
+                    logging.info(cmd)
+                else:
+                    safe_exec(cmd)
+
+            # wair until snapshot is ready
+            _wait_for_snapshot(k8s_ctx, pathlib.Path(snapshot), dry_run=dry_run)
+            end = timer()
+            logging.debug(f'PVC snapshot created and ready in {end - start:.2f} seconds')
+
+            snapshots = get_volume_snapshots(k8s_ctx, dry_run)
+            if snapshots:
+                # logging.debug(f'GCP volume snapshot IDs {snapshots}')
+                logging.debug(f'volume snapshot IDs {snapshots}')
+                cfg.appstate.resources.snapshots += snapshots
+                dest = os.path.join(cfg.cluster.results, ELB_METADATA_DIR, ELB_STATE_DISK_ID_FILE)
+                with open_for_write_immediate(dest, sas_token=sas_token) as f:
+                    f.write(cfg.appstate.resources.to_json())
+            elif not dry_run:
+                logging.error('Failed to get snapshot ID')
+
+            # delete the persistent disk
+            logging.debug('Deleting writable persistent disk')
+            cmd = f'kubectl --context={k8s_ctx} delete -f {pvc_yaml}'
             if dry_run:
                 logging.info(cmd)
             else:
                 safe_exec(cmd)
 
-        ref = files('elastic_blast') / 'templates/volume-snapshot.yaml'
-        with as_file(ref) as snapshot:
-            cmd = f"kubectl --context={k8s_ctx} apply -f {snapshot}"
+            # Create a new ReadOnlyMany PVC
+            logging.debug('Creating ReadOnlyMany PVC from snapshot')
+            cloned_pvc_yaml = os.path.join(d, 'pvc-rom.yaml')
+            with open(cloned_pvc_yaml, 'w') as f:
+                ref = files('elastic_blast').joinpath('templates/pvc-rom.yaml.template')
+                f.write(substitute_params(ref.read_text(), subs))
+            cmd = f"kubectl --context={k8s_ctx} apply -f {cloned_pvc_yaml}"
             if dry_run:
                 logging.info(cmd)
-            else:
-                safe_exec(cmd)
-
-        # wair until snapshot is ready
-        _wait_for_snapshot(k8s_ctx, pathlib.Path(snapshot), dry_run=dry_run)
-        end = timer()
-        logging.debug(f'PVC snapshot created and ready in {end - start:.2f} seconds')
-
-        snapshots = get_volume_snapshots(k8s_ctx, dry_run)
-        if snapshots:
-            # logging.debug(f'GCP volume snapshot IDs {snapshots}')
-            logging.debug(f'volume snapshot IDs {snapshots}')
-            cfg.appstate.resources.snapshots += snapshots
-            dest = os.path.join(cfg.cluster.results, ELB_METADATA_DIR, ELB_STATE_DISK_ID_FILE)
-            with open_for_write_immediate(dest, sas_token=sas_token) as f:
-                f.write(cfg.appstate.resources.to_json())
-        elif not dry_run:
-            logging.error('Failed to get snapshot ID')
-
-        # delete the persistent disk
-        logging.debug('Deleting writable persistent disk')
-        cmd = f'kubectl --context={k8s_ctx} delete -f {pvc_yaml}'
-        if dry_run:
-            logging.info(cmd)
-        else:
-            safe_exec(cmd)
-
-        # Create a new ReadOnlyMany PVC
-        logging.debug('Creating ReadOnlyMany PVC from snapshot')
-        cloned_pvc_yaml = os.path.join(d, 'pvc-rom.yaml')
-        with open(cloned_pvc_yaml, 'w') as f:
-            ref = files('elastic_blast').joinpath('templates/pvc-rom.yaml.template')
-            f.write(substitute_params(ref.read_text(), subs))
-        cmd = f"kubectl --context={k8s_ctx} apply -f {cloned_pvc_yaml}"
-        if dry_run:
-            logging.info(cmd)
         else:
             safe_exec(cmd)
 

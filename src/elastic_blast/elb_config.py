@@ -80,7 +80,7 @@ from .constants import CFG_BLAST_MEM_REQUEST, CFG_BLAST_MEM_LIMIT
 from .constants import CFG_BLAST_DB_MEM_MARGIN
 from .constants import CFG_BLAST_MIN_QSIZE_TO_SPLIT_ON_CLIENT_COMPRESSED
 from .constants import CFG_BLAST_MIN_QSIZE_TO_SPLIT_ON_CLIENT_UNCOMPRESSED
-from .constants import CFG_BLAST_DB_PARTITIONS, CFG_BLAST_DB_PARTITION_PREFIX
+from .constants import CFG_BLAST_DB_PARTITIONS, CFG_BLAST_DB_PARTITION_PREFIX, CFG_BLAST_DB_AUTO_PARTITION
 from .constants import CFG_CLUSTER, CFG_CLUSTER_NAME, CFG_CLUSTER_MACHINE_TYPE
 from .constants import CFG_CLUSTER_NUM_NODES, CFG_CLUSTER_NUM_CPUS
 from .constants import CFG_CLUSTER_PD_SIZE, CFG_CLUSTER_USE_PREEMPTIBLE
@@ -499,6 +499,7 @@ class BlastConfig(ConfigParserToDataclassMapper):
     min_qsize_to_split_on_client_compressed: PositiveInteger = PositiveInteger(ELB_DFLT_MIN_QUERY_FILESIZE_TO_SPLIT_ON_CLIENT_COMPRESSED)
     min_qsize_to_split_on_client_uncompressed: PositiveInteger = PositiveInteger(ELB_DFLT_MIN_QUERY_FILESIZE_TO_SPLIT_ON_CLIENT_UNCOMPRESSED)
     # DB Partitioning (Azure-only): split large DB into N partitions for parallel search
+    db_auto_partition: bool = False
     db_partitions: int = 0
     db_partition_prefix: str = ''
 
@@ -518,6 +519,7 @@ class BlastConfig(ConfigParserToDataclassMapper):
                'user_provided_batch_len': None,
                'min_qsize_to_split_on_client_compressed': ParamInfo(CFG_BLAST, CFG_BLAST_MIN_QSIZE_TO_SPLIT_ON_CLIENT_COMPRESSED),
                'min_qsize_to_split_on_client_uncompressed': ParamInfo(CFG_BLAST, CFG_BLAST_MIN_QSIZE_TO_SPLIT_ON_CLIENT_UNCOMPRESSED),
+               'db_auto_partition': ParamInfo(CFG_BLAST, CFG_BLAST_DB_AUTO_PARTITION),
                'db_partitions': ParamInfo(CFG_BLAST, CFG_BLAST_DB_PARTITIONS),
                'db_partition_prefix': ParamInfo(CFG_BLAST, CFG_BLAST_DB_PARTITION_PREFIX)}
                
@@ -566,8 +568,8 @@ class BlastConfig(ConfigParserToDataclassMapper):
             errors.append(f'Incorrect value for blast.db_mem_margin: "{self.db_mem_margin}", must be larger than 1')
 
         # DB partitioning validation
-        if self.db_partitions > 0 and not self.db_partition_prefix:
-            errors.append('db-partition-prefix must be specified when db-partitions > 0')
+        if self.db_partitions > 0 and not self.db_partition_prefix and not self.db_auto_partition:
+            errors.append('db-partition-prefix must be specified when db-partitions > 0 (or enable db-auto-partition = true)')
         if self.db_partitions < 0:
             errors.append(f'db-partitions must be non-negative, got {self.db_partitions}')
 

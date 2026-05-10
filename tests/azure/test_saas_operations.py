@@ -1,7 +1,7 @@
 # Tests for Phase 5: SaaS Operations — Cost tracker and Spot VM support
 
 """
-Unit tests for azure_cost_tracker.py and Spot VM configuration.
+Unit tests for cost estimation and Spot VM configuration.
 
 Author: Moon Hyuk Choi moonchoi@microsoft.com
 """
@@ -9,7 +9,7 @@ Author: Moon Hyuk Choi moonchoi@microsoft.com
 import os
 from unittest.mock import patch, MagicMock
 import pytest
-from elastic_blast.azure_cost_tracker import estimate_cost, CostEstimate, AZURE_VM_HOURLY_PRICES
+from elastic_blast.azure_traits import estimate_cost, CostEstimate, AZURE_VM_HOURLY_PRICES
 
 
 class TestCostEstimate:

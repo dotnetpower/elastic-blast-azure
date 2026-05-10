@@ -27,7 +27,7 @@ def prepare(args, cfg: ElasticBlastConfig, clean_up_stack):
         raise UserReportError(returncode=INPUT_ERROR,
                               message='The prepare command is only supported on Azure.')
 
-    from elastic_blast.azure_sdk import check_prerequisites as azure_check_prerequisites
+    from elastic_blast.azure import _sdk_check_prerequisites as azure_check_prerequisites
     azure_check_prerequisites()
 
     if os.getenv('TEAMCITY_VERSION') is None:

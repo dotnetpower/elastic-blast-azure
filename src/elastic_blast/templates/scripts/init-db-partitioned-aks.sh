@@ -45,21 +45,6 @@ done
 end=$(date +%s)
 echo "RUNTIME download-partitions $((end - start)) seconds"
 
-for i in $(seq 0 $((ELB_NUM_PARTITIONS - 1))); do
-    part_idx=$(printf '%02d' "$i")
-    part_url="${ELB_PARTITION_PREFIX}${part_idx}/*"
-    part_dir="part_${part_idx}"
-
-    echo "Downloading partition $i from $part_url"
-    mkdir -p "/blast/blastdb/${part_dir}"
-    retry_azcopy cp "$part_url" "/blast/blastdb/${part_dir}/" --recursive --block-size-mb=256 --log-level=WARNING
-    exit_code=$?
-    [ $exit_code -eq 0 ] || exit $exit_code
-done
-
-end=$(date +%s)
-echo "RUNTIME download-partitions $((end - start)) seconds"
-
 # Clean up azcopy background processes to ensure container exits cleanly
 pkill -f azcopy 2>/dev/null || true
 rm -rf /root/.azcopy 2>/dev/null || true

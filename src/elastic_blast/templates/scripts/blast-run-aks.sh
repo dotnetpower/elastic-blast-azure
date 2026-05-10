@@ -14,6 +14,9 @@
 
 echo "BASH version ${BASH_VERSION}"
 
+# Sanitize DB name for use in output filenames (replace '/' with '-')
+ELB_DB_SAFE="${ELB_DB//\//-}"
+
 # Defer azcopy login — only needed for error upload on failure, not for BLAST itself
 # azcopy login --identity  # moved to failure handler below
 
@@ -33,7 +36,7 @@ echo "run start $JOB_NUM $ELB_BLAST_PROGRAM $ELB_DB"
 
 # Run BLAST with timing
 # shellcheck disable=SC2086
-echo "$ELB_BLAST_PROGRAM -db $ELB_DB -query $QUERY_DIR/batch_${JOB_NUM}.fa -out $RESULTS_DIR/batch_${JOB_NUM}-${ELB_BLAST_PROGRAM}-${ELB_DB}.out -num_threads $ELB_NUM_CPUS $ELB_BLAST_OPTIONS"
+echo "$ELB_BLAST_PROGRAM -db $ELB_DB -query $QUERY_DIR/batch_${JOB_NUM}.fa -out $RESULTS_DIR/batch_${JOB_NUM}-${ELB_BLAST_PROGRAM}-${ELB_DB_SAFE}.out -num_threads $ELB_NUM_CPUS $ELB_BLAST_OPTIONS"
 
 # shellcheck disable=SC2086
 TIME="$DATE_NOW run start $JOB_NUM $ELB_BLAST_PROGRAM $ELB_DB %e %U %S %P" \
@@ -41,7 +44,7 @@ TIME="$DATE_NOW run start $JOB_NUM $ELB_BLAST_PROGRAM $ELB_DB %e %U %S %P" \
 $ELB_BLAST_PROGRAM \
 -db "$ELB_DB" \
 -query "$QUERY_DIR/batch_${JOB_NUM}.fa" \
--out "$RESULTS_DIR/batch_${JOB_NUM}-${ELB_BLAST_PROGRAM}-${ELB_DB}.out" \
+-out "$RESULTS_DIR/batch_${JOB_NUM}-${ELB_BLAST_PROGRAM}-${ELB_DB_SAFE}.out" \
 -num_threads "$ELB_NUM_CPUS" \
 $ELB_BLAST_OPTIONS \
 2>"$ERROR_FILE"
@@ -58,12 +61,12 @@ echo "$(date -u +"$ELB_TIMEFMT") run end $JOB_NUM" >> "$BLAST_RUNTIME"
 # Compress results and save runtime info
 if [ "${ELB_STREAM_RESULTS:-false}" = "true" ]; then
     # Direct-to-Blob streaming: avoid writing compressed file to disk
-    gzip -c "$RESULTS_DIR/batch_${JOB_NUM}-${ELB_BLAST_PROGRAM}-${ELB_DB}.out" \
+    gzip -c "$RESULTS_DIR/batch_${JOB_NUM}-${ELB_BLAST_PROGRAM}-${ELB_DB_SAFE}.out" \
     | python3 /scripts/blob-stream-upload.py "$ELB_RESULTS" \
-    "batch_${JOB_NUM}-${ELB_BLAST_PROGRAM}-${ELB_DB}.out.gz"
-    rm "$RESULTS_DIR/batch_${JOB_NUM}-${ELB_BLAST_PROGRAM}-${ELB_DB}.out"
+    "batch_${JOB_NUM}-${ELB_BLAST_PROGRAM}-${ELB_DB_SAFE}.out.gz"
+    rm "$RESULTS_DIR/batch_${JOB_NUM}-${ELB_BLAST_PROGRAM}-${ELB_DB_SAFE}.out"
 else
-    gzip "$RESULTS_DIR/batch_${JOB_NUM}-${ELB_BLAST_PROGRAM}-${ELB_DB}.out"
+    gzip "$RESULTS_DIR/batch_${JOB_NUM}-${ELB_BLAST_PROGRAM}-${ELB_DB_SAFE}.out"
 fi
 cp "$BLAST_RUNTIME" "$RESULTS_DIR/BLAST_RUNTIME-${JOB_NUM}.out"
 echo "$BLAST_EXIT_CODE" > "$RESULTS_DIR/BLAST_EXIT_CODE-${JOB_NUM}.out"

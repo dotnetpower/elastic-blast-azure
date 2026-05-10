@@ -84,27 +84,27 @@ class TestCheckCluster:
 
     def test_returns_succeeded_for_running_cluster(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.check_cluster', return_value='Succeeded'):
+        with patch('elastic_blast.azure._sdk_check_cluster', return_value='Succeeded'):
             assert check_cluster(cfg) == AKS_PROVISIONING_STATE.SUCCEEDED.value
 
     def test_returns_empty_for_no_cluster(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.check_cluster', return_value=''):
+        with patch('elastic_blast.azure._sdk_check_cluster', return_value=''):
             assert check_cluster(cfg) == ''
 
     def test_returns_creating_for_provisioning_cluster(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.check_cluster', return_value='Creating'):
+        with patch('elastic_blast.azure._sdk_check_cluster', return_value='Creating'):
             assert check_cluster(cfg) == AKS_PROVISIONING_STATE.CREATING.value
 
     def test_dry_run_returns_empty(self):
         cfg = _make_cfg(dry_run=True)
-        with patch('elastic_blast.azure_sdk.check_cluster', return_value=''):
+        with patch('elastic_blast.azure._sdk_check_cluster', return_value=''):
             assert check_cluster(cfg) == ''
 
     def test_calls_az_aks_list_with_resource_group(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.check_cluster', return_value='Succeeded') as m:
+        with patch('elastic_blast.azure._sdk_check_cluster', return_value='Succeeded') as m:
             check_cluster(cfg)
         m.assert_called_once_with(cfg.azure.resourcegroup, cfg.cluster.name, cfg.cluster.dry_run)
 
@@ -114,17 +114,17 @@ class TestGetAksClusters:
 
     def test_returns_cluster_names(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.get_aks_clusters', return_value=['cluster-1', 'cluster-2']):
+        with patch('elastic_blast.azure._sdk_get_aks_clusters', return_value=['cluster-1', 'cluster-2']):
             assert get_aks_clusters(cfg) == ['cluster-1', 'cluster-2']
 
     def test_returns_empty_list_when_no_clusters(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.get_aks_clusters', return_value=[]):
+        with patch('elastic_blast.azure._sdk_get_aks_clusters', return_value=[]):
             assert get_aks_clusters(cfg) == []
 
     def test_raises_runtime_error_on_bad_json(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.get_aks_clusters', side_effect=RuntimeError('parse error')):
+        with patch('elastic_blast.azure._sdk_get_aks_clusters', side_effect=RuntimeError('parse error')):
             with pytest.raises(RuntimeError):
                 get_aks_clusters(cfg)
 
@@ -136,19 +136,19 @@ class TestDeleteCluster:
         cfg = _make_cfg(dry_run=False)
         mock_poller = MagicMock()
         mock_poller.result.return_value = None
-        with patch('elastic_blast.azure_sdk.delete_cluster', return_value=mock_poller):
+        with patch('elastic_blast.azure._sdk_delete_cluster', return_value=mock_poller):
             result = delete_cluster(cfg)
         assert result == cfg.cluster.name
 
     def test_dry_run_does_not_execute(self):
         cfg = _make_cfg(dry_run=True)
-        with patch('elastic_blast.azure_sdk.delete_cluster', return_value=None):
+        with patch('elastic_blast.azure._sdk_delete_cluster', return_value=None):
             result = delete_cluster(cfg)
         assert result == cfg.cluster.name
 
     def test_propagates_safe_exec_error(self):
         cfg = _make_cfg(dry_run=False)
-        with patch('elastic_blast.azure_sdk.delete_cluster',
+        with patch('elastic_blast.azure._sdk_delete_cluster',
                    side_effect=Exception('cluster not found')):
             with pytest.raises(Exception):
                 delete_cluster(cfg)

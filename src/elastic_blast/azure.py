@@ -4,23 +4,43 @@ elastic_blast/azure.py — Azure AKS implementation of ElasticBLAST
 Manages the lifecycle of BLAST searches on Azure Kubernetes Service:
 cluster creation, DB initialization, job submission, status checking, and cleanup.
 
+Includes:
+- Azure SDK clients (AzureClients, AKS/IAM/Disk operations)
+- Application Insights telemetry (OpenTelemetry integration)
+- Optimization profiles (cost/balanced/performance)
+- Module-level resource management functions
+
 Authors: Moon Hyuk Choi moonchoi@microsoft.com
 """
 
 import os
+import re
 import shlex
 import time
 import logging
+import threading
+import math
+import uuid
+import tempfile
+import base64
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from timeit import default_timer as timer
 from typing import Any, DefaultDict, Dict, Optional, List, Tuple
 from collections import defaultdict
+from dataclasses import dataclass
+from enum import Enum
 from tenacity import retry, stop_after_attempt, wait_exponential
+
+from azure.identity import DefaultAzureCredential  # type: ignore
+from azure.mgmt.containerservice import ContainerServiceClient  # type: ignore
+from azure.mgmt.compute import ComputeManagementClient  # type: ignore
+from azure.mgmt.storage import StorageManagementClient  # type: ignore
+from azure.mgmt.authorization import AuthorizationManagementClient  # type: ignore
+from azure.core.exceptions import ResourceNotFoundError, HttpResponseError  # type: ignore
 
 from .base import MemoryStr
 from .subst import substitute_params
-from . import azure_monitor as monitor
 from .filehelper import open_for_write_immediate
 from .jobs import read_job_template, write_job_files
 from .util import (ElbSupportedPrograms, safe_exec, UserReportError, SafeExecError,
@@ -39,7 +59,585 @@ from .constants import (
 from .elb_config import ElasticBlastConfig, ResourceIds
 from .elasticblast import ElasticBlast
 from . import VERSION
-from . import azure_sdk as sdk
+from .azure_traits import (
+    AZURE_VM_HOURLY_PRICES, SPOT_DISCOUNT_FACTOR,
+    get_machine_properties, apply_auto_partition,
+)
+
+
+# ===========================================================================
+# Azure SDK Clients
+# ===========================================================================
+
+class AzureClients:
+    """Lazy-initialized Azure SDK clients using DefaultAzureCredential."""
+
+    def __init__(self, subscription_id: str):
+        self._subscription_id = subscription_id
+        self._credential = DefaultAzureCredential()
+        self._aks: Optional[ContainerServiceClient] = None
+        self._compute: Optional[ComputeManagementClient] = None
+        self._storage: Optional[StorageManagementClient] = None
+        self._auth: Optional[AuthorizationManagementClient] = None
+
+    @property
+    def aks(self) -> ContainerServiceClient:
+        if self._aks is None:
+            self._aks = ContainerServiceClient(self._credential, self._subscription_id)
+        return self._aks
+
+    @property
+    def compute(self) -> ComputeManagementClient:
+        if self._compute is None:
+            self._compute = ComputeManagementClient(self._credential, self._subscription_id)
+        return self._compute
+
+    @property
+    def storage(self) -> StorageManagementClient:
+        if self._storage is None:
+            self._storage = StorageManagementClient(self._credential, self._subscription_id)
+        return self._storage
+
+    @property
+    def auth(self) -> AuthorizationManagementClient:
+        if self._auth is None:
+            self._auth = AuthorizationManagementClient(self._credential, self._subscription_id)
+        return self._auth
+
+    @property
+    def subscription_id(self) -> str:
+        return self._subscription_id
+
+
+_clients: Optional[AzureClients] = None
+
+
+def _get_subscription_id() -> str:
+    """Get Azure subscription ID from az CLI profile or Azure REST API."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ['az', 'account', 'show', '--query', 'id', '-o', 'tsv'],
+            capture_output=True, text=True, timeout=10)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    import requests
+    credential = DefaultAzureCredential()
+    token = credential.get_token("https://management.azure.com/.default")
+    resp = requests.get(
+        "https://management.azure.com/subscriptions?api-version=2022-12-01",
+        headers={"Authorization": f"Bearer {token.token}"})
+    resp.raise_for_status()
+    subs = resp.json().get("value", [])
+    if subs:
+        return subs[0]["subscriptionId"]
+    raise RuntimeError("No Azure subscription found")
+
+
+def _get_clients() -> AzureClients:
+    """Get or create the module-level AzureClients singleton."""
+    global _clients
+    if _clients is None:
+        _clients = AzureClients(_get_subscription_id())
+    return _clients
+
+
+@retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))  # type: ignore
+def _sdk_check_cluster(resource_group: str, cluster_name: str, dry_run: bool = False) -> str:
+    if dry_run:
+        return ''
+    try:
+        clients = _get_clients()
+        cluster = clients.aks.managed_clusters.get(resource_group, cluster_name)
+        return cluster.provisioning_state or ''
+    except ResourceNotFoundError:
+        return ''
+    except HttpResponseError as e:
+        logging.warning(f'Error checking cluster {cluster_name}: {e.message}')
+        return ''
+
+
+def _sdk_start_cluster(resource_group: str, cluster_name: str, *,
+                       location: str, machine_type: str, num_nodes: int,
+                       use_local_ssd: bool = False, use_spot: bool = False,
+                       tags: Optional[Dict[str, str]] = None,
+                       k8s_version: Optional[str] = None,
+                       dry_run: bool = False) -> Optional[Any]:
+    if not re.match(r'^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$', cluster_name):
+        raise ValueError(
+            f'Invalid AKS cluster name "{cluster_name}". '
+            'Must be 1-63 lowercase alphanumeric characters or hyphens.')
+
+    agent_pool_profile = {
+        "name": "nodepool1", "count": num_nodes, "vm_size": machine_type,
+        "os_disk_type": "Managed", "mode": "System",
+        "enable_auto_scaling": False, "type": "VirtualMachineScaleSets",
+    }
+    if use_spot:
+        logging.warning('Spot VM requested but system pool does not support it.')
+
+    cluster_params: Dict[str, Any] = {
+        "location": location, "tags": tags or {},
+        "identity": {"type": "SystemAssigned"}, "dns_prefix": cluster_name,
+        "kubernetes_version": k8s_version if k8s_version else None,
+        "auto_upgrade_profile": {"upgrade_channel": "none"},
+        "agent_pool_profiles": [agent_pool_profile],
+        "network_profile": {"load_balancer_sku": "standard"},
+        "storage_profile": {"blob_csi_driver": {"enabled": not use_local_ssd}},
+    }
+
+    if dry_run:
+        logging.info(f'SDK: start_cluster({resource_group}, {cluster_name}, vm={machine_type}, nodes={num_nodes})')
+        return None
+
+    try:
+        clients = _get_clients()
+        start = timer()
+        logging.info(f'Creating AKS cluster {cluster_name} in {resource_group} ({machine_type} x {num_nodes})')
+        poller = clients.aks.managed_clusters.begin_create_or_update(
+            resource_group, cluster_name, cluster_params)
+        logging.debug(f'RUNTIME cluster-create-request {timer() - start:.1f}s')
+        return poller
+    except HttpResponseError as e:
+        raise UserReportError(CLUSTER_ERROR,
+            f'Failed to create AKS cluster {cluster_name}: {e.message}') from e
+    except Exception as e:
+        raise UserReportError(CLUSTER_ERROR,
+            f'Azure SDK error creating cluster {cluster_name}: {e}') from e
+
+
+def _sdk_delete_cluster(resource_group: str, cluster_name: str, dry_run: bool = False) -> Optional[Any]:
+    if dry_run:
+        return None
+    try:
+        clients = _get_clients()
+        poller = clients.aks.managed_clusters.begin_delete(resource_group, cluster_name)
+        return poller
+    except ResourceNotFoundError:
+        logging.info(f'Cluster {cluster_name} not found, nothing to delete')
+        return None
+    except HttpResponseError as e:
+        logging.warning(f'Failed to delete cluster {cluster_name}: {e.message}')
+        return None
+
+
+@retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))  # type: ignore
+def _sdk_get_aks_clusters(resource_group: str, dry_run: bool = False) -> List[str]:
+    if dry_run:
+        return []
+    clients = _get_clients()
+    return [c.name for c in clients.aks.managed_clusters.list_by_resource_group(resource_group)]
+
+
+@retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))  # type: ignore
+def _sdk_get_aks_credentials(resource_group: str, cluster_name: str, dry_run: bool = False) -> str:
+    if dry_run:
+        return 'k8s-uninitialized-context'
+    try:
+        clients = _get_clients()
+        cred_result = clients.aks.managed_clusters.list_cluster_user_credentials(resource_group, cluster_name)
+    except ResourceNotFoundError:
+        raise UserReportError(CLUSTER_ERROR,
+            f'Cluster {cluster_name} not found in resource group {resource_group}.')
+    except HttpResponseError as e:
+        raise UserReportError(CLUSTER_ERROR,
+            f'Failed to get credentials for cluster {cluster_name}: {e.message}')
+
+    if not cred_result.kubeconfigs:
+        raise UserReportError(CLUSTER_ERROR, f'No kubeconfig returned for cluster {cluster_name}')
+
+    kubeconfig_bytes = cred_result.kubeconfigs[0].value
+    kube_dir = os.path.expanduser('~/.kube')
+    os.makedirs(kube_dir, exist_ok=True)
+    kube_config_path = os.path.join(kube_dir, 'config')
+
+    with tempfile.NamedTemporaryFile(mode='wb', suffix='.yaml', delete=False) as tmp:
+        tmp.write(kubeconfig_bytes)
+        tmp_path = tmp.name
+    try:
+        env = os.environ.copy()
+        existing = env.get('KUBECONFIG', kube_config_path)
+        env['KUBECONFIG'] = f'{existing}:{tmp_path}'
+        import subprocess
+        with open(kube_config_path, 'w') as kube_out:
+            subprocess.run(['kubectl', 'config', 'view', '--flatten'],
+                           stdout=kube_out, env=env, check=True)
+    finally:
+        os.unlink(tmp_path)
+
+    p = safe_exec('kubectl config current-context'.split())
+    return handle_error(p.stdout).strip()
+
+
+def _sdk_scale_node_pool(resource_group: str, cluster_name: str,
+                         pool_name: str, node_count: int,
+                         dry_run: bool = False) -> Optional[Any]:
+    if dry_run:
+        return None
+    clients = _get_clients()
+    logging.info(f'Scaling AKS node pool {pool_name} to {node_count} nodes')
+    return clients.aks.agent_pools.begin_create_or_update(
+        resource_group, cluster_name, pool_name, {"count": node_count})
+
+
+@retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))  # type: ignore
+def _sdk_set_role_assignments(resource_group: str, cluster_name: str,
+                              storage_account: str, acr_name: str,
+                              acr_resource_group: str, dry_run: bool = False) -> None:
+    if dry_run:
+        return
+    clients = _get_clients()
+    sub_id = clients.subscription_id
+    cluster = clients.aks.managed_clusters.get(resource_group, cluster_name)
+    kubelet_id = cluster.identity_profile["kubeletidentity"].object_id
+
+    sa = clients.storage.storage_accounts.get_properties(resource_group, storage_account)
+    acr_id = f'/subscriptions/{sub_id}/resourceGroups/{acr_resource_group}/providers/Microsoft.ContainerRegistry/registries/{acr_name}'
+
+    ROLE_DEFS = {
+        'Storage Blob Data Contributor': 'ba92f5b4-2d11-453d-a403-e96b0029c9fe',
+        'AcrPull': '7f951dda-4ed3-4680-a7ca-43fe172d538d',
+        'Contributor': 'b24988ac-6180-42a0-ab88-20f7382dd24c',
+    }
+    for role_name, scope in [
+        ('Storage Blob Data Contributor', sa.id),
+        ('AcrPull', acr_id),
+        ('Contributor', f'/subscriptions/{sub_id}'),
+    ]:
+        role_def_id = f'/subscriptions/{sub_id}/providers/Microsoft.Authorization/roleDefinitions/{ROLE_DEFS[role_name]}'
+        try:
+            clients.auth.role_assignments.create(
+                scope, str(uuid.uuid4()),
+                {"role_definition_id": role_def_id, "principal_id": kubelet_id,
+                 "principal_type": "ServicePrincipal"})
+        except HttpResponseError as e:
+            if 'RoleAssignmentExists' not in str(e):
+                raise
+
+
+@retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))  # type: ignore
+def _sdk_get_disks(resource_group: str, dry_run: bool = False) -> List[str]:
+    if dry_run:
+        return []
+    return [d.name for d in _get_clients().compute.disks.list_by_resource_group(resource_group)]
+
+
+@retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))  # type: ignore
+def _sdk_get_snapshots(resource_group: str, dry_run: bool = False) -> List[str]:
+    if dry_run:
+        return []
+    return [s.name for s in _get_clients().compute.snapshots.list_by_resource_group(resource_group)]
+
+
+@retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))  # type: ignore
+def _sdk_delete_disk(resource_group: str, disk_name: str) -> None:
+    if not disk_name:
+        raise ValueError('No disk name provided')
+    _get_clients().compute.disks.begin_delete(resource_group, disk_name).result()
+
+
+@retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))  # type: ignore
+def _sdk_delete_snapshot(resource_group: str, snapshot_name: str) -> None:
+    if not snapshot_name:
+        raise ValueError('No snapshot name provided')
+    _get_clients().compute.snapshots.begin_delete(resource_group, snapshot_name).result()
+
+
+def _sdk_check_prerequisites() -> None:
+    import shutil
+    try:
+        p = safe_exec('kubectl version --output=json --client=true')
+        logging.debug(f'{":".join(p.stdout.decode().split())}')
+    except SafeExecError as e:
+        raise UserReportError(DEPENDENCY_ERROR,
+            f"Required pre-requisite 'kubectl' doesn't work. Details: {e.message}")
+    if shutil.which('azcopy') is None:
+        raise UserReportError(DEPENDENCY_ERROR,
+            "Required pre-requisite 'azcopy' is not installed.")
+    try:
+        DefaultAzureCredential().get_token("https://management.azure.com/.default")
+    except Exception as e:
+        raise UserReportError(DEPENDENCY_ERROR,
+            f"Azure authentication failed. Run 'az login'. Details: {e}")
+
+
+# ===========================================================================
+# Application Insights Telemetry
+#
+# Activated by setting APPLICATIONINSIGHTS_CONNECTION_STRING env var.
+# When unset, all track_* functions are no-ops (zero overhead).
+# See docs/azure-app-insights.md for setup instructions.
+# ===========================================================================
+
+_MONITOR_CONN_STR = os.environ.get('APPLICATIONINSIGHTS_CONNECTION_STRING', '')
+_monitor_initialized = False
+_monitor_init_lock = threading.Lock()
+_monitor_tracer = None
+_monitor_meter = None
+_monitor_jobs_submitted = None
+_monitor_jobs_failed = None
+_monitor_cluster_create_duration = None
+
+
+def _ensure_monitor_initialized():
+    global _monitor_initialized, _monitor_tracer, _monitor_meter
+    global _monitor_jobs_submitted, _monitor_jobs_failed, _monitor_cluster_create_duration
+
+    if _monitor_initialized:
+        return
+    with _monitor_init_lock:
+        if _monitor_initialized:
+            return
+        _monitor_initialized = True
+
+    if not _MONITOR_CONN_STR:
+        return
+
+    try:
+        from opentelemetry import trace, metrics  # type: ignore[import-untyped]
+        from opentelemetry.sdk.trace import TracerProvider  # type: ignore[import-untyped]
+        from opentelemetry.sdk.metrics import MeterProvider  # type: ignore[import-untyped]
+        from azure.monitor.opentelemetry.exporter import (  # type: ignore[import-untyped]
+            AzureMonitorTraceExporter, AzureMonitorMetricExporter)
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor  # type: ignore[import-untyped]
+        from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader  # type: ignore[import-untyped]
+
+        tp = TracerProvider()
+        tp.add_span_processor(BatchSpanProcessor(AzureMonitorTraceExporter(connection_string=_MONITOR_CONN_STR)))
+        trace.set_tracer_provider(tp)
+        _monitor_tracer = trace.get_tracer('elastic_blast.azure')
+
+        mp = MeterProvider(metric_readers=[PeriodicExportingMetricReader(
+            AzureMonitorMetricExporter(connection_string=_MONITOR_CONN_STR), export_interval_millis=60000)])
+        metrics.set_meter_provider(mp)
+        _monitor_meter = metrics.get_meter('elastic_blast.azure')
+        _monitor_jobs_submitted = _monitor_meter.create_counter(
+            'elb.jobs.submitted', description='Total BLAST jobs submitted')
+        _monitor_jobs_failed = _monitor_meter.create_counter(
+            'elb.jobs.failed', description='BLAST jobs failed')
+        _monitor_cluster_create_duration = _monitor_meter.create_histogram(
+            'elb.cluster.create_duration_s', description='Cluster creation time in seconds')
+        logging.info('Azure Monitor: initialized')
+    except ImportError:
+        logging.debug('Azure Monitor: opentelemetry SDK not installed')
+    except Exception as e:
+        logging.warning(f'Azure Monitor: init failed ({e})')
+
+
+def track_search_submitted(*, job_id: str, program: str, db: str,
+                            num_jobs: int, num_nodes: int, machine_type: str) -> None:
+    try:
+        _ensure_monitor_initialized()
+        if _monitor_tracer:
+            with _monitor_tracer.start_as_current_span('elb.search.submit') as span:
+                span.set_attribute('elb.job_id', job_id)
+                span.set_attribute('elb.program', program)
+                span.set_attribute('elb.db', db)
+                span.set_attribute('elb.num_jobs', num_jobs)
+                span.set_attribute('elb.num_nodes', num_nodes)
+                span.set_attribute('elb.machine_type', machine_type)
+        if _monitor_jobs_submitted:
+            _monitor_jobs_submitted.add(num_jobs, {'program': program, 'db': db})
+    except Exception as e:
+        logging.debug(f'Telemetry error (search_submitted): {e}')
+
+
+def track_search_completed(*, job_id: str, succeeded: int, failed: int,
+                            program: str = '', db: str = '') -> None:
+    try:
+        _ensure_monitor_initialized()
+        if _monitor_tracer:
+            with _monitor_tracer.start_as_current_span('elb.search.complete') as span:
+                span.set_attribute('elb.job_id', job_id)
+                span.set_attribute('elb.succeeded', succeeded)
+                span.set_attribute('elb.failed', failed)
+                span.set_attribute('elb.program', program)
+                span.set_attribute('elb.db', db)
+        if _monitor_jobs_failed and failed > 0:
+            _monitor_jobs_failed.add(failed, {'program': program, 'db': db})
+    except Exception as e:
+        logging.debug(f'Telemetry error (search_completed): {e}')
+
+
+def track_cluster_created(*, cluster_name: str, duration_s: float,
+                           num_nodes: int, machine_type: str) -> None:
+    try:
+        _ensure_monitor_initialized()
+        if _monitor_tracer:
+            with _monitor_tracer.start_as_current_span('elb.cluster.create') as span:
+                span.set_attribute('elb.cluster_name', cluster_name)
+                span.set_attribute('elb.duration_s', duration_s)
+                span.set_attribute('elb.num_nodes', num_nodes)
+                span.set_attribute('elb.machine_type', machine_type)
+        if _monitor_cluster_create_duration:
+            _monitor_cluster_create_duration.record(duration_s)
+    except Exception as e:
+        logging.debug(f'Telemetry error (cluster_created): {e}')
+
+
+def track_cluster_deleted(*, cluster_name: str, duration_s: float,
+                           num_nodes: int = 0, machine_type: str = '') -> None:
+    try:
+        _ensure_monitor_initialized()
+        if _monitor_tracer:
+            with _monitor_tracer.start_as_current_span('elb.cluster.delete') as span:
+                span.set_attribute('elb.cluster_name', cluster_name)
+                span.set_attribute('elb.duration_s', duration_s)
+                span.set_attribute('elb.num_nodes', num_nodes)
+                span.set_attribute('elb.machine_type', machine_type)
+    except Exception as e:
+        logging.debug(f'Telemetry error (cluster_deleted): {e}')
+
+
+# ===========================================================================
+# Optimization Profiles
+# ===========================================================================
+
+class OptimizationProfile(str, Enum):
+    COST = 'cost'
+    BALANCED = 'balanced'
+    PERFORMANCE = 'performance'
+
+
+_VM_PROFILES = {
+    OptimizationProfile.COST: {
+        'default_vm': 'Standard_D8s_v3', 'large_db_vm': 'Standard_E16s_v3',
+        'spot': True, 'vmtouch_pct': 0.5, 'azcopy_concurrency': 16,
+        'skip_db_verify': True, 'threads_per_pod': 2, 'mem_limit_gb': 4, 'mem_request_gb': 2,
+    },
+    OptimizationProfile.BALANCED: {
+        'default_vm': 'Standard_E32s_v3', 'large_db_vm': 'Standard_E32s_v3',
+        'spot': True, 'vmtouch_pct': 0.8, 'azcopy_concurrency': 64,
+        'skip_db_verify': True, 'threads_per_pod': 8, 'mem_limit_gb': 8, 'mem_request_gb': 4,
+    },
+    OptimizationProfile.PERFORMANCE: {
+        'default_vm': 'Standard_E64bs_v5', 'large_db_vm': 'Standard_E64bs_v5',
+        'spot': False, 'vmtouch_pct': 0.9, 'azcopy_concurrency': 128,
+        'skip_db_verify': False, 'threads_per_pod': 16, 'mem_limit_gb': 32, 'mem_request_gb': 16,
+    },
+}
+
+_VM_SPECS = {
+    'Standard_D8s_v3':   (8,   32,   0.384),  'Standard_D16s_v3':  (16,  64,   0.768),
+    'Standard_D32s_v3':  (32,  128,  1.536),   'Standard_E16s_v3':  (16,  128,  1.008),
+    'Standard_E32s_v3':  (32,  256,  2.016),   'Standard_E64s_v3':  (64,  432,  3.629),
+    'Standard_E32bs_v5': (32,  256,  2.432),   'Standard_E64bs_v5': (64,  512,  4.864),
+    'Standard_E96bs_v5': (96,  672,  7.296),   'Standard_L32s_v3':  (32,  256,  2.496),
+    'Standard_L64s_v3':  (64,  512,  4.992),
+}
+
+
+@dataclass
+class Prediction:
+    """Predicted time and cost for a search."""
+    profile: str;  vm_type: str;  num_nodes: int;  use_spot: bool
+    estimated_hours: float;  estimated_cost: float
+    overhead_minutes: float;  blast_minutes: float;  db_cached_pct: float
+    num_pods: int = 0;  threads_per_pod: int = 16
+    mem_limit_gb: float = 254;  mem_request_gb: float = 0.5
+    pods_per_node: int = 0;  cpu_utilization_pct: float = 0
+    batch_len: int = 100000;  db_size_gb: float = 0;  query_size_gb: float = 0
+
+    def __str__(self) -> str:
+        spot_label = ' (Spot)' if self.use_spot else ''
+        return (
+            f'  Profile: {self.profile.upper()}\n'
+            f'  VM: {self.vm_type}{spot_label} x {self.num_nodes} nodes\n'
+            f'  DB: {self.db_size_gb:.1f} GB  |  Query: {self.query_size_gb:.2f} GB  |  DB cache: {self.db_cached_pct:.0f}%\n'
+            f'  Pods: {self.num_pods} (batch-len={self.batch_len:,})  |  '
+            f'{self.threads_per_pod} threads/pod  |  '
+            f'mem: {self.mem_request_gb:.0f}G req / {self.mem_limit_gb:.0f}G limit\n'
+            f'  Per node: ~{self.pods_per_node} pods  |  CPU utilization: ~{self.cpu_utilization_pct:.0f}%\n'
+            f'  Estimated time: {self.estimated_hours:.1f}h '
+            f'(overhead {self.overhead_minutes:.0f}min + BLAST {self.blast_minutes:.0f}min)\n'
+            f'  Estimated cost: ${self.estimated_cost:.2f}')
+
+
+def get_profile() -> OptimizationProfile:
+    value = os.environ.get('ELB_OPTIMIZATION', 'balanced').lower()
+    try:
+        return OptimizationProfile(value)
+    except ValueError:
+        logging.warning(f'Unknown optimization profile "{value}", using balanced')
+        return OptimizationProfile.BALANCED
+
+
+def predict(profile: OptimizationProfile, *, query_size_gb: float,
+            db_size_gb: float, batch_len: int = 100000,
+            num_batches: Optional[int] = None, num_nodes: Optional[int] = None,
+            vm_type: Optional[str] = None) -> Prediction:
+    cfg = _VM_PROFILES[profile]
+    if not vm_type:
+        vm_type = cfg['large_db_vm'] if db_size_gb > 100 else cfg['default_vm']
+    vcpu, ram_gb, hourly = _VM_SPECS.get(vm_type, (32, 256, 2.0))
+    if not num_batches or num_batches <= 0:
+        num_batches = max(1, int(query_size_gb * 1024 * 1024 / batch_len))
+    if not num_nodes:
+        min_for_db = max(1, math.ceil(db_size_gb / (ram_gb * cfg['vmtouch_pct'])))
+        min_for_q = max(1, math.ceil(num_batches / (5 if profile == OptimizationProfile.PERFORMANCE else 20)))
+        max_n = {OptimizationProfile.COST: 10, OptimizationProfile.BALANCED: 50}.get(profile, 200)
+        num_nodes = max(min_for_db, min(min_for_q, max_n))
+    use_spot = cfg['spot']
+    overhead = max(15, max(5, query_size_gb * 30)) + 2
+    db_cache_pct = min(100, (ram_gb * cfg['vmtouch_pct'] * num_nodes / max(db_size_gb, 1)) * 100)
+    batch_time = 29 * (1 - db_cache_pct / 100) + 1 + 14 + 1
+    blast_minutes = (num_batches * batch_time) / num_nodes
+    total_hours = (overhead + blast_minutes) / 60
+    price = hourly * (SPOT_DISCOUNT_FACTOR if use_spot else 1.0)
+    tpp = cfg['threads_per_pod']
+    return Prediction(
+        profile=profile.value, vm_type=vm_type, num_nodes=num_nodes,
+        use_spot=use_spot, estimated_hours=total_hours,
+        estimated_cost=price * num_nodes * total_hours,
+        overhead_minutes=overhead, blast_minutes=blast_minutes,
+        db_cached_pct=db_cache_pct, num_pods=num_batches,
+        threads_per_pod=tpp, mem_limit_gb=cfg['mem_limit_gb'],
+        mem_request_gb=cfg['mem_request_gb'],
+        pods_per_node=max(1, vcpu // tpp),
+        cpu_utilization_pct=min(100.0, (num_batches / max(num_nodes, 1) * tpp / max(vcpu, 1)) * 100),
+        batch_len=batch_len, db_size_gb=db_size_gb, query_size_gb=query_size_gb)
+
+
+def predict_all_profiles(*, query_size_gb: float, db_size_gb: float,
+                          batch_len: int = 100000, num_batches: Optional[int] = None) -> str:
+    lines = [f'Optimization Profiles (query={query_size_gb:.2f}GB, db={db_size_gb:.1f}GB, batch-len={batch_len:,})']
+    for profile in OptimizationProfile:
+        p = predict(profile, query_size_gb=query_size_gb, db_size_gb=db_size_gb,
+                    batch_len=batch_len, num_batches=num_batches)
+        spot = 'Spot' if p.use_spot else 'On-demand'
+        lines.append(f'  {profile.value.upper():>11s}: {p.vm_type} x{p.num_nodes} ({spot}) '
+                     f'~{p.estimated_hours:.1f}h ~${p.estimated_cost:.0f} '
+                     f'cache={p.db_cached_pct:.0f}%')
+    return '\n'.join(lines)
+
+
+def apply_profile(cfg, profile: Optional[OptimizationProfile] = None,
+                   query_size_gb: float = 0, db_size_gb: float = 0) -> Prediction:
+    if profile is None:
+        profile = get_profile()
+    p_cfg = _VM_PROFILES[profile]
+    if query_size_gb <= 0:
+        query_size_gb = float(os.environ.get('ELB_QUERY_SIZE_GB', '0.1'))
+    if db_size_gb <= 0:
+        db_size_gb = float(os.environ.get('ELB_DB_SIZE_GB', '10'))
+    pred = predict(profile, query_size_gb=query_size_gb, db_size_gb=db_size_gb,
+                   batch_len=cfg.blast.batch_len,
+                   num_nodes=cfg.cluster.num_nodes if cfg.cluster.num_nodes > 1 else None,
+                   vm_type=cfg.cluster.machine_type if cfg.cluster.machine_type != 'Standard_E32s_v3' else None)
+    if str(cfg.cluster.mem_request) == '0.5G':
+        cfg.cluster.mem_request = MemoryStr(f'{p_cfg["mem_request_gb"]}G')
+    from .constants import ELB_DFLT_AZURE_NUM_CPUS
+    if cfg.cluster.num_cpus == ELB_DFLT_AZURE_NUM_CPUS:
+        cfg.cluster.num_cpus = p_cfg['threads_per_pod']
+    os.environ['AZCOPY_CONCURRENCY_VALUE'] = str(p_cfg['azcopy_concurrency'])
+    if p_cfg['skip_db_verify']:
+        os.environ['ELB_SKIP_DB_VERIFY'] = 'true'
+    if profile in (OptimizationProfile.COST, OptimizationProfile.BALANCED):
+        cfg.cluster.reuse = True
+    logging.info(f'Applied optimization profile: {profile.value}')
+    return pred
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +719,12 @@ class ElasticBlastAzure(ElasticBlast):
         # Apply optimization profile and show prediction
         self._show_optimization_prediction(query_batches, query_length)
 
+        # Auto-partition if enabled
+        if self.cfg.blast.db_auto_partition and self.cfg.blast.db_partitions == 0:
+            plan = apply_auto_partition(self.cfg)
+            if plan and plan.db_partitions > 0:
+                logging.info(str(plan))
+
         if self.cfg.blast.db_partitions > 0:
             return self._submit_partitioned(query_batches, query_length)
 
@@ -151,6 +755,12 @@ class ElasticBlastAzure(ElasticBlast):
         # Register cleanup in case prepare fails mid-way
         if not cfg.cluster.reuse:
             self.cleanup_stack.append(lambda: delete_cluster_with_cleanup(cfg, allow_missing=True))
+
+        # Auto-partition if enabled
+        if cfg.blast.db_auto_partition and cfg.blast.db_partitions == 0:
+            plan = apply_auto_partition(cfg)
+            if plan and plan.db_partitions > 0:
+                logging.info(str(plan))
 
         if cfg.blast.db_partitions > 0 and cfg.cluster.use_local_ssd:
             self._initialize_cluster_sharded(None)
@@ -193,7 +803,7 @@ class ElasticBlastAzure(ElasticBlast):
     def scale_nodes(self, node_count: int) -> None:
         """Scale AKS node pool. Use 0 to scale down for cost savings."""
         cfg = self.cfg
-        sdk.scale_node_pool(cfg.azure.resourcegroup, cfg.cluster.name,
+        _sdk_scale_node_pool(cfg.azure.resourcegroup, cfg.cluster.name,
                             'nodepool1', node_count, cfg.cluster.dry_run)
 
     def get_disk_quota(self) -> Tuple[float, float]:
@@ -366,9 +976,7 @@ class ElasticBlastAzure(ElasticBlast):
 
     def _show_optimization_prediction(self, query_batches: List[str], query_length: int) -> None:
         """Apply optimization profile and display time/cost prediction."""
-        from . import azure_optimizer as optimizer
-
-        profile = optimizer.get_profile()
+        profile = get_profile()
         query_size_gb = query_length / 1e9 if query_length > 0 else 0.1
 
         # Get actual DB size from metadata if available
@@ -381,16 +989,16 @@ class ElasticBlastAzure(ElasticBlast):
         num_batches = len(query_batches) if query_batches else None
 
         # Show all profiles comparison
-        comparison = optimizer.predict_all_profiles(
+        comparison = predict_all_profiles(
             query_size_gb=query_size_gb, db_size_gb=db_size_gb,
             batch_len=self.cfg.blast.batch_len, num_batches=num_batches)
         logging.info(comparison)
         if os.isatty(1):
             print(comparison)
 
-        pred = optimizer.apply_profile(self.cfg, profile,
-                                       query_size_gb=query_size_gb,
-                                       db_size_gb=db_size_gb)
+        pred = apply_profile(self.cfg, profile,
+                             query_size_gb=query_size_gb,
+                             db_size_gb=db_size_gb)
 
         # Detailed prediction log
         logging.info(f'\n{"=" * 60}\n'
@@ -619,17 +1227,23 @@ class ElasticBlastAzure(ElasticBlast):
         with open_for_write_immediate(self._metadata_path(ELB_NUM_JOBS_SUBMITTED)) as f:
             f.write(str(total))
 
+        track_search_submitted(
+            job_id=cfg.azure.elb_job_id, program=cfg.blast.program,
+            db=cfg.blast.db, num_jobs=total,
+            num_nodes=cfg.cluster.num_nodes, machine_type=cfg.cluster.machine_type)
+
     def _generate_partitioned_jobs(self, query_batches: List[str]) -> None:
         """Generate and submit BLAST jobs for each DB partition."""
         cfg = self.cfg
-        prefix = cfg.blast.db_partition_prefix
         base = self._results_path()
+        # Use actual DB name from config URL (basename of the blob path)
+        # e.g. https://stgelb.blob.core.windows.net/blast-db/16S_ribosomal_RNA → 16S_ribosomal_RNA
+        actual_db_name = os.path.basename(cfg.blast.db)
 
         all_files = []
         with TemporaryDirectory() as job_path:
             for i in range(cfg.blast.db_partitions):
-                db_name = os.path.basename(f'{prefix}{i:02d}')
-                db_on_pvc = f'part_{i:02d}/{db_name}'
+                db_on_pvc = f'part_{i:02d}/{actual_db_name}'
                 subs = self._build_substitutions(
                     query_batches,
                     db=db_on_pvc, db_label=f'part{i:02d}',
@@ -649,6 +1263,11 @@ class ElasticBlastAzure(ElasticBlast):
 
         with open_for_write_immediate(self._metadata_path(ELB_NUM_JOBS_SUBMITTED)) as f:
             f.write(str(total))
+
+        track_search_submitted(
+            job_id=cfg.azure.elb_job_id, program=cfg.blast.program,
+            db=cfg.blast.db, num_jobs=total,
+            num_nodes=cfg.cluster.num_nodes, machine_type=cfg.cluster.machine_type)
 
     # -- Standard job submission --------------------------------------------
 
@@ -673,25 +1292,19 @@ class ElasticBlastAzure(ElasticBlast):
             with open_for_write_immediate(self._metadata_path(ELB_NUM_JOBS_SUBMITTED)) as f:
                 f.write(str(len(job_names)))
 
-            monitor.track_search_submitted(
+            track_search_submitted(
                 job_id=cfg.azure.elb_job_id, program=cfg.blast.program,
                 db=cfg.blast.db, num_jobs=len(job_names),
                 num_nodes=cfg.cluster.num_nodes, machine_type=cfg.cluster.machine_type)
 
     def _save_persistent_disk_ids(self) -> None:
-        """Save persistent disk IDs to Blob Storage metadata."""
-        ctx = self.cfg.appstate.k8s_ctx
-        if not ctx:
-            raise RuntimeError('K8s context not set')
-        kubernetes.wait_for_pvc(ctx, 'blast-dbs-pvc')
-
-        disk_ids = kubernetes.get_persistent_disks(ctx)
-        self.cfg.appstate.resources.disks += disk_ids
-        with open_for_write_immediate(self._metadata_path(ELB_STATE_DISK_ID_FILE)) as f:
-            f.write(self.cfg.appstate.resources.to_json())
-
-        kubernetes.label_persistent_disk(self.cfg, 'blast-dbs-pvc')
-        kubernetes.delete_volume_snapshots(ctx)
+        """Save persistent disk IDs to Blob Storage metadata.
+        
+        Note: This is primarily a GCP concept (PD snapshots).
+        On Azure, NFS PVCs (azureblob-nfs) don't have persistent disk IDs
+        to save, so this method is a no-op for Azure.
+        """
+        pass
 
     def _upload_job_template(self, queries: Optional[List[str]]) -> None:
         """Upload rendered job template to Blob Storage."""
@@ -748,6 +1361,16 @@ class ElasticBlastAzure(ElasticBlast):
 
         counts = self._count_blast_jobs()
         status = self._derive_status(counts)
+
+        # Track terminal states to App Insights
+        if status in (ElbStatus.SUCCESS, ElbStatus.FAILURE):
+            track_search_completed(
+                job_id=self.cfg.azure.elb_job_id,
+                succeeded=counts.get('succeeded', 0),
+                failed=counts.get('failed', 0),
+                program=self.cfg.blast.program,
+                db=self.cfg.blast.db)
+
         return status, counts, {}
 
     def _count_blast_jobs(self) -> DefaultDict[str, int]:
@@ -960,11 +1583,11 @@ def set_gcp_project(project: str) -> None:
 
 
 def get_disks(cfg: ElasticBlastConfig, dry_run: bool = False) -> List[str]:
-    return sdk.get_disks(cfg.azure.resourcegroup, dry_run)
+    return _sdk_get_disks(cfg.azure.resourcegroup, dry_run)
 
 
 def get_snapshots(cfg: ElasticBlastConfig, dry_run: bool = False) -> List[str]:
-    return sdk.get_snapshots(cfg.azure.resourcegroup, dry_run)
+    return _sdk_get_snapshots(cfg.azure.resourcegroup, dry_run)
 
 
 def delete_disk(name: str, cfg: ElasticBlastConfig) -> None:
@@ -972,7 +1595,7 @@ def delete_disk(name: str, cfg: ElasticBlastConfig) -> None:
         raise ValueError('No disk name provided')
     if not cfg:
         raise ValueError('No application config provided')
-    sdk.delete_disk(cfg.azure.resourcegroup, name)
+    _sdk_delete_disk(cfg.azure.resourcegroup, name)
 
 
 def delete_snapshot(name: str, cfg: ElasticBlastConfig) -> None:
@@ -980,27 +1603,27 @@ def delete_snapshot(name: str, cfg: ElasticBlastConfig) -> None:
         raise ValueError('No snapshot name provided')
     if not cfg:
         raise ValueError('No application config provided')
-    sdk.delete_snapshot(cfg.azure.resourcegroup, name)
+    _sdk_delete_snapshot(cfg.azure.resourcegroup, name)
 
 
 def get_aks_clusters(cfg: ElasticBlastConfig) -> List[str]:
-    return sdk.get_aks_clusters(cfg.azure.resourcegroup, cfg.cluster.dry_run)
+    return _sdk_get_aks_clusters(cfg.azure.resourcegroup, cfg.cluster.dry_run)
 
 
 def get_aks_credentials(cfg: ElasticBlastConfig) -> str:
-    return sdk.get_aks_credentials(cfg.azure.resourcegroup, cfg.cluster.name,
+    return _sdk_get_aks_credentials(cfg.azure.resourcegroup, cfg.cluster.name,
                                    cfg.cluster.dry_run)
 
 
 def set_role_assignment(cfg: ElasticBlastConfig):
-    sdk.set_role_assignments(cfg.azure.resourcegroup, cfg.cluster.name,
+    _sdk_set_role_assignments(cfg.azure.resourcegroup, cfg.cluster.name,
                              cfg.azure.storage_account,
                              cfg.azure.acr_name, cfg.azure.acr_resourcegroup,
                              cfg.cluster.dry_run)
 
 
 def check_cluster(cfg: ElasticBlastConfig) -> str:
-    return sdk.check_cluster(cfg.azure.resourcegroup, cfg.cluster.name,
+    return _sdk_check_cluster(cfg.azure.resourcegroup, cfg.cluster.name,
                              cfg.cluster.dry_run)
 
 
@@ -1025,7 +1648,7 @@ def start_cluster_async(cfg: ElasticBlastConfig):
             k, _, v = pair.partition('=')
             tags[k.strip()] = v.strip()
 
-    return sdk.start_cluster(
+    return _sdk_start_cluster(
         resource_group=cfg.azure.resourcegroup, cluster_name=name,
         location=cfg.azure.region, machine_type=cfg.cluster.machine_type,
         num_nodes=cfg.cluster.num_nodes or 1,
@@ -1051,7 +1674,7 @@ def wait_for_cluster(cfg: ElasticBlastConfig, poller) -> None:
             f'AKS cluster {cfg.cluster.name} creation failed after {elapsed:.0f}s: {e}') from e
     elapsed = timer() - start
     logging.debug(f'RUNTIME cluster-create {elapsed:.1f}s')
-    monitor.track_cluster_created(
+    track_cluster_created(
         cluster_name=cfg.cluster.name, duration_s=elapsed,
         num_nodes=cfg.cluster.num_nodes or 1, machine_type=cfg.cluster.machine_type)
 
@@ -1060,17 +1683,19 @@ def delete_cluster(cfg: ElasticBlastConfig) -> str:
     """Delete AKS cluster. Blocks until deletion completes."""
     name = cfg.cluster.name
     start = timer()
-    poller = sdk.delete_cluster(cfg.azure.resourcegroup, name, cfg.cluster.dry_run)
+    poller = _sdk_delete_cluster(cfg.azure.resourcegroup, name, cfg.cluster.dry_run)
     if poller:
         poller.result()
     elapsed = timer() - start
     logging.debug(f'RUNTIME cluster-delete {elapsed:.1f}s')
-    monitor.track_cluster_deleted(cluster_name=name, duration_s=elapsed)
+    track_cluster_deleted(cluster_name=name, duration_s=elapsed,
+                           num_nodes=cfg.cluster.num_nodes or 1,
+                           machine_type=cfg.cluster.machine_type)
     return name
 
 
 def check_prerequisites() -> None:
-    sdk.check_prerequisites()
+    _sdk_check_prerequisites()
 
 
 # ---------------------------------------------------------------------------
