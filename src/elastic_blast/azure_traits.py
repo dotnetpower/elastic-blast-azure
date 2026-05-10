@@ -34,9 +34,17 @@ AZURE_HPC_MACHINES = {
     'Standard_E64is_v3': {'cpu': 64, 'memory': 504},  # 64 vCPU, 504 GB RAM
     'Standard_D8s_v3': {'cpu': 8, 'memory': 32},  # 8 vCPU, 32 GB RAM
     # E-series v5 (memory-optimized, newer generation)
-    'Standard_E32bs_v5': {'cpu': 32, 'memory': 256},  # 32 vCPU, 256 GB RAM, 1.2TB NVMe
-    'Standard_E64bs_v5': {'cpu': 64, 'memory': 512},  # 64 vCPU, 512 GB RAM, 2.4TB NVMe
-    'Standard_E96bs_v5': {'cpu': 96, 'memory': 672},  # 96 vCPU, 672 GB RAM, 3.6TB NVMe
+    'Standard_E16s_v5': {'cpu': 16, 'memory': 128},   # 16 vCPU, 128 GB RAM
+    'Standard_E32s_v5': {'cpu': 32, 'memory': 256},    # 32 vCPU, 256 GB RAM
+    'Standard_E48s_v5': {'cpu': 48, 'memory': 384},    # 48 vCPU, 384 GB RAM
+    'Standard_E64s_v5': {'cpu': 64, 'memory': 512},    # 64 vCPU, 512 GB RAM
+    'Standard_E96s_v5': {'cpu': 96, 'memory': 672},    # 96 vCPU, 672 GB RAM
+    # E-series v5 with NVMe (bs = burstable storage)
+    'Standard_E16bs_v5': {'cpu': 16, 'memory': 128},   # 16 vCPU, 128 GB RAM, 600GB NVMe
+    'Standard_E32bs_v5': {'cpu': 32, 'memory': 256},    # 32 vCPU, 256 GB RAM, 1.2TB NVMe
+    'Standard_E48bs_v5': {'cpu': 48, 'memory': 384},    # 48 vCPU, 384 GB RAM, 1.8TB NVMe
+    'Standard_E64bs_v5': {'cpu': 64, 'memory': 512},    # 64 vCPU, 512 GB RAM, 2.4TB NVMe
+    'Standard_E96bs_v5': {'cpu': 96, 'memory': 672},    # 96 vCPU, 672 GB RAM, 3.6TB NVMe
     # L-series v3 (storage-optimized, large NVMe for TB-scale BLAST DB)
     'Standard_L8s_v3': {'cpu': 8, 'memory': 64},     # 8 vCPU, 64 GB RAM, 1.9TB NVMe
     'Standard_L16s_v3': {'cpu': 16, 'memory': 128},   # 16 vCPU, 128 GB RAM, 3.8TB NVMe
@@ -146,23 +154,44 @@ def get_instance_type_offerings(region: str) -> List[Dict[str, Any]]:
 # Source: https://azure.microsoft.com/en-us/pricing/details/virtual-machines/linux/
 # These are approximate on-demand prices; actual prices vary by region.
 AZURE_VM_HOURLY_PRICES = {
+    # D-series v3 (general purpose)
     'Standard_D8s_v3': 0.384,
     'Standard_D16s_v3': 0.768,
     'Standard_D32s_v3': 1.536,
     'Standard_D64s_v3': 3.072,
+    # E-series v3 (memory-optimized)
     'Standard_E16s_v3': 1.008,
     'Standard_E32s_v3': 2.016,
+    'Standard_E48s_v3': 3.024,
     'Standard_E64s_v3': 3.629,
     'Standard_E64is_v3': 3.629,
+    # E-series v5 (memory-optimized, newer generation)
+    'Standard_E16s_v5': 1.008,
+    'Standard_E32s_v5': 2.016,
+    'Standard_E48s_v5': 3.024,
+    'Standard_E64s_v5': 4.032,
+    'Standard_E96s_v5': 6.048,
+    # E-series v5 with NVMe
+    'Standard_E16bs_v5': 1.192,
     'Standard_E32bs_v5': 2.432,
+    'Standard_E48bs_v5': 3.576,
     'Standard_E64bs_v5': 4.864,
     'Standard_E96bs_v5': 7.296,
+    # L-series v3 (storage-optimized, Intel)
     'Standard_L8s_v3': 0.624,
     'Standard_L16s_v3': 1.248,
     'Standard_L32s_v3': 2.496,
     'Standard_L48s_v3': 3.744,
     'Standard_L64s_v3': 4.992,
     'Standard_L80s_v3': 6.240,
+    # L-series v3 (storage-optimized, AMD)
+    'Standard_L8as_v3': 0.624,
+    'Standard_L16as_v3': 1.248,
+    'Standard_L32as_v3': 2.496,
+    'Standard_L48as_v3': 3.744,
+    'Standard_L64as_v3': 4.992,
+    'Standard_L80as_v3': 6.240,
+    # HPC
     'Standard_HB120rs_v3': 3.600,
     'Standard_HC44rs': 3.168,
     'Standard_HB60rs': 2.280,
