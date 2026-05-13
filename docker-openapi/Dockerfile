@@ -33,6 +33,11 @@ RUN apt-get -y -m update && \
     # locally and copying the script into PATH after install.
     git clone --filter=blob:none --no-checkout https://github.com/dotnetpower/elastic-blast-azure.git /tmp/elb-src && \
     git -C /tmp/elb-src checkout ${ELB_REF} && \
+    # Install elastic-blast runtime dependencies first. setup.cfg has no
+    # 'install_requires' (it lives in requirements/base.txt), so a plain
+    # 'pip install .' would otherwise leave the package importable but
+    # unable to start (e.g. tenacity / boto3 / azure-storage-blob missing).
+    pip3 install --no-cache-dir -r /tmp/elb-src/requirements/base.txt && \
     pip3 install --no-cache-dir --no-build-isolation /tmp/elb-src && \
     install -m 0755 /tmp/elb-src/bin/elastic-blast /usr/local/bin/elastic-blast && \
     # Pin the script's shebang to the system interpreter where elastic_blast
