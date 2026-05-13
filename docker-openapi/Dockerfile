@@ -35,6 +35,11 @@ RUN apt-get -y -m update && \
     git -C /tmp/elb-src checkout ${ELB_REF} && \
     pip3 install --no-cache-dir --no-build-isolation /tmp/elb-src && \
     install -m 0755 /tmp/elb-src/bin/elastic-blast /usr/local/bin/elastic-blast && \
+    # Pin the script's shebang to the system interpreter where elastic_blast
+    # is actually installed. The /opt/venv venv (created below for azure-cli)
+    # gets prepended to PATH, so the default `#!/usr/bin/env python3` would
+    # otherwise resolve to /opt/venv/bin/python3 — which has no elastic_blast.
+    sed -i '1c#!/usr/local/bin/python3' /usr/local/bin/elastic-blast && \
     rm -rf /tmp/elb-src && \
     rm -rf /var/lib/apt/lists/*
 
