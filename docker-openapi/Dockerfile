@@ -20,13 +20,24 @@ RUN curl -LO "https://dl.k8s.io/release/v1.31.4/bin/linux/amd64/kubectl" && \
     chmod +x kubectl && \
     mv kubectl /usr/local/bin/kubectl
 
+ARG ELB_REF=dad3943
+
 RUN apt-get -y -m update && \
     apt-get install -y zip unzip curl git wget jq && \
     pip3 install --no-cache-dir --upgrade pip setuptools && \
     pip3 install --no-cache-dir -r requirements.txt && \
+    # Install elastic-blast + runtime deps in the SAME layer as app deps
+    # so pip can resolve version conflicts in one pass.
+    git clone --filter=blob:none --no-checkout https://github.com/dotnetpower/elastic-blast-azure.git /tmp/elb-src && \
+    git -C /tmp/elb-src checkout ${ELB_REF} && \
+    pip3 install --no-cache-dir -r /tmp/elb-src/requirements/base.txt && \
+    pip3 install --no-cache-dir --no-build-isolation /tmp/elb-src && \
+    install -m 0755 /tmp/elb-src/bin/elastic-blast /usr/local/bin/elastic-blast && \
+    sed -i '1c#!/usr/local/bin/python3' /usr/local/bin/elastic-blast && \
+    rm -rf /tmp/elb-src && \
     rm -rf /var/lib/apt/lists/*
 
-# Create and activate a virtual environment for Azure CLI
+# Create and activate a virtual environment for Azure CLI (isolated from system)
 RUN python3 -m venv /opt/venv \
     && . /opt/venv/bin/activate \
     && pip install --upgrade pip \
@@ -34,17 +45,6 @@ RUN python3 -m venv /opt/venv \
     && deactivate
 
 ENV PATH="/opt/venv/bin:$PATH"
-
-# Install elastic-blast AFTER venv creation so azure-cli's pip cannot
-# interfere with system-level packages (tenacity, boto3, etc.).
-ARG ELB_REF=dad3943
-RUN git clone --filter=blob:none --no-checkout https://github.com/dotnetpower/elastic-blast-azure.git /tmp/elb-src && \
-    git -C /tmp/elb-src checkout ${ELB_REF} && \
-    /usr/local/bin/pip3 install --no-cache-dir -r /tmp/elb-src/requirements/base.txt && \
-    /usr/local/bin/pip3 install --no-cache-dir --no-build-isolation /tmp/elb-src && \
-    install -m 0755 /tmp/elb-src/bin/elastic-blast /usr/local/bin/elastic-blast && \
-    sed -i '1c#!/usr/local/bin/python3' /usr/local/bin/elastic-blast && \
-    rm -rf /tmp/elb-src
 
 RUN wget -O azcopy_v10.tar.gz https://aka.ms/downloadazcopy-v10-linux && \
     tar -xf azcopy_v10.tar.gz --strip-components=1 && \
