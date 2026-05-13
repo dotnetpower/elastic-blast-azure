@@ -2,3 +2,4 @@ fastapi
 uvicorn
 requests>=2.31.0
 pyopenssl==25.0.0
+azure-identity>=1.17.0

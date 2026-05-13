@@ -180,7 +180,7 @@ def _sdk_start_cluster(resource_group: str, cluster_name: str, *,
 
     cluster_params: Dict[str, Any] = {
         "location": location, "tags": tags or {},
-        "identity": {"type": "SystemAssigned"}, "dns_prefix": cluster_name,
+        "identity": {"type": "SystemAssigned"}, "dnsPrefix": cluster_name,
         "kubernetes_version": k8s_version if k8s_version else None,
         "auto_upgrade_profile": {"upgrade_channel": "none"},
         "agent_pool_profiles": [agent_pool_profile],
