@@ -20,11 +20,22 @@ RUN curl -LO "https://dl.k8s.io/release/v1.31.4/bin/linux/amd64/kubectl" && \
     chmod +x kubectl && \
     mv kubectl /usr/local/bin/kubectl
 
+ARG ELB_REF=e3e9f51
+
 RUN apt-get -y -m update && \
     apt-get install -y zip unzip curl git wget jq && \
     pip3 install --no-cache-dir --upgrade pip setuptools && \
     pip3 install --no-cache-dir -r requirements.txt && \
-    pip3 install --no-cache-dir --no-build-isolation git+https://github.com/dotnetpower/elastic-blast-azure.git@e3e9f51 && \
+    # Clone + install in editable mode so bin/elastic-blast can be installed
+    # explicitly. `pip install git+...` does not honor `setup.cfg` `scripts =
+    # bin/*` because the repo has no MANIFEST.in, so the bin/ directory is
+    # excluded from the sdist that pip builds. We work around this by cloning
+    # locally and copying the script into PATH after install.
+    git clone --filter=blob:none --no-checkout https://github.com/dotnetpower/elastic-blast-azure.git /tmp/elb-src && \
+    git -C /tmp/elb-src checkout ${ELB_REF} && \
+    pip3 install --no-cache-dir --no-build-isolation /tmp/elb-src && \
+    install -m 0755 /tmp/elb-src/bin/elastic-blast /usr/local/bin/elastic-blast && \
+    rm -rf /tmp/elb-src && \
     rm -rf /var/lib/apt/lists/*
 
 # Create and activate a virtual environment for Azure CLI
@@ -40,5 +51,14 @@ RUN wget -O azcopy_v10.tar.gz https://aka.ms/downloadazcopy-v10-linux && \
     tar -xf azcopy_v10.tar.gz --strip-components=1 && \
     cp ./azcopy /usr/bin && \
     rm -rf ./azcopy azcopy_v10.tar.gz
+
+# Default azcopy auto-login to WORKLOAD so the container picks up the
+# AKS-injected federated token directly via AZURE_CLIENT_ID /
+# AZURE_TENANT_ID / AZURE_FEDERATED_TOKEN_FILE. AZCLI mode requires
+# an active `az login` session AND a subscription role on the MI,
+# which is fragile. WORKLOAD mode needs only data-plane RBAC (e.g.
+# Storage Blob Data Contributor) on the target resource. Override
+# at the deployment env to switch back if needed.
+ENV AZCOPY_AUTO_LOGIN_TYPE=WORKLOAD
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

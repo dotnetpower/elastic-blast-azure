@@ -51,12 +51,31 @@ _CM_PREFIX = "elb-job-"
 def _wi_az_login() -> None:
     """Log in to Azure CLI using Workload Identity federated token, if available.
 
-    This enables azcopy (AZCOPY_AUTO_LOGIN_TYPE=AZCLI) and elastic-blast CLI
-    to authenticate without interactive login. Runs once at startup.
+    This enables `elastic-blast` (which shells out to `az account show`) and
+    other `az`-dependent helpers to authenticate without an interactive login.
+    Runs once at startup.
+
+    Notes
+    -----
+    * azcopy is configured separately via ``AZCOPY_AUTO_LOGIN_TYPE=WORKLOAD``
+      (set in the Dockerfile) and does NOT depend on this function.
+    * ``--allow-no-subscriptions`` is required because the Workload Identity
+      MI typically only has data-plane RBAC (Storage Blob Data Contributor on
+      a single account) and no subscription-scope role. Without this flag
+      ``az login`` fails with ``ERROR: No subscriptions found``.
     """
     client_id = os.environ.get("AZURE_CLIENT_ID", "")
     tenant_id = os.environ.get("AZURE_TENANT_ID", "")
     token_file = os.environ.get("AZURE_FEDERATED_TOKEN_FILE", "")
+    # Half-configured WI is a deployment bug — surface it loudly so it is
+    # caught in pod logs rather than silently degrading at job-submit time.
+    if token_file and not client_id:
+        logger.error(
+            "Workload Identity token file is mounted but AZURE_CLIENT_ID is empty. "
+            "The ServiceAccount is likely missing the "
+            "'azure.workload.identity/client-id' annotation."
+        )
+        return
     if not (client_id and tenant_id and token_file):
         logger.info("Workload Identity env vars not set, skipping az login")
         return
@@ -70,10 +89,13 @@ def _wi_az_login() -> None:
             "az", "login", "--service-principal",
             "-u", client_id, "-t", tenant_id,
             "--federated-token", token,
+            "--allow-no-subscriptions",
         ], timeout=30)
         logger.info("az login succeeded via Workload Identity (client=%s)", client_id[:8])
     except Exception as exc:
-        logger.warning("az login via Workload Identity failed: %s", str(exc)[:200])
+        # Log the full error — earlier truncation hid the real cause
+        # ("No subscriptions found") for hours of diagnosis.
+        logger.warning("az login via Workload Identity failed: %s", str(exc)[:1000])
 
 _wi_az_login()
 
