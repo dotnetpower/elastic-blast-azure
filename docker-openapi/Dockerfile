@@ -20,7 +20,7 @@ RUN curl -LO "https://dl.k8s.io/release/v1.31.4/bin/linux/amd64/kubectl" && \
     chmod +x kubectl && \
     mv kubectl /usr/local/bin/kubectl
 
-ARG ELB_REF=e3e9f51
+ARG ELB_REF=dad3943
 
 RUN apt-get -y -m update && \
     apt-get install -y zip unzip curl git wget jq && \
