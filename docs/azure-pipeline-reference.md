@@ -256,12 +256,14 @@ An AKS managed cluster is created via Azure SDK (non-blocking). While the cluste
 
 ### VM SKU Selection
 
-The choice of VM SKU directly affects DB download speed, BLAST I/O throughput, and overall cost. Key differentiators are network bandwidth (for `azcopy` DB download from Blob Storage) and local disk I/O (for BLAST reading DB volume files during search). See Azure VM size documentation: [Esv3-series](https://learn.microsoft.com/en-us/azure/virtual-machines/ev3-esv3-series#esv3-series), [Dsv3-series](https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/general-purpose/dv3-series).
+The choice of VM SKU directly affects DB download speed, BLAST I/O throughput, and overall cost. Key differentiators are network bandwidth (for `azcopy` DB download from Blob Storage) and local disk I/O (for BLAST reading DB volume files during search). See Azure VM size documentation: [Esv5-series](https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/memory-optimized/easv5-series), [Esv3-series](https://learn.microsoft.com/en-us/azure/virtual-machines/ev3-esv3-series#esv3-series).
+
+> **Default**: `Standard_E32s_v5` (set in `constants.py::ELB_DFLT_AZURE_MACHINE_TYPE`). Same 32 vCPU / 256 GiB RAM as the v3 baseline below, with newer Ice Lake CPUs and improved network bandwidth. Benchmark numbers below were captured on v3 hardware; treat them as a lower bound for v5 throughput.
 
 | VM SKU           | vCPU | RAM (GiB) | Network BW | Local SSD | Benchmark Use Case              |
 | ---------------- | ---- | --------- | ---------- | --------- | ------------------------------- |
 | Standard_E16s_v3 | 16   | 128       | 8 Gbps     | 256 GiB   | B1-S10 (10-shard, 1 shard/node) |
-| Standard_E32s_v3 | 32   | 256       | 16 Gbps    | 512 GiB   | Default (full DB, single node)  |
+| Standard_E32s_v3 | 32   | 256       | 16 Gbps    | 512 GiB   | Benchmark baseline (v3)         |
 | Standard_E64s_v3 | 64   | 432       | 30 Gbps    | 864 GiB   | B2-subset (full DB in RAM)      |
 | Standard_D8s_v3  | 8    | 32        | 4 Gbps     | 64 GiB    | Dev/test only                   |
 

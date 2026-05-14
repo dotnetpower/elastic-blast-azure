@@ -146,7 +146,7 @@ aks_status = check_cluster(cfg)  # az aks list로 확인
 az aks create
     --resource-group {rg}
     --name {cluster_name}
-    --node-vm-size {machine_type}  # 기본: Standard_E32s_v3
+    --node-vm-size {machine_type}  # 기본: Standard_E32s_v5
     --node-count {num_nodes}
     --enable-cluster-autoscaler
     --min-count {num_nodes}

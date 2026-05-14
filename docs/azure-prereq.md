@@ -422,7 +422,7 @@ azure-storage-account-container = blast-db
 
 [cluster]
 name = elastic-blast
-machine-type = Standard_E32s_v3    # 32 vCPU, 256 GB RAM
+machine-type = Standard_E32s_v5    # 32 vCPU, 256 GB RAM
 num-nodes = 1
 reuse = true                       # Reuse cluster for repeat searches (84% faster)
 exp-use-local-ssd = false          # Set true for NVMe (6.2x CPU efficiency for large DBs)
@@ -439,7 +439,7 @@ options = -evalue 0.01 -outfmt 7
 
 | Section   | Key                 | Description                          | Example                         |
 | --------- | ------------------- | ------------------------------------ | ------------------------------- |
-| `cluster` | `machine-type`      | Azure VM size                        | `Standard_E32s_v3` (256GB RAM)  |
+| `cluster` | `machine-type`      | Azure VM size                        | `Standard_E32s_v5` (256GB RAM)  |
 | `cluster` | `num-nodes`         | Number of AKS worker nodes           | `1` (start small)               |
 | `cluster` | `reuse`             | Keep cluster alive between searches  | `true` (recommended)            |
 | `cluster` | `exp-use-local-ssd` | Use local NVMe instead of Blob NFS   | `true` for DB > 50GB            |

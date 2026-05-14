@@ -622,10 +622,11 @@ def apply_profile(cfg, profile: Optional[OptimizationProfile] = None,
         query_size_gb = float(os.environ.get('ELB_QUERY_SIZE_GB', '0.1'))
     if db_size_gb <= 0:
         db_size_gb = float(os.environ.get('ELB_DB_SIZE_GB', '10'))
+    from .constants import ELB_DFLT_AZURE_MACHINE_TYPE
     pred = predict(profile, query_size_gb=query_size_gb, db_size_gb=db_size_gb,
                    batch_len=cfg.blast.batch_len,
                    num_nodes=cfg.cluster.num_nodes if cfg.cluster.num_nodes > 1 else None,
-                   vm_type=cfg.cluster.machine_type if cfg.cluster.machine_type != 'Standard_E32s_v3' else None)
+                   vm_type=cfg.cluster.machine_type if cfg.cluster.machine_type != ELB_DFLT_AZURE_MACHINE_TYPE else None)
     if str(cfg.cluster.mem_request) == '0.5G':
         cfg.cluster.mem_request = MemoryStr(f'{p_cfg["mem_request_gb"]}G')
     from .constants import ELB_DFLT_AZURE_NUM_CPUS

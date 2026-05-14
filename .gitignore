@@ -55,3 +55,7 @@ docs/improvement-plan-ko.md
 
 # Private benchmark data (may contain customer info)
 benchmark/private/
+
+# Local virtualenvs
+.venv/
+venv/
