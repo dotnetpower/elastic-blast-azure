@@ -2,14 +2,16 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: submit-jobs
+  name: submit-jobs-${BLAST_ELB_JOB_ID_SHORT}
   labels:
     app: submit
+    elb-job-id: "${BLAST_ELB_JOB_ID}"
 spec:
   template:
     metadata:
       labels:
         app: submit
+        elb-job-id: "${BLAST_ELB_JOB_ID}"
     spec:
       volumes:
       - name: workspace

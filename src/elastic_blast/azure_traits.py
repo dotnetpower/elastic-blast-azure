@@ -27,9 +27,6 @@ AZURE_HPC_MACHINES = {
     'Standard_D16s_v3': {'cpu': 16, 'memory': 64},  # 16 vCPU, 64 GB RAM
     'Standard_D32s_v3': {'cpu': 32, 'memory': 128},  # 32 vCPU, 128 GB RAM
     'Standard_D64s_v3': {'cpu': 64, 'memory': 256},  # 64 vCPU, 256 GB RAM
-    'Standard_E16s_v3': {'cpu': 16, 'memory': 128},  # 16 vCPU, 128 GB RAM
-    'Standard_E32s_v3': {'cpu': 32, 'memory': 256},  # 32 vCPU, 256 GB RAM
-    'Standard_E48s_v3': {'cpu': 48, 'memory': 384},  # 48 vCPU, 384 GB RAM
     'Standard_E64s_v3': {'cpu': 64, 'memory': 432},  # 64 vCPU, 432 GB RAM
     'Standard_E64is_v3': {'cpu': 64, 'memory': 504},  # 64 vCPU, 504 GB RAM
     'Standard_D8s_v3': {'cpu': 8, 'memory': 32},  # 8 vCPU, 32 GB RAM
@@ -82,6 +79,47 @@ def get_blob_service_client(storage_account: str) -> BlobServiceClient:
     account_url = f"https://{storage_account}.blob.core.windows.net"
     credential = DefaultAzureCredential()
     return BlobServiceClient(account_url=account_url, credential=credential)
+
+
+def parse_blob_url(blob_url: str):
+    """Parse https://<account>.blob.core.windows.net/<container>/<path>.
+
+    Returns (account, container, blob_name) or raises ValueError.
+    """
+    from urllib.parse import urlparse
+    if not blob_url.startswith('https://'):
+        raise ValueError(f'not an Azure blob URL: {blob_url}')
+    u = urlparse(blob_url)
+    host = u.netloc
+    if not host.endswith('.blob.core.windows.net'):
+        raise ValueError(f'not an Azure blob URL: {blob_url}')
+    account = host.split('.', 1)[0]
+    parts = u.path.lstrip('/').split('/', 1)
+    if len(parts) < 2 or not parts[1]:
+        raise ValueError(f'blob URL missing container/name: {blob_url}')
+    return account, parts[0], parts[1]
+
+
+def azure_blob_exists(blob_url: str) -> bool:
+    """Return True if the blob at the given Azure URL exists.
+
+    Uses Managed Identity / DefaultAzureCredential. Best-effort: any error
+    other than the explicit "not found" surfaces as False so callers can
+    treat the probe as advisory (e.g., idempotency checks).
+    """
+    try:
+        from azure.core.exceptions import ResourceNotFoundError  # type: ignore
+        account, container, name = parse_blob_url(blob_url)
+        client = get_blob_service_client(account)
+        blob = client.get_blob_client(container=container, blob=name)
+        try:
+            blob.get_blob_properties()
+            return True
+        except ResourceNotFoundError:
+            return False
+    except Exception as e:  # noqa: BLE001
+        logging.debug(f'azure_blob_exists({blob_url}) error: {e}')
+        return False
 
 
 def get_latest_dir(storage_account: str, storage_account_container: str, storage_account_key: str = '') -> str:
@@ -160,9 +198,6 @@ AZURE_VM_HOURLY_PRICES = {
     'Standard_D32s_v3': 1.536,
     'Standard_D64s_v3': 3.072,
     # E-series v3 (memory-optimized)
-    'Standard_E16s_v3': 1.008,
-    'Standard_E32s_v3': 2.016,
-    'Standard_E48s_v3': 3.024,
     'Standard_E64s_v3': 3.629,
     'Standard_E64is_v3': 3.629,
     # E-series v5 (memory-optimized, newer generation)

@@ -38,11 +38,13 @@ metadata:
   name: init-ssd-${NODE_ORDINAL}
   labels:
     app: setup
+    elb-job-id: "${BLAST_ELB_JOB_ID}"
 spec:
   template:
     metadata:
       labels:
         app: setup
+        elb-job-id: "${BLAST_ELB_JOB_ID}"
     spec:
       volumes:
       - name: blastdb

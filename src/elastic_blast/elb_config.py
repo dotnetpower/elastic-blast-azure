@@ -302,7 +302,10 @@ class AZUREConfig(CloudProviderBaseConfig, ConfigParserToDataclassMapper):
     cjs_docker_image: str = ELB_CJS_DOCKER_IMAGE_AZURE
     janitor_docker_image: str = ELB_JANITOR_DOCKER_IMAGE_AZURE
     qs_docker_image: str = ELB_QS_DOCKER_IMAGE_AZURE
-    elb_job_id: str = 'job-' + uuid.uuid4().hex
+    # Per-instance unique job ID. Uses default_factory so each AZUREConfig
+    # instance gets its own UUID — required for safe concurrent submissions
+    # within the same Python process.
+    elb_job_id: str = field(default_factory=lambda: 'job-' + uuid.uuid4().hex)
 
     # mapping to class attributes to ConfigParser parameters so that objects
     # can be initialized from ConfigParser objects

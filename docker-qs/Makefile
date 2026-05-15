@@ -111,4 +111,4 @@ ecr-create:
 
 .PHONY: azure-build
 azure-build:
-	az acr build --registry $(AZURE_REGISTRY) --image $(IMG):$(VERSION) .
+	az acr build -f Dockerfile.azure --registry $(AZURE_REGISTRY) --image $(IMG):$(VERSION) .

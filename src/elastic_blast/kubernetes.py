@@ -656,6 +656,8 @@ def initialize_storage_partitioned(cfg: ElasticBlastConfig, query_files: list[st
         'BATCH_LEN': batch_len,
         'COPY_ONLY': copy_only,
         'TIMEOUT': str(init_timeout),
+        'BLAST_ELB_JOB_ID': cfg.azure.elb_job_id if cfg.cloud_provider.cloud == CSP.AZURE else '',
+        'BLAST_ELB_JOB_ID_SHORT': (cfg.azure.elb_job_id[-8:] if cfg.cloud_provider.cloud == CSP.AZURE else ''),
     }
 
     with TemporaryDirectory() as d:
@@ -819,6 +821,8 @@ def initialize_local_ssd(cfg: ElasticBlastConfig, query_files: list[str] = [], w
     elif cfg.cloud_provider.cloud == CSP.AZURE:
         subs['ELB_DOCKER_IMAGE'] = cfg.azure.elb_docker_image
         subs['ELB_IMAGE_QS'] = cfg.azure.qs_docker_image
+        subs['BLAST_ELB_JOB_ID'] = cfg.azure.elb_job_id
+        subs['BLAST_ELB_JOB_ID_SHORT'] = cfg.azure.elb_job_id[-8:]
         logging.debug(f"Initializing local SSD: {cfg.azure.elb_docker_image}")
         
     # logging.debug(f"Initializing local SSD: {ELB_DOCKER_IMAGE_GCP}")
@@ -916,6 +920,8 @@ def initialize_local_ssd_sharded(cfg: ElasticBlastConfig, query_files: list[str]
         'K8S_JOB_BLAST': K8S_JOB_BLAST,
         'K8S_JOB_RESULTS_EXPORT': K8S_JOB_RESULTS_EXPORT,
         'TIMEOUT': str(init_blastdb_minutes_timeout * 60),
+        'BLAST_ELB_JOB_ID': cfg.azure.elb_job_id,
+        'BLAST_ELB_JOB_ID_SHORT': cfg.azure.elb_job_id[-8:],
     }
 
     logging.info(f'Initializing {num_shards} shards on {num_nodes} nodes (local SSD)')
@@ -1082,6 +1088,8 @@ def initialize_persistent_disk(cfg: ElasticBlastConfig, query_files: list[str] =
         subs['ELB_IMAGE_QS'] = cfg.azure.qs_docker_image
         subs['ELB_DOCKER_IMAGE'] = cfg.azure.elb_docker_image
         subs['ELB_SC_NAME'] = 'managed-csi' #'azure-disk-ssd'
+        subs['BLAST_ELB_JOB_ID'] = cfg.azure.elb_job_id
+        subs['BLAST_ELB_JOB_ID_SHORT'] = cfg.azure.elb_job_id[-8:]
         logging.debug(f"Initializing persistent volume: {cfg.azure.elb_docker_image} {cfg.azure.qs_docker_image}")
         
 
@@ -1425,6 +1433,8 @@ def submit_job_submission_job(cfg: ElasticBlastConfig):
         subs['ELB_DOCKER_IMAGE'] = cfg.azure.cjs_docker_image
         subs['ELB_METADATA_DIR'] = ELB_METADATA_DIR
         subs['ELB_AZURE_RESOURCE_GROUP'] = cfg.azure.resourcegroup
+        subs['BLAST_ELB_JOB_ID'] = cfg.azure.elb_job_id
+        subs['BLAST_ELB_JOB_ID_SHORT'] = cfg.azure.elb_job_id[-8:]
        
         
     logging.debug(f"Submitting job submission job: {subs['ELB_DOCKER_IMAGE']}")

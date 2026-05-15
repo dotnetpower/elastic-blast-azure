@@ -1,0 +1,5 @@
+awscli
+# elastic-blast (Azure fork) — installs the AKS-aware elastic_blast
+# package directly from the fork so the QS image can `import azure_*`
+# helpers used by run.sh and the AKS submit pipeline.
+git+https://github.com/dotnetpower/elastic-blast-azure.git

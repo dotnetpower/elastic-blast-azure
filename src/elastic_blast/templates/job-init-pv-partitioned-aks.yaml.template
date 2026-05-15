@@ -5,11 +5,13 @@ metadata:
   name: init-pv-partitioned
   labels:
     app: setup
+    elb-job-id: "${BLAST_ELB_JOB_ID}"
 spec:
   template:
     metadata:
       labels:
         app: setup
+        elb-job-id: "${BLAST_ELB_JOB_ID}"
     spec:
       volumes:
       - name: blast-dbs

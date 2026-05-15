@@ -17,15 +17,15 @@ class TestCostEstimate:
 
     def test_basic_estimate(self):
         """Standard VM cost estimate should be positive."""
-        result = estimate_cost('Standard_E32s_v3', num_nodes=3, estimated_hours=2.0)
+        result = estimate_cost('Standard_E32s_v5', num_nodes=3, estimated_hours=2.0)
         assert result.total > 0
-        assert result.compute_per_hour == AZURE_VM_HOURLY_PRICES['Standard_E32s_v3'] * 3
+        assert result.compute_per_hour == AZURE_VM_HOURLY_PRICES['Standard_E32s_v5'] * 3
         assert result.is_spot is False
 
     def test_spot_discount(self):
         """Spot VMs should be significantly cheaper."""
-        regular = estimate_cost('Standard_E32s_v3', num_nodes=3, estimated_hours=2.0)
-        spot = estimate_cost('Standard_E32s_v3', num_nodes=3, estimated_hours=2.0, use_spot=True)
+        regular = estimate_cost('Standard_E32s_v5', num_nodes=3, estimated_hours=2.0)
+        spot = estimate_cost('Standard_E32s_v5', num_nodes=3, estimated_hours=2.0, use_spot=True)
         assert spot.total < regular.total
         assert spot.is_spot is True
 
@@ -36,8 +36,8 @@ class TestCostEstimate:
 
     def test_storage_cost_included(self):
         """DB storage cost should be included in total."""
-        no_storage = estimate_cost('Standard_E32s_v3', num_nodes=1, estimated_hours=1.0, db_size_gb=0)
-        with_storage = estimate_cost('Standard_E32s_v3', num_nodes=1, estimated_hours=1.0, db_size_gb=2000)
+        no_storage = estimate_cost('Standard_E32s_v5', num_nodes=1, estimated_hours=1.0, db_size_gb=0)
+        with_storage = estimate_cost('Standard_E32s_v5', num_nodes=1, estimated_hours=1.0, db_size_gb=2000)
         assert with_storage.total > no_storage.total
 
     def test_l_series_pricing(self):
@@ -47,9 +47,9 @@ class TestCostEstimate:
 
     def test_str_representation(self):
         """Cost estimate should have readable string representation."""
-        result = estimate_cost('Standard_E32s_v3', num_nodes=3, estimated_hours=2.0)
+        result = estimate_cost('Standard_E32s_v5', num_nodes=3, estimated_hours=2.0)
         s = str(result)
-        assert 'Standard_E32s_v3' in s
+        assert 'Standard_E32s_v5' in s
         assert '3 nodes' in s
         assert '$' in s
 
@@ -67,7 +67,7 @@ class TestSpotVmConfig:
             # Create minimal mock config
             cfg = MagicMock()
             cfg.cluster.name = 'test-cluster'
-            cfg.cluster.machine_type = 'Standard_E32s_v3'
+            cfg.cluster.machine_type = 'Standard_E32s_v5'
             cfg.cluster.num_nodes = 3
             cfg.cluster.use_preemptible = True
             cfg.cluster.use_local_ssd = False

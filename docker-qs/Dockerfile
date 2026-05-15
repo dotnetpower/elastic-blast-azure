@@ -28,15 +28,8 @@ COPY run.sh /usr/bin/
 RUN chmod +x /usr/bin/run.sh && \
     apk -U upgrade && \
     apk add --no-cache bash python3 py3-pip py3-wheel curl unzip && \
-    pip3 install --no-cache-dir --upgrade pip "setuptools<70" --break-system-packages && \
-    pip3 install --no-cache-dir --no-build-isolation -r requirements.txt --break-system-packages && rm -rf /var/cache/apk/* requirements.txt
-
-# Add azcopy installation
-WORKDIR /tmp
-RUN wget -O azcopy_v10.tar.gz https://aka.ms/downloadazcopy-v10-linux && \
-    tar -xf azcopy_v10.tar.gz --strip-components=1 && \
-    ls -al && \
-    cp ./azcopy /usr/bin
+    pip3 install --no-cache-dir --upgrade pip --break-system-packages && \
+    pip3 install --no-cache-dir -r requirements.txt --break-system-packages && rm -rf /var/cache/apk/* requirements.txt
 
 LABEL Description="NCBI ElasticBLAST Query Splitting Module"
 LABEL Version=${version}

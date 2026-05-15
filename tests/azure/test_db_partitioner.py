@@ -170,7 +170,7 @@ class TestDerivePartitionPrefix:
 class TestApplyAutoPartition:
     """Tests for apply_auto_partition()."""
 
-    def _make_cfg(self, db_size_gb=269.0, machine_type='Standard_E16s_v3',
+    def _make_cfg(self, db_size_gb=269.0, machine_type='Standard_E16s_v5',
                   num_nodes=5, use_local_ssd=True, db_partitions=0,
                   db_partition_prefix='', db_auto_partition=True):
         """Create a mock config object."""

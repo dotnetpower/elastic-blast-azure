@@ -2,11 +2,12 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: ${ELB_BLAST_PROGRAM}-batch-${ELB_DB_LABEL}-job-${JOB_NUM}
+  name: ${ELB_BLAST_PROGRAM}-batch-${ELB_DB_LABEL}-job-${JOB_NUM}-${BLAST_ELB_JOB_ID_SHORT}
   labels:
     app: blast
     db: ${ELB_DB_LABEL}
     shard: "${ELB_SHARD_IDX}"
+    elb-job-id: "${BLAST_ELB_JOB_ID}"
 spec:
   template:
     metadata:
@@ -14,6 +15,7 @@ spec:
         app: blast
         db: ${ELB_DB_LABEL}
         shard: "${ELB_SHARD_IDX}"
+        elb-job-id: "${BLAST_ELB_JOB_ID}"
     spec:
       volumes:
       - name: blast-dbs

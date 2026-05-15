@@ -4,14 +4,16 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: elb-finalizer
+  name: elb-finalizer-${BLAST_ELB_JOB_ID_SHORT}
   labels:
     app: finalizer
+    elb-job-id: "${BLAST_ELB_JOB_ID}"
 spec:
   template:
     metadata:
       labels:
         app: finalizer
+        elb-job-id: "${BLAST_ELB_JOB_ID}"
     spec:
       serviceAccountName: ${ELB_SERVICE_ACCOUNT}
       volumes:
@@ -37,10 +39,16 @@ spec:
           value: "${ELB_DB_PARTITIONS}"
         - name: ELB_BLAST_PROGRAM
           value: "${ELB_BLAST_PROGRAM}"
+        - name: BLAST_ELB_JOB_ID
+          value: "${BLAST_ELB_JOB_ID}"
         volumeMounts:
         - name: scripts
           mountPath: /scripts
           readOnly: true
         command: ["/scripts/elb-finalizer-aks.sh"]
       restartPolicy: Never
-  backoffLimit: 2
+  # The finalizer writes terminal SUCCESS/FAILURE markers and is NOT
+  # safely retryable: a second attempt can observe different cluster state
+  # and overwrite a previous attempt's marker. K8s default backoffLimit
+  # of 6 would amplify the problem. Pin to 0.
+  backoffLimit: 0

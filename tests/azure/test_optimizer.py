@@ -59,7 +59,7 @@ class TestPredict:
 
     def test_large_db_selects_better_vm(self):
         p = predict(OptimizationProfile.COST, query_size_gb=1, db_size_gb=500)
-        assert p.vm_type == 'Standard_E16s_v3'  # large_db_vm for cost
+        assert p.vm_type == 'Standard_E16s_v5'  # large_db_vm for cost
 
     def test_prediction_str_includes_key_info(self):
         p = predict(OptimizationProfile.BALANCED, query_size_gb=1, db_size_gb=50)
@@ -97,7 +97,7 @@ class TestApplyProfile:
         cfg = MagicMock()
         cfg.cluster.use_preemptible = False
         cfg.cluster.num_nodes = 1
-        cfg.cluster.machine_type = 'Standard_E32s_v3'
+        cfg.cluster.machine_type = 'Standard_E32s_v5'
         cfg.cluster.reuse = False
         cfg.blast.batch_len = 100000
 

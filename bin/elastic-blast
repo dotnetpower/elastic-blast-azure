@@ -35,8 +35,10 @@ from elastic_blast import VERSION
 from elastic_blast.commands.submit import submit as elb_submit
 from elastic_blast.commands.prepare import prepare as elb_prepare
 from elastic_blast.commands.status import create_arg_parser as create_status_arg_parser
+from elastic_blast.commands.status import _status as elb_status
 from elastic_blast.commands.delete import delete as elb_delete
 from elastic_blast.commands.run_summary import create_arg_parser as create_run_summary_arg_parser
+from elastic_blast import azure_cli_glue
 from elastic_blast.util import validate_installation, check_positive_int, config_logging, UserReportError, SafeExecError
 from elastic_blast.util import ElbSupportedPrograms, clean_up
 from elastic_blast import constants
@@ -85,7 +87,11 @@ def main():
         cfg = ElasticBlastConfig(cfg, args.dry_run, task=task)
         logging.debug(pformat(cfg.asdict()))
         #TODO: use cfg only when args.wait, args.sync, and args.run_label are replicated in cfg
-        return args.func(args, cfg, clean_up_stack)
+        # Azure JSON-mode adapter: routes submit/status/delete through
+        # azure_cli_glue so external callers (e.g., elb-dashboard) get
+        # structured JSON, idempotency, correlation ids, and stable exit
+        # codes. No-op for GCP/AWS or when --json is absent.
+        return _dispatch_with_azure_glue(args, cfg, clean_up_stack)
     except (SafeExecError, UserReportError) as e:
         logging.error(e.message)
         if 'ELB_DEBUG' in os.environ:
@@ -123,10 +129,99 @@ def file_must_exist(path: str) -> str:
     """Check if given  path exists and is a file, helper function for
     argparse.ArgumentParser. If used for a command line argument, the
     application will exit with an error if file is not found or path is not a
-    file."""
+    file.
+
+    Special case: '-' reads the configuration body from STDIN. This lets
+    integrations (e.g., elb-dashboard) hand the INI body over a pipe
+    instead of writing a temp file in a shared sidecar.
+    """
+    if path == '-':
+        return _materialize_stdin_cfg()
     if os.path.isfile(path):
         return path
     raise argparse.ArgumentTypeError(f'File {path} was not found')
+
+
+_STDIN_CFG_PATH = None  # remembered so we don't re-read stdin twice
+_STDIN_CFG_MAX_BYTES = 1 * 1024 * 1024  # 1 MiB cap; INI files are tiny
+
+
+def _materialize_stdin_cfg() -> str:
+    """Drain stdin into a private temp file (mode 0600) and return its path.
+
+    Hardening:
+      * Bounded read (`_STDIN_CFG_MAX_BYTES`) — stdin from a hostile pipe
+        cannot fill /tmp or exhaust memory.
+      * mode 0600 + atexit cleanup — the file holds connection-string
+        adjacent values (storage account, blob URLs) and must not linger
+        in shared `/tmp` after the process exits.
+      * Idempotent — repeated calls in the same invocation reuse the
+        already-materialized path.
+    """
+    global _STDIN_CFG_PATH
+    if _STDIN_CFG_PATH is not None:
+        return _STDIN_CFG_PATH
+    import atexit
+    import tempfile
+    # Use buffered reader; cap input length up-front to defend against
+    # GB-scale pipes used as a DoS vector.
+    raw = sys.stdin.buffer.read(_STDIN_CFG_MAX_BYTES + 1)
+    if len(raw) > _STDIN_CFG_MAX_BYTES:
+        raise argparse.ArgumentTypeError(
+            f"--cfg - input exceeds {_STDIN_CFG_MAX_BYTES} bytes (max)")
+    if not raw.strip():
+        raise argparse.ArgumentTypeError(
+            "--cfg - was given but stdin is empty")
+    fd, path = tempfile.mkstemp(prefix='elb-cfg-', suffix='.ini')
+    try:
+        os.write(fd, raw)
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
+    _STDIN_CFG_PATH = path
+
+    def _cleanup() -> None:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    atexit.register(_cleanup)
+    return path
+
+
+def _dispatch_with_azure_glue(args, cfg, clean_up_stack) -> int:
+    """Route the chosen subcommand through azure_cli_glue when on Azure.
+
+    Non-Azure: behaves exactly like `args.func(args, cfg, clean_up_stack)`.
+    Azure: wraps submit/status/delete to add JSON output, idempotency,
+    correlation-id binding, structured error mapping, and stable exit codes.
+
+    If the user passed an Azure-only flag against a non-Azure CSP, log a
+    visible warning so misconfigurations don't fail silently in the
+    integrating service.
+    """
+    if not azure_cli_glue.is_azure(cfg):
+        # Surface misuse: dashboard or another integration may have built
+        # the wrong cfg yet still passed --json/--idempotency-key.
+        for flag in ('json', 'idempotency_key', 'correlation_id', 'force'):
+            if getattr(args, flag, None):
+                logging.warning(
+                    f"--{flag.replace('_','-')} is ignored for non-Azure CSPs")
+        return args.func(args, cfg, clean_up_stack)
+
+    sub = (args.subcommand or '').lower()
+    with azure_cli_glue.correlation(args, cfg):
+        if sub == 'submit':
+            return azure_cli_glue.submit_command(
+                args, cfg, clean_up_stack, default_submit=elb_submit)
+        if sub == 'status':
+            return azure_cli_glue.status_command(
+                args, cfg, clean_up_stack, default_status=elb_status)
+        if sub == 'delete':
+            return azure_cli_glue.delete_command(
+                args, cfg, clean_up_stack, default_delete=elb_delete)
+        # prepare / run-summary / etc.: leave as-is.
+        return args.func(args, cfg, clean_up_stack)
 
 
 def positive_int(arg: str) -> int:
@@ -162,6 +257,24 @@ def create_arg_parser():
                                     help="ElasticBLAST configuration file")
     elb_opts.add_argument(f"--{constants.CFG_BLAST_RESULTS}", type=str,
                         help="Bucket URI where to save the output from ElasticBLAST")
+
+    # Azure-only structured-API flags. These are silently ignored on
+    # AWS/GCP. They power the elb-dashboard integration path.
+    azure_api_opts = common_opts_parser.add_argument_group(
+        'Azure structured-API options (ignored for non-Azure CSPs)')
+    azure_api_opts.add_argument("--json", action='store_true',
+        help="Emit a single-line JSON result on stdout (Azure CSP only)")
+    azure_api_opts.add_argument("--idempotency-key", type=str, default=None,
+        metavar='KEY',
+        help="Reuse a previous submission with the same key (Azure only). "
+             "Replays return ALREADY_DONE/RESUMED instead of duplicating work.")
+    azure_api_opts.add_argument("--correlation-id", type=str, default=None,
+        metavar='ID',
+        help="Bind a request id to all log records and result envelopes "
+             "for end-to-end tracing (Azure only).")
+    azure_api_opts.add_argument("--force", action='store_true',
+        help="For 'delete': bypass the multi-submission guard. "
+             "For 'submit': reserved (no-op). Azure only.")
 
     app_opts = common_opts_parser.add_argument_group('Application options')
     app_opts.add_argument("--logfile", default=argparse.SUPPRESS, type=str,

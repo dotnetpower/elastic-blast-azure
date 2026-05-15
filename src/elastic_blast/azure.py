@@ -110,6 +110,11 @@ class AzureClients:
 
 
 _clients: Optional[AzureClients] = None
+_clients_lock = threading.Lock()
+# Serializes ~/.kube/config writers within the same process. The on-disk
+# fcntl.flock() in _sdk_get_aks_credentials covers cross-process races but
+# does not protect threads of a single process from each other.
+_kubeconfig_thread_lock = threading.Lock()
 
 
 def _get_subscription_id() -> str:
@@ -137,10 +142,12 @@ def _get_subscription_id() -> str:
 
 
 def _get_clients() -> AzureClients:
-    """Get or create the module-level AzureClients singleton."""
+    """Get or create the module-level AzureClients singleton (thread-safe)."""
     global _clients
     if _clients is None:
-        _clients = AzureClients(_get_subscription_id())
+        with _clients_lock:
+            if _clients is None:
+                _clients = AzureClients(_get_subscription_id())
     return _clients
 
 
@@ -252,22 +259,54 @@ def _sdk_get_aks_credentials(resource_group: str, cluster_name: str, dry_run: bo
     kube_dir = os.path.expanduser('~/.kube')
     os.makedirs(kube_dir, exist_ok=True)
     kube_config_path = os.path.join(kube_dir, 'config')
+    lock_path = kube_config_path + '.elb.lock'
 
-    with tempfile.NamedTemporaryFile(mode='wb', suffix='.yaml', delete=False) as tmp:
+    # New kubeconfig from AKS into a temp file
+    with tempfile.NamedTemporaryFile(mode='wb', suffix='.yaml', delete=False, dir=kube_dir) as tmp:
         tmp.write(kubeconfig_bytes)
         tmp_path = tmp.name
-    try:
-        env = os.environ.copy()
-        existing = env.get('KUBECONFIG', kube_config_path)
-        env['KUBECONFIG'] = f'{existing}:{tmp_path}'
-        import subprocess
-        with open(kube_config_path, 'w') as kube_out:
-            subprocess.run(['kubectl', 'config', 'view', '--flatten'],
-                           stdout=kube_out, env=env, check=True)
-    finally:
-        os.unlink(tmp_path)
 
-    p = safe_exec('kubectl config current-context'.split())
+    # Serialize concurrent writers to ~/.kube/config across processes/threads.
+    # Without this, two parallel `_sdk_get_aks_credentials` calls can corrupt
+    # the merged kubeconfig (truncate during another's read, or interleave
+    # `kubectl config view --flatten` output).
+    import fcntl
+    import subprocess
+    merged_tmp_path: Optional[str] = None
+    try:
+        with _kubeconfig_thread_lock, open(lock_path, 'w') as lock_f:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            try:
+                env = os.environ.copy()
+                existing = env.get('KUBECONFIG', kube_config_path)
+                # Include the existing config + the new context, then flatten
+                env['KUBECONFIG'] = f'{existing}:{tmp_path}'
+                # Write to a sibling temp file then atomically rename to avoid
+                # leaving a partial config if the process is interrupted.
+                with tempfile.NamedTemporaryFile(
+                        mode='wb', suffix='.yaml', delete=False, dir=kube_dir) as merged_tmp:
+                    merged_tmp_path = merged_tmp.name
+                    subprocess.run(['kubectl', 'config', 'view', '--flatten'],
+                                   stdout=merged_tmp, env=env, check=True)
+                os.replace(merged_tmp_path, kube_config_path)
+                merged_tmp_path = None
+                # Read the current-context from the freshly merged kubeconfig
+                # under the same lock so a concurrent writer cannot overwrite
+                # it before we observe the value we just wrote.
+                p = safe_exec('kubectl config current-context'.split())
+            finally:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+    finally:
+        if merged_tmp_path and os.path.exists(merged_tmp_path):
+            try:
+                os.unlink(merged_tmp_path)
+            except OSError:
+                pass
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
     return handle_error(p.stdout).strip()
 
 
@@ -503,12 +542,12 @@ class OptimizationProfile(str, Enum):
 
 _VM_PROFILES = {
     OptimizationProfile.COST: {
-        'default_vm': 'Standard_D8s_v3', 'large_db_vm': 'Standard_E16s_v3',
+        'default_vm': 'Standard_D8s_v3', 'large_db_vm': 'Standard_E16s_v5',
         'spot': True, 'vmtouch_pct': 0.5, 'azcopy_concurrency': 16,
         'skip_db_verify': True, 'threads_per_pod': 2, 'mem_limit_gb': 4, 'mem_request_gb': 2,
     },
     OptimizationProfile.BALANCED: {
-        'default_vm': 'Standard_E32s_v3', 'large_db_vm': 'Standard_E32s_v3',
+        'default_vm': 'Standard_E32s_v5', 'large_db_vm': 'Standard_E32s_v5',
         'spot': True, 'vmtouch_pct': 0.8, 'azcopy_concurrency': 64,
         'skip_db_verify': True, 'threads_per_pod': 8, 'mem_limit_gb': 8, 'mem_request_gb': 4,
     },
@@ -521,8 +560,8 @@ _VM_PROFILES = {
 
 _VM_SPECS = {
     'Standard_D8s_v3':   (8,   32,   0.384),  'Standard_D16s_v3':  (16,  64,   0.768),
-    'Standard_D32s_v3':  (32,  128,  1.536),   'Standard_E16s_v3':  (16,  128,  1.008),
-    'Standard_E32s_v3':  (32,  256,  2.016),   'Standard_E64s_v3':  (64,  432,  3.629),
+    'Standard_D32s_v3':  (32,  128,  1.536),   'Standard_E16s_v5':  (16,  128,  1.008),
+    'Standard_E32s_v5':  (32,  256,  2.016),   'Standard_E64s_v3':  (64,  432,  3.629),
     'Standard_E32bs_v5': (32,  256,  2.432),   'Standard_E64bs_v5': (64,  512,  4.864),
     'Standard_E96bs_v5': (96,  672,  7.296),   'Standard_L32s_v3':  (32,  256,  2.496),
     'Standard_L64s_v3':  (64,  512,  4.992),
@@ -632,9 +671,12 @@ def apply_profile(cfg, profile: Optional[OptimizationProfile] = None,
     from .constants import ELB_DFLT_AZURE_NUM_CPUS
     if cfg.cluster.num_cpus == ELB_DFLT_AZURE_NUM_CPUS:
         cfg.cluster.num_cpus = p_cfg['threads_per_pod']
-    os.environ['AZCOPY_CONCURRENCY_VALUE'] = str(p_cfg['azcopy_concurrency'])
-    if p_cfg['skip_db_verify']:
-        os.environ['ELB_SKIP_DB_VERIFY'] = 'true'
+    # NOTE: Previously this set os.environ['AZCOPY_CONCURRENCY_VALUE'] and
+    # os.environ['ELB_SKIP_DB_VERIFY']. Both were removed for multi-request
+    # safety: process-global mutations would race between concurrent
+    # apply_profile() calls. ELB_SKIP_DB_VERIFY is hardcoded "true" in pod
+    # templates already; AZCOPY_CONCURRENCY_VALUE only affects two host-side
+    # azcopy invocations (merge/cleanup) where the default of 64 is fine.
     if profile in (OptimizationProfile.COST, OptimizationProfile.BALANCED):
         cfg.cluster.reuse = True
     logging.info(f'Applied optimization profile: {profile.value}')
@@ -921,6 +963,7 @@ class ElasticBlastAzure(ElasticBlast):
             'ELB_DOCKER_IMAGE': cfg.azure.elb_docker_image,
             'ELB_TIMEFMT': '%s%N',
             'BLAST_ELB_JOB_ID': cfg.azure.elb_job_id,
+            'BLAST_ELB_JOB_ID_SHORT': cfg.azure.elb_job_id[-8:],
             'BLAST_ELB_VERSION': VERSION,
             'BLAST_USAGE_REPORT': str(get_usage_reporting()).lower(),
             'K8S_JOB_GET_BLASTDB': K8S_JOB_GET_BLASTDB,
@@ -960,6 +1003,8 @@ class ElasticBlastAzure(ElasticBlast):
             'ELB_SERVICE_ACCOUNT': 'default',
             'ELB_DB_PARTITIONS': str(cfg.blast.db_partitions) if cfg.blast.db_partitions > 0 else '0',
             'ELB_BLAST_PROGRAM': cfg.blast.program,
+            'BLAST_ELB_JOB_ID': cfg.azure.elb_job_id,
+            'BLAST_ELB_JOB_ID_SHORT': cfg.azure.elb_job_id[-8:],
         }
 
         from importlib.resources import files as pkg_files
@@ -1441,35 +1486,45 @@ class ElasticBlastAzure(ElasticBlast):
     # -- Cleanup ------------------------------------------------------------
 
     def _cleanup_stale_jobs(self) -> None:
-        """Delete all stale jobs before a warm-cluster 2nd submit.
+        """Delete this submission's stale jobs before a warm-cluster 2nd submit.
 
-        Removes previous blast, submit, setup, and finalizer jobs so that
-        ``kubectl apply`` on the new submit-jobs job does not hit immutable
-        field errors from leftover resources.
+        Removes only jobs labeled with this submission's elb-job-id so that
+        concurrent submissions on the same cluster (different elb_job_id)
+        are not affected. Falls back to app-only filter when job-id is empty.
         """
         try:
             kubectl = self._kubectl()
-            for label in ('app=blast', 'app=submit', 'app=setup', 'app=finalizer'):
-                cmd = f'{kubectl} delete jobs -l {label} --ignore-not-found=true'
+            job_id = self.cfg.azure.elb_job_id
+            for app in ('blast', 'submit', 'setup', 'finalizer'):
+                if job_id:
+                    selector = f'app={app},elb-job-id={job_id}'
+                else:
+                    selector = f'app={app}'
+                cmd = f'{kubectl} delete jobs -l {selector} --ignore-not-found=true'
                 if self.cfg.cluster.dry_run:
                     logging.info(cmd)
                 else:
                     safe_exec(shlex.split(cmd))
-            logging.info('Warm reuse: stale jobs cleaned up')
+            logging.info(f'Warm reuse: stale jobs cleaned up (job_id={job_id})')
         except Exception as e:
             logging.warning(f'Warm reuse cleanup failed: {e}')
 
     def _cleanup_jobs_only(self) -> None:
-        """In reuse mode: delete BLAST/submit jobs, preserve cluster and PVCs."""
+        """In reuse mode: delete this submission's BLAST/submit jobs only."""
         try:
             kubectl = self._kubectl()
-            for label in ('app=blast', 'app=submit'):
-                cmd = f'{kubectl} delete jobs -l {label} --ignore-not-found=true'
+            job_id = self.cfg.azure.elb_job_id
+            for app in ('blast', 'submit'):
+                if job_id:
+                    selector = f'app={app},elb-job-id={job_id}'
+                else:
+                    selector = f'app={app}'
+                cmd = f'{kubectl} delete jobs -l {selector} --ignore-not-found=true'
                 if self.cfg.cluster.dry_run:
                     logging.info(cmd)
                 else:
                     safe_exec(shlex.split(cmd))
-            logging.info('Reuse cleanup: jobs deleted, cluster preserved')
+            logging.info(f'Reuse cleanup: jobs deleted (job_id={job_id}), cluster preserved')
         except Exception as e:
             logging.warning(f'Reuse cleanup failed: {e}')
 
@@ -1721,14 +1776,36 @@ def _get_resource_ids(cfg: ElasticBlastConfig) -> ResourceIds:
     return ResourceIds()
 
 
-def delete_cluster_with_cleanup(cfg: ElasticBlastConfig, allow_missing: bool = False) -> None:
+def delete_cluster_with_cleanup(cfg: ElasticBlastConfig, allow_missing: bool = False,
+                                 force: bool = False) -> None:
     """Delete AKS cluster and clean up persistent disks/snapshots.
 
     Args:
         allow_missing: If True, skip gracefully when cluster not found.
                        Used by cleanup stack to avoid hiding original errors.
+        force:         If True, bypass the multi-submission guard. Pass this
+                       explicitly from API callers instead of mutating
+                       process-global ELB_FORCE_DELETE (which races between
+                       concurrent threads).
+
+    Multi-submission safety: aborts if other submissions still have active
+    jobs on this cluster (different elb-job-id), unless `force=True` (or
+    the legacy ELB_FORCE_DELETE=1 env var) is set. Override is intentional
+    — destroying a shared cluster while another search is mid-flight wipes
+    its data with no recovery.
     """
     dry_run = cfg.cluster.dry_run
+    forced = force or bool(os.environ.get('ELB_FORCE_DELETE'))
+
+    # Pre-flight: refuse to wipe a cluster that other submissions are still using.
+    if not dry_run and not allow_missing and not forced:
+        try:
+            _abort_if_other_submissions_active(cfg)
+        except UserReportError:
+            raise
+        except Exception as e:
+            logging.warning(f'Multi-submission safety check failed (continuing): {e}')
+
     pds, snapshots = _collect_resource_ids(cfg)
 
     # Wait for cluster to reach a stable state
@@ -1750,6 +1827,85 @@ def _collect_resource_ids(cfg: ElasticBlastConfig) -> Tuple[List[str], List[str]
     except Exception as e:
         logging.error(f'Unable to read resource IDs: {e}')
         return [], []
+
+
+def _abort_if_other_submissions_active(cfg: ElasticBlastConfig) -> None:
+    """Abort cluster deletion if other elb-job-id submissions are still active.
+
+    Looks at every Job on the cluster carrying an elb-job-id label and
+    checks whether any belongs to a different submission and is not yet
+    complete. If so, raises UserReportError and tells the user how to
+    override (ELB_FORCE_DELETE=1) for the genuine "yes, I really want to
+    nuke this shared cluster" case.
+
+    Failures to query the cluster (no kubeconfig, kubectl missing, etc.)
+    are caught and logged — we do not block delete on the health-check
+    itself.
+    """
+    my_id = cfg.azure.elb_job_id
+
+    # Look up the cached kubectl context. If it's unknown, the cluster has
+    # likely never been touched from this process: there is nothing useful
+    # to check, so skip the guard. We intentionally do NOT construct a new
+    # ElasticBlastAzure or call _get_k8s_ctx() here — fetching credentials
+    # writes ~/.kube/config, which is a side effect inappropriate for a
+    # read-only health check on the delete path.
+    ctx = getattr(cfg.appstate, 'k8s_ctx', None)
+    if not ctx:
+        logging.debug('Multi-submission guard: no k8s context cached, skipping')
+        return
+
+    # Build the command as a list — jsonpath contains spaces and braces
+    # that shlex.split would mangle if we passed a single string.
+    jsonpath = (
+        '{range .items[*]}'
+        '{.metadata.labels.elb-job-id}{"\\t"}'
+        '{.status.active}{"\\t"}'
+        '{.status.succeeded}{"\\t"}'
+        '{.status.failed}{"\\n"}'
+        '{end}'
+    )
+    cmd = [
+        'kubectl', f'--context={ctx}', 'get', 'jobs',
+        '-l', 'elb-job-id',
+        '-o', f'jsonpath={jsonpath}',
+    ]
+    try:
+        out = handle_error(safe_exec(cmd).stdout)
+    except SafeExecError as e:
+        logging.warning(f'Multi-submission guard: cannot enumerate jobs: {e.message}')
+        return
+    except UserReportError as e:
+        # Surfaced from handle_error on stderr capture etc. Do not let the
+        # guard's diagnostic failure block the user's delete intent.
+        logging.warning(f'Multi-submission guard: kubectl query failed: {e.message}')
+        return
+
+    other_active: DefaultDict[str, int] = defaultdict(int)
+    for line in out.splitlines():
+        parts = line.split('\t')
+        if len(parts) < 4:
+            continue
+        job_id, active = parts[0], parts[1]
+        if not job_id or job_id == my_id:
+            continue
+        # active>0 means the Job is still running. succeeded/failed in the
+        # remaining columns indicate a terminal state — those are not
+        # "in flight" and must not block delete.
+        if active and active != '0':
+            try:
+                other_active[job_id] += int(active)
+            except ValueError:
+                # Unexpected non-integer; treat as "still active" to be safe.
+                other_active[job_id] += 1
+
+    if other_active:
+        ids = ', '.join(sorted(other_active))
+        raise UserReportError(CLUSTER_ERROR,
+            f'Refusing to delete cluster {cfg.cluster.name}: '
+            f'{len(other_active)} other ElasticBLAST submission(s) still '
+            f'active on it ({ids}). Wait for them to complete, or set '
+            f'ELB_FORCE_DELETE=1 to override (this will destroy their data).')
 
 
 def _wait_for_cluster_ready(cfg: ElasticBlastConfig, allow_missing: bool = False) -> bool:

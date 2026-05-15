@@ -29,7 +29,7 @@ import os
 import pytest
 
 def test_ram():
-    assert get_machine_properties('Standard_E32s_v3') == InstanceProperties(32, 256)
+    assert get_machine_properties('Standard_E32s_v5') == InstanceProperties(32, 256)
 
 def test_l_series_storage_optimized():
     """L-series VMs for TB-scale BLAST DB with large NVMe."""

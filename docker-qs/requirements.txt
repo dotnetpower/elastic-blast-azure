@@ -1,2 +1,2 @@
 awscli
-git+https://github.com/dotnetpower/elastic-blast-azure.git
+elastic-blast

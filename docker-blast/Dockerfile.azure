@@ -7,7 +7,7 @@
 # thus cannot be copyrighted.  This software is freely available
 # to the public for use.  The National Library of Medicine and the U.S.
 # Government have not placed any restriction on its use or reproduction.
-#   
+#
 # Although all reasonable efforts have been taken to ensure the accuracy
 # and reliability of the software and data, the NLM and the U.S.
 # Government do not and cannot warrant the performance or results that
@@ -15,12 +15,19 @@
 # Government disclaim all warranties, express or implied, including
 # warranties of performance, merchantability or fitness for any particular
 # purpose.
-#   
+#
 # Please cite NCBI in any work or product based on this material.
+
+# Azure variant of docker-blast/Dockerfile.
+# Adds AzCopy v10 (used by AKS pod scripts that talk to Azure Blob Storage)
+# and exposes /workspace as the default working directory used by the
+# AKS local-SSD/PV templates. Keep upstream Dockerfile pristine; all
+# Azure-specific layers live here so syncing with ncbi/elastic-blast
+# stays a no-conflict merge.
 
 FROM ncbi/blast:2.17.0 as blast
 ARG version
-LABEL Description="NCBI BLAST" Vendor="NCBI/NLM/NIH" Version=${version} Maintainer=camacho@ncbi.nlm.nih.gov
+LABEL Description="NCBI BLAST (Azure)" Vendor="NCBI/NLM/NIH" Version=${version} Maintainer=camacho@ncbi.nlm.nih.gov
 
 USER root
 WORKDIR /root/
@@ -30,8 +37,18 @@ COPY requirements.txt .
 RUN apt-get -y -m update && \
     apt-get install -y python3 python3-pip time parallel vmtouch curl wget unzip && \
     pip3 --version && python3 -m pip --version && \
-	rm -rf /var/lib/apt/lists/*  
+    rm -rf /var/lib/apt/lists/*
 
+# AzCopy v10 — required by AKS pod scripts (init-db-*-aks.sh,
+# results-export-aks.sh, query-download-ssd-aks.sh) for blob I/O with
+# Managed Identity (`azcopy login --identity`).
+WORKDIR /tmp
+RUN wget -O azcopy_v10.tar.gz https://aka.ms/downloadazcopy-v10-linux && \
+    tar -xf azcopy_v10.tar.gz --strip-components=1 && \
+    cp ./azcopy /usr/bin/ && \
+    rm -f azcopy_v10.tar.gz NOTICE.txt
+
+WORKDIR /root/
 RUN python3 -m pip install --no-cache-dir --upgrade pip && \
     python3 -m pip install --no-cache-dir -r requirements.txt && \
     rm -frv requirements.txt
@@ -40,5 +57,8 @@ COPY splitq_download_db_search /blast/bin/
 RUN sed -i -e "s/\$VERSION/$version/" /blast/bin/splitq_download_db_search
 COPY fasta-split /blast/bin/
 
-CMD ["/bin/bash"]
+# AKS templates (pvc-rwm-anf-aks, *-aks.yaml.template) mount /workspace
+# as either a hostPath (local-SSD mode) or an Azure NetApp Files PVC.
+WORKDIR /workspace
 
+CMD ["/bin/bash"]

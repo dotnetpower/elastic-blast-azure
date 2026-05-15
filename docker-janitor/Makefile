@@ -24,13 +24,14 @@
 # Created: Tue Aug 31 11:29:06 EDT 2021
 
 SHELL=/bin/bash
-.PHONY: all pre-check check clean build publish gcp-build gcp-check gcp-clean
+.PHONY: all pre-check check clean build publish gcp-build gcp-check gcp-clean azure-build
 
 IMG?=ncbi/elasticblast-janitor
 VERSION?=0.4.0
 ELB_VERSION?=$(shell git describe --tags --abbrev=0)
 GCP_PROJECT?=ncbi-blast-infra
 GCP_TEST_BUCKET?=gs://elasticblast-test/query-split-run-test
+AZURE_REGISTRY?=elbacr.azurecr.io
 
 # For gcp-test
 ELB_GCP_PROJECT?=ncbi-sandbox-blast
@@ -86,3 +87,7 @@ gcp-check:
 gcp-list-tagless-images:
 	gcloud container images list-tags us-docker.pkg.dev/${GCP_PROJECT}/${IMG} \
 		--filter='-tags:*' --format="get(digest)"
+
+.PHONY: azure-build
+azure-build:
+	az acr build -f Dockerfile.azure --registry $(AZURE_REGISTRY) --image $(IMG):$(VERSION) .
