@@ -108,6 +108,10 @@ ELB_DFLT_AZURE_PD_SIZE_BIG = '5Ti'
 ELB_DFLT_GCP_MACHINE_TYPE = 'n1-highmem-32'
 ELB_DFLT_AWS_MACHINE_TYPE = 'm5.8xlarge'
 ELB_DFLT_AZURE_MACHINE_TYPE = 'Standard_E32s_v5'
+# AKS system pool VM size. 2 vCPU is the minimum for a system pool;
+# D2s_v3 keeps cost ~$0.10/hr while comfortably fitting CoreDNS, metrics-server,
+# konnectivity-agent and CSI node pods.
+ELB_DFLT_AZURE_SYSTEM_VM_SIZE = 'Standard_D2s_v3'
 ELB_AWS_ARM_INSTANCE_TYPE_REGEX = r'^a1|^[a-z][1-9]g'
 
 ELB_DFLT_GCP_NUM_CPUS = 15
@@ -313,6 +317,21 @@ CFG_CP_AZURE_STORAGE_ACCOUNT_KEY = 'azure-storage-account-key'
 CFG_CP_AZURE_VNET = 'azure-vnet'
 CFG_CP_AZURE_SUBNET = 'azure-subnet'
 CFG_CP_AZURE_K8S_VERSION = 'aks-version'
+CFG_CP_AZURE_SYSTEM_VM_SIZE = 'azure-system-vm-size'
+
+# Azure AKS nodepool layout (system + user split).
+# system pool runs only AKS add-ons (CoreDNS, metrics-server, csi-azuredisk-node, ...);
+# blast pool runs every ElasticBLAST workload pod.
+ELB_AZURE_SYSTEM_POOL_NAME = 'systempool'
+ELB_AZURE_BLAST_POOL_NAME = 'blastpool'
+ELB_AZURE_BLAST_NODE_LABEL_KEY = 'workload'
+ELB_AZURE_BLAST_NODE_LABEL_VALUE = 'blast'
+# Taint applied to blast pool to keep system add-ons off it; matches workload tolerations
+# on every *-aks*.yaml.template Pod spec.
+ELB_AZURE_BLAST_NODE_TAINT = f'{ELB_AZURE_BLAST_NODE_LABEL_KEY}={ELB_AZURE_BLAST_NODE_LABEL_VALUE}:NoSchedule'
+# Taint applied to system pool. AKS adds it implicitly when system pool has user pools alongside,
+# but we set it explicitly for older AKS API versions and self-documentation.
+ELB_AZURE_SYSTEM_POOL_TAINT = 'CriticalAddonsOnly=true:NoSchedule'
 
 # TODO: add Azure configuration
 

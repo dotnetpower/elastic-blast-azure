@@ -105,6 +105,7 @@ from .constants import ELB_UNKNOWN_AZURE_ACR_RESOURCEGROUP, ELB_UNKNOWN_AZURE_AC
 from .constants import ELB_DFLT_AZURE_REGION, ELB_UNKNOWN_AZURE_RESOURCEGROUP, ELB_UNKNOWN_AZURE_STORAGE_ACCOUNT
 from .constants import ELB_UNKNOWN_AZURE_STORAGE_ACCOUNT_CONTAINER, ELB_UNKNOWN_AZURE_STORAGE_ACCOUNT_KEY
 from .constants import ELB_DFLT_GCP_K8S_VERSION, ELB_DFLT_AZURE_K8S_VERSION
+from .constants import ELB_DFLT_AZURE_SYSTEM_VM_SIZE, CFG_CP_AZURE_SYSTEM_VM_SIZE
 from .constants import ELB_DFLT_MIN_QUERY_FILESIZE_TO_SPLIT_ON_CLIENT_COMPRESSED
 from .constants import ELB_DFLT_MIN_QUERY_FILESIZE_TO_SPLIT_ON_CLIENT_UNCOMPRESSED
 from .constants import ELB_DFLT_AKS_ACR_NAME, ELB_DFLT_AKS_ACR_RESOURCE_GROUP
@@ -298,6 +299,9 @@ class AZUREConfig(CloudProviderBaseConfig, ConfigParserToDataclassMapper):
     subnet: Optional[str] = None
     user: Optional[str] = None
     aks_version: Optional[str] = ELB_DFLT_AZURE_K8S_VERSION
+    # AKS system pool VM size. The blast workload pool uses cfg.cluster.machine_type;
+    # this knob lets advanced users pick a different size for the small system pool.
+    system_vm_size: str = ELB_DFLT_AZURE_SYSTEM_VM_SIZE
     elb_docker_image: str = ELB_DOCKER_IMAGE_AZURE
     cjs_docker_image: str = ELB_CJS_DOCKER_IMAGE_AZURE
     janitor_docker_image: str = ELB_JANITOR_DOCKER_IMAGE_AZURE
@@ -319,6 +323,7 @@ class AZUREConfig(CloudProviderBaseConfig, ConfigParserToDataclassMapper):
                'network': ParamInfo(CFG_CLOUD_PROVIDER, CFG_CP_AZURE_VNET),
                'subnet': ParamInfo(CFG_CLOUD_PROVIDER, CFG_CP_AZURE_SUBNET),
                'aks_version': ParamInfo(CFG_CLOUD_PROVIDER, CFG_CP_AZURE_K8S_VERSION),
+               'system_vm_size': ParamInfo(CFG_CLOUD_PROVIDER, CFG_CP_AZURE_SYSTEM_VM_SIZE),
                'elb_docker_image': None,
                'cjs_docker_image': None,
                'janitor_docker_image': None,
