@@ -559,6 +559,7 @@ class BlastConfig(ConfigParserToDataclassMapper):
                     validate_cloud_storage_object_uri(query_file)
                 except ValueError as err:
                     errors.append(f'Incorrect queries URI "{query_file}": {str(err)}')
+        options = []
         try:
             options = shlex.split(self.options)
             unsupported_options = set(options).intersection(UNSUPPORTED_OPTIONS)
@@ -580,6 +581,27 @@ class BlastConfig(ConfigParserToDataclassMapper):
             errors.append('db-partition-prefix must be specified when db-partitions > 0 (or enable db-auto-partition = true)')
         if self.db_partitions < 0:
             errors.append(f'db-partitions must be non-negative, got {self.db_partitions}')
+        if self.db_partitions > 0:
+            outfmt = None
+            for idx, option in enumerate(options):
+                if option == '-outfmt' and idx + 1 < len(options):
+                    outfmt = options[idx + 1]
+                elif option.startswith('-outfmt='):
+                    outfmt = option.split('=', 1)[1]
+            if outfmt is None:
+                outfmt = str(ELB_DFLT_OUTFMT)
+            outfmt_parts = outfmt.strip().split(maxsplit=1)
+            outfmt_code = outfmt_parts[0] if outfmt_parts else str(ELB_DFLT_OUTFMT)
+            outfmt_extended = outfmt_parts[1] if len(outfmt_parts) > 1 else ''
+            if (
+                outfmt_code not in {'5', '6'}
+                or (outfmt_code == '5' and outfmt_extended)
+                or (outfmt_code == '6' and outfmt_extended and not outfmt_extended.startswith('std'))
+            ):
+                errors.append(
+                    'Partitioned BLAST requires outfmt 5 without extended fields, '
+                    'outfmt 6, or "6 std..."; '
+                    f'{outfmt} is not supported for merge')
 
 @dataclass_json(letter_case=LetterCase.KEBAB)
 @dataclass

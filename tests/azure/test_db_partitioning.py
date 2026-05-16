@@ -15,8 +15,12 @@ Tests cover:
 Author: Moon Hyuk Choi moonchoi@microsoft.com
 """
 
+import gzip
+import json
 import os
 import shlex
+import subprocess
+import xml.etree.ElementTree as ET
 from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch, MagicMock, call, ANY
@@ -99,11 +103,52 @@ class TestPartitionConfig:
     def test_validation_passes_with_valid_config(self):
         """Validation: valid partitioning config passes."""
         cfg = _make_cfg(db_partitions=4, db_partition_prefix=PARTITION_PREFIX)
+        cfg.blast.options = '-outfmt 6'
         errors = []
         cfg.blast.validate(errors, ElbCommand.SUBMIT)
         # No partition-related errors (other errors may exist from test config)
         partition_errors = [e for e in errors if 'partition' in e.lower()]
         assert len(partition_errors) == 0
+
+    def test_partitioned_mode_allows_xml_outfmt_5(self):
+        """Partitioned merge accepts BLAST XML outfmt 5."""
+        cfg = _make_cfg(db_partitions=4, db_partition_prefix=PARTITION_PREFIX)
+        cfg.blast.options = '-outfmt 5'
+        errors = []
+        cfg.blast.validate(errors, ElbCommand.SUBMIT)
+        assert not any('requires outfmt' in e for e in errors)
+
+    def test_partitioned_mode_allows_tabular_std_outfmt_6(self):
+        """Partitioned merge accepts default std-prefixed tabular outfmt 6."""
+        cfg = _make_cfg(db_partitions=4, db_partition_prefix=PARTITION_PREFIX)
+        cfg.blast.options = '-outfmt "6 std qlen"'
+        errors = []
+        cfg.blast.validate(errors, ElbCommand.SUBMIT)
+        assert not any('requires outfmt' in e for e in errors)
+
+    def test_partitioned_mode_rejects_custom_outfmt_6(self):
+        """Partitioned merge rejects custom outfmt 6 column layouts."""
+        cfg = _make_cfg(db_partitions=4, db_partition_prefix=PARTITION_PREFIX)
+        cfg.blast.options = '-outfmt "6 qseqid sseqid evalue bitscore"'
+        errors = []
+        cfg.blast.validate(errors, ElbCommand.SUBMIT)
+        assert any('requires outfmt' in e for e in errors)
+
+    def test_partitioned_mode_rejects_unsupported_outfmt(self):
+        """Partitioned merge rejects formats without a merge implementation."""
+        cfg = _make_cfg(db_partitions=4, db_partition_prefix=PARTITION_PREFIX)
+        cfg.blast.options = '-outfmt 7'
+        errors = []
+        cfg.blast.validate(errors, ElbCommand.SUBMIT)
+        assert any('requires outfmt 5' in e for e in errors)
+
+    def test_partitioned_mode_allows_extended_outfmt_6(self):
+        """Partitioned merge accepts outfmt 6 with extra tabular fields."""
+        cfg = _make_cfg(db_partitions=4, db_partition_prefix=PARTITION_PREFIX)
+        cfg.blast.options = '-outfmt "6 std qcovs"'
+        errors = []
+        cfg.blast.validate(errors, ElbCommand.SUBMIT)
+        assert not any('requires outfmt' in e for e in errors)
 
 
 class TestSubmitPartitioned:
@@ -154,6 +199,24 @@ class TestSubmitPartitioned:
             with pytest.raises(UserReportError) as exc_info:
                 elb._submit_partitioned(query_batches, 1000)
             assert 'exceeding limit' in str(exc_info.value.message)
+
+    @patch('elastic_blast.azure.get_usage_reporting', return_value=False)
+    def test_partitioned_submit_always_deploys_finalizer(self, mock_usage):
+        """Partitioned finalizer is required for merge even without auto-shutdown."""
+        cfg = _make_cfg(db_partitions=2, db_partition_prefix=PARTITION_PREFIX)
+        elb = ElasticBlastAzure(cfg)
+        elb.cloud_job_submission = False
+        elb.auto_shutdown = False
+        elb.cluster_initialized = True
+
+        with patch.object(elb, '_generate_partitioned_jobs') as mock_generate, \
+             patch('elastic_blast.kubernetes.enable_service_account') as mock_sa, \
+             patch.object(elb, '_submit_finalizer_job') as mock_finalizer:
+            elb._submit_partitioned(['batch_000.fa'], 1000)
+
+        mock_generate.assert_called_once_with(['batch_000.fa'])
+        mock_sa.assert_called_once_with(cfg)
+        mock_finalizer.assert_called_once_with()
 
 
 class TestJobSubstitutionsPartition:
@@ -253,6 +316,7 @@ class TestInitializeClusterPartitioned:
             elb._initialize_cluster_partitioned(['batch_000.fa'])
 
         mock_start.assert_called_once()
+        mock_sa.assert_called_once()
         mock_configmap.assert_called_once()
         mock_init_part.assert_called_once()
 
@@ -277,8 +341,270 @@ class TestInitializeClusterPartitioned:
             elb._initialize_cluster_partitioned(['batch_000.fa'])
 
         mock_start.assert_not_called()
+        mock_sa.assert_called_once()
         mock_configmap.assert_called_once()
         mock_init_part.assert_called_once()
+
+
+class TestFinalizerPartitionedResults:
+    """Tests for partitioned result finalizer wiring and merge helper."""
+
+    @staticmethod
+    def _xml_result(query_id, hits):
+        hit_xml = []
+        for idx, (subject, evalue, bitscore) in enumerate(hits, start=1):
+            hit_xml.append(f"""
+                    <Hit>
+                        <Hit_num>{idx}</Hit_num>
+                        <Hit_id>{subject}</Hit_id>
+                        <Hit_def>{subject}</Hit_def>
+                        <Hit_accession>{subject}</Hit_accession>
+                        <Hit_len>100</Hit_len>
+                        <Hit_hsps>
+                            <Hsp>
+                                <Hsp_num>1</Hsp_num>
+                                <Hsp_bit-score>{bitscore}</Hsp_bit-score>
+                                <Hsp_score>{int(bitscore)}</Hsp_score>
+                                <Hsp_evalue>{evalue}</Hsp_evalue>
+                                <Hsp_query-from>1</Hsp_query-from>
+                                <Hsp_query-to>10</Hsp_query-to>
+                                <Hsp_hit-from>1</Hsp_hit-from>
+                                <Hsp_hit-to>10</Hsp_hit-to>
+                                <Hsp_identity>10</Hsp_identity>
+                                <Hsp_align-len>10</Hsp_align-len>
+                                <Hsp_qseq>AAAAAAAAAA</Hsp_qseq>
+                                <Hsp_hseq>AAAAAAAAAA</Hsp_hseq>
+                                <Hsp_midline>||||||||||</Hsp_midline>
+                            </Hsp>
+                        </Hit_hsps>
+                    </Hit>""")
+        return f"""<?xml version=\"1.0\"?>
+<BlastOutput>
+    <BlastOutput_program>blastn</BlastOutput_program>
+    <BlastOutput_version>BLASTN 2.17.0+</BlastOutput_version>
+    <BlastOutput_reference>reference</BlastOutput_reference>
+    <BlastOutput_db>shard-db</BlastOutput_db>
+    <BlastOutput_query-ID>{query_id}</BlastOutput_query-ID>
+    <BlastOutput_query-def>{query_id}</BlastOutput_query-def>
+    <BlastOutput_query-len>10</BlastOutput_query-len>
+    <BlastOutput_param><Parameters /></BlastOutput_param>
+    <BlastOutput_iterations>
+        <Iteration>
+            <Iteration_iter-num>1</Iteration_iter-num>
+            <Iteration_query-ID>{query_id}</Iteration_query-ID>
+            <Iteration_query-def>{query_id}</Iteration_query-def>
+            <Iteration_query-len>10</Iteration_query-len>
+            <Iteration_hits>{''.join(hit_xml)}
+            </Iteration_hits>
+            <Iteration_stat><Statistics /></Iteration_stat>
+        </Iteration>
+    </BlastOutput_iterations>
+</BlastOutput>
+"""
+
+    @patch('elastic_blast.azure.get_usage_reporting', return_value=False)
+    def test_finalizer_template_includes_blast_options(self, mock_usage):
+        """Finalizer receives original BLAST options for max_target_seqs parsing."""
+        cfg = _make_cfg(db_partitions=3, db_partition_prefix=PARTITION_PREFIX,
+                        dry_run=False)
+        cfg.blast.options = '-outfmt 6 -max_target_seqs 25'
+        cfg.appstate.k8s_ctx = 'test-ctx'
+        elb = ElasticBlastAzure(cfg)
+        created_files = []
+
+        def capture_safe_exec(cmd, **kwargs):
+            cmd_str = ' '.join(cmd) if isinstance(cmd, list) else cmd
+            yaml_path = cmd_str.split('-f ')[-1].strip()
+            if os.path.exists(yaml_path):
+                with open(yaml_path) as handle:
+                    created_files.append(handle.read())
+            result = MagicMock()
+            result.stdout = b''
+            return result
+
+        with patch('elastic_blast.azure.safe_exec', side_effect=capture_safe_exec):
+            elb._submit_finalizer_job()
+
+        assert len(created_files) == 1
+        yaml_content = created_files[0]
+        assert 'name: ELB_BLAST_OPTIONS' in yaml_content
+        assert '-outfmt 6 -max_target_seqs 25' in yaml_content
+        assert 'name: ELB_DB_PARTITIONS' in yaml_content
+        assert '"3"' in yaml_content
+
+    def test_merge_script_respects_max_target_seqs_and_writes_report(self):
+        """Merge helper keeps the best N tabular hits per query and reports stats."""
+        script = Path(__file__).parents[2] / 'src/elastic_blast/templates/scripts/merge-sharded-results.sh'
+        rows = [
+            'q1\tsubject_c\t99\t10\t0\t0\t1\t10\t1\t10\t1e-20\t90\t44',
+            'q1\tsubject_a\t99\t10\t0\t0\t1\t10\t1\t10\t1e-30\t70\t55',
+            'q1\tsubject_b\t99\t10\t0\t0\t1\t10\t1\t10\t1e-20\t100\t66',
+            'q2\tsubject_d\t99\t10\t0\t0\t1\t10\t1\t10\t1e-10\t80',
+            'not\tenough\tcolumns',
+        ]
+        with TemporaryDirectory() as tmpdir:
+            input_tsv = Path(tmpdir) / 'all_hits.tsv'
+            output_gz = Path(tmpdir) / 'merged.out.gz'
+            report_json = Path(tmpdir) / 'merge-report.json'
+            input_tsv.write_text('\n'.join(rows) + '\n')
+
+            subprocess.run([
+                'bash', str(script), str(input_tsv), str(output_gz),
+                str(report_json), '2', 'blastp', '-outfmt 6 -max_target_seqs 2',
+            ], check=True)
+
+            with gzip.open(output_gz, 'rt') as handle:
+                merged = handle.read()
+            report = json.loads(report_json.read_text())
+
+        assert '# BLASTP' in merged
+        assert 'subject_a' in merged
+        assert 'subject_b' in merged
+        assert '55' in merged
+        assert '66' in merged
+        assert 'subject_c' not in merged
+        assert report['max_target_seqs'] == 2
+        assert report['queries'] == 2
+        assert report['total_input_hits'] == 5
+        assert report['total_output_hits'] == 3
+        assert report['unsupported_rows'] == 1
+
+    def test_merge_script_writes_valid_xml_for_outfmt_5(self):
+        """Merge helper keeps XML valid and applies max_target_seqs per query."""
+        script = Path(__file__).parents[2] / 'src/elastic_blast/templates/scripts/merge-sharded-results.sh'
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for shard, hits in {
+                'shard_00': [('subject_slow', '1e-10', 80.0), ('subject_best', '1e-30', 70.0)],
+                'shard_01': [('subject_bit', '1e-20', 100.0)],
+            }.items():
+                shard_dir = root / shard
+                shard_dir.mkdir()
+                with gzip.open(shard_dir / 'batch.out.gz', 'wt') as handle:
+                    handle.write(self._xml_result('Query_1', hits))
+            input_tsv = root / 'all_hits.tsv'
+            input_tsv.write_text('')
+            output_gz = root / 'merged.out.gz'
+            report_json = root / 'merge-report.json'
+
+            subprocess.run([
+                'bash', str(script), str(input_tsv), str(output_gz),
+                str(report_json), '2', 'blastn', '-outfmt 5 -max_target_seqs 2',
+            ], check=True)
+
+            with gzip.open(output_gz, 'rt') as handle:
+                tree = ET.parse(handle)
+            subjects = [node.text for node in tree.findall('.//Hit_id')]
+            report = json.loads(report_json.read_text())
+
+        assert subjects == ['subject_best', 'subject_bit']
+        assert report['outfmt'] == 5
+        assert report['format'] == 'blast_xml'
+        assert report['max_target_seqs'] == 2
+        assert report['queries'] == 1
+        assert report['total_input_hits'] == 3
+        assert report['total_output_hits'] == 2
+        assert report['ranking_basis'] == 'best_hsp_evalue_bitscore_ordinal'
+
+    def test_merge_script_rejects_malformed_xml_shard(self):
+        """Malformed XML shard output is fatal to avoid partial success markers."""
+        script = Path(__file__).parents[2] / 'src/elastic_blast/templates/scripts/merge-sharded-results.sh'
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shard_dir = root / 'shard_00'
+            shard_dir.mkdir()
+            with gzip.open(shard_dir / 'batch.out.gz', 'wt') as handle:
+                handle.write('<BlastOutput><BlastOutput_iterations>')
+            input_tsv = root / 'all_hits.tsv'
+            input_tsv.write_text('')
+            output_gz = root / 'merged.out.gz'
+            report_json = root / 'merge-report.json'
+
+            result = subprocess.run([
+                'bash', str(script), str(input_tsv), str(output_gz),
+                str(report_json), '1', 'blastn', '-outfmt 5 -max_target_seqs 2',
+            ], check=False, capture_output=True, text=True)
+            output_exists = output_gz.exists()
+
+        assert result.returncode != 0
+        assert 'Malformed XML result' in result.stderr
+        assert not output_exists
+
+    def test_merge_script_rejects_empty_xml_query_id(self):
+        """XML records without query identity are audited and skipped."""
+        script = Path(__file__).parents[2] / 'src/elastic_blast/templates/scripts/merge-sharded-results.sh'
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shard_dir = root / 'shard_00'
+            shard_dir.mkdir()
+            with gzip.open(shard_dir / 'batch.out.gz', 'wt') as handle:
+                handle.write(self._xml_result('', [('subject_a', '1e-30', 70.0)]))
+            input_tsv = root / 'all_hits.tsv'
+            input_tsv.write_text('')
+            output_gz = root / 'merged.out.gz'
+            report_json = root / 'merge-report.json'
+
+            subprocess.run([
+                'bash', str(script), str(input_tsv), str(output_gz),
+                str(report_json), '1', 'blastn', '-outfmt 5 -max_target_seqs 2',
+            ], check=True)
+            report = json.loads(report_json.read_text())
+
+        assert report['queries'] == 0
+        assert report['unsupported_records'] == 1
+        assert report['total_output_hits'] == 0
+
+    def test_merge_script_xml_tie_prefers_more_hsps(self):
+        """XML tie handling prefers richer hits before falling back to ordinal."""
+        script = Path(__file__).parents[2] / 'src/elastic_blast/templates/scripts/merge-sharded-results.sh'
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shard_dir = root / 'shard_00'
+            shard_dir.mkdir()
+            one_hsp = self._xml_result('Query_1', [('subject_one_hsp', '1e-20', 80.0)])
+            two_hsp = self._xml_result('Query_1', [('subject_two_hsp', '1e-20', 80.0)]).replace(
+                '</Hit_hsps>',
+                '''<Hsp>
+                <Hsp_num>2</Hsp_num>
+                <Hsp_bit-score>75.0</Hsp_bit-score>
+                <Hsp_score>75</Hsp_score>
+                <Hsp_evalue>1e-19</Hsp_evalue>
+                <Hsp_query-from>1</Hsp_query-from>
+                <Hsp_query-to>10</Hsp_query-to>
+                <Hsp_hit-from>1</Hsp_hit-from>
+                <Hsp_hit-to>10</Hsp_hit-to>
+                <Hsp_identity>10</Hsp_identity>
+                <Hsp_align-len>10</Hsp_align-len>
+                <Hsp_qseq>AAAAAAAAAA</Hsp_qseq>
+                <Hsp_hseq>AAAAAAAAAA</Hsp_hseq>
+                <Hsp_midline>||||||||||</Hsp_midline>
+              </Hsp></Hit_hsps>''',
+            )
+            with gzip.open(shard_dir / 'a.out.gz', 'wt') as handle:
+                handle.write(one_hsp)
+            with gzip.open(shard_dir / 'b.out.gz', 'wt') as handle:
+                handle.write(two_hsp)
+            input_tsv = root / 'all_hits.tsv'
+            input_tsv.write_text('')
+            output_gz = root / 'merged.out.gz'
+            report_json = root / 'merge-report.json'
+
+            subprocess.run([
+                'bash', str(script), str(input_tsv), str(output_gz),
+                str(report_json), '1', 'blastn', '-outfmt 5 -max_target_seqs 1',
+            ], check=True)
+            with gzip.open(output_gz, 'rt') as handle:
+                tree = ET.parse(handle)
+
+        assert [node.text for node in tree.findall('.//Hit_id')] == ['subject_two_hsp']
+
+    def test_finalizer_fails_incomplete_shard_downloads(self):
+        """Finalizer script must not publish success when any shard output is missing."""
+        script = Path(__file__).parents[2] / 'src/elastic_blast/templates/scripts/elb-finalizer-aks.sh'
+        content = script.read_text()
+        assert 'MISSING_SHARD_COUNT' in content
+        assert 'READ_FAILURE_COUNT' in content
+        assert 'incomplete shard results' in content
 
 
 class TestInitializeStoragePartitioned:
@@ -404,7 +730,7 @@ class TestCreateScriptsConfigMap:
         cm_yaml = created_files[0]
         assert 'kind: ConfigMap' in cm_yaml
         assert 'name: elb-scripts' in cm_yaml
-        # Check that all 6 script files are included
+        # Check that the partitioning scripts are included.
         expected_scripts = [
             'init-db-download-aks.sh',
             'blast-vmtouch-aks.sh',
@@ -412,6 +738,7 @@ class TestCreateScriptsConfigMap:
             'results-export-aks.sh',
             'query-download-ssd-aks.sh',
             'init-db-partitioned-aks.sh',
+            'merge-sharded-results.sh',
         ]
         for script in expected_scripts:
             assert script in cm_yaml, f'Expected {script} in ConfigMap'

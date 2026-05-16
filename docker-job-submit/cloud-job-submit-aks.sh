@@ -36,21 +36,69 @@ K8S_JOB_SUBMIT_JOBS=submit-jobs
 ELB_PAUSE_AFTER_INIT_PV=150
 ELB_DISK_ID_FILE=disk-id.txt
 
-GSUTIL_COPY='gsutil -q cp'
 GCLOUD=gcloud
 KUBECTL=kubectl
+AZCOPY=azcopy
+AZCOPY_LOGIN_DONE=0
 
 log() { ts=`date +'%F %T'`; printf '%s RUNTIME %s %f seconds\n' "$ts" "$1" "$2"; };
+
+azcopy_login_once() {
+    if [ "$AZCOPY_LOGIN_DONE" -eq 0 ]; then
+        ${AZCOPY} login --identity >/dev/null 2>&1 || true
+        AZCOPY_LOGIN_DONE=1
+    fi
+}
+
+copy_from_url() {
+    src="$1"
+    dest="$2"
+    if [[ "$src" =~ ^https:// ]]; then
+        azcopy_login_once
+        ${AZCOPY} cp "$src" "$dest"
+    else
+        cp "$src" "$dest"
+    fi
+}
+
+list_batch_files() {
+    src="$1"
+    if [[ "$src" =~ ^https:// ]]; then
+        azcopy_login_once
+        ${AZCOPY} list "$src" | awk -F';' '/batch_[0-9]+\.fa/ {name=$1; sub(/^.*\//, "", name); print name}'
+    else
+        find "$src" -maxdepth 1 -type f -name 'batch_*.fa' -exec basename {} \;
+    fi
+}
+
+copy_to_url() {
+    src="$1"
+    dest="$2"
+    if [[ "$dest" =~ ^https:// ]]; then
+        azcopy_login_once
+        ${AZCOPY} cp "$src" "$dest"
+    else
+        cp "$src" "$dest"
+    fi
+}
+
+copy_stdin_to_url() {
+    dest="$1"
+    tmp=$(mktemp)
+    cat > "$tmp"
+    copy_to_url "$tmp" "$dest" || true
+    rm -f "$tmp"
+}
+
 copy_job_logs_to_results_bucket() {
-    ${KUBECTL} logs -l "app=$1" -c "$2" --timestamps --since=24h --tail=-1 | ${GSUTIL_COPY} /dev/stdin "${ELB_RESULTS}/logs/k8s-$1-$2.log" || true
+    ${KUBECTL} logs -l "app=$1" -c "$2" --timestamps --since=24h --tail=-1 | copy_stdin_to_url "${ELB_RESULTS}/logs/k8s-$1-$2.log" || true
 }
 
 TEST=${ELB_LOCAL_TEST:-}
 if [ "x$TEST" == "x1" ]; then
-GSUTIL_COPY='cp'
 GCLOUD='echo gcloud'
 KUBECTL='echo kubectl'
-ELB_RESULTS=test
+ELB_RESULTS="test"
 ELB_CLUSTER_NAME=test-cluster
 ELB_GCP_PROJECT=test-project
 ELB_GCP_ZONE=test-zone
@@ -73,12 +121,17 @@ while true; do
     sleep 30
 done
 
-s=`${KUBECTL} get jobs -l app=setup -o jsonpath="{.items[*].status.conditions[?(@.type=='Complete')].type}"`
-if [[ "$s" != Complete*( Complete) ]]; then
-    echo "Setup job(s) failed:" `${KUBECTL} get jobs -l app=setup -o json`
-    copy_job_logs_to_results_bucket setup "${K8S_JOB_GET_BLASTDB}"
-    copy_job_logs_to_results_bucket setup "${K8S_JOB_IMPORT_QUERY_BATCHES}"
-    exit 1
+setup_jobs=`${KUBECTL} get jobs -l app=setup -o jsonpath='{.items[*].metadata.name}'`
+if [ -n "$setup_jobs" ]; then
+    s=`${KUBECTL} get jobs -l app=setup -o jsonpath="{.items[*].status.conditions[?(@.type=='Complete')].type}"`
+    if [[ "$s" != Complete*( Complete) ]]; then
+        echo "Setup job(s) failed: $(${KUBECTL} get jobs -l app=setup -o json)"
+        copy_job_logs_to_results_bucket setup "${K8S_JOB_GET_BLASTDB}"
+        copy_job_logs_to_results_bucket setup "${K8S_JOB_IMPORT_QUERY_BATCHES}"
+        exit 1
+    fi
+else
+    echo "No setup jobs found; proceeding to submit BLAST jobs"
 fi
 
 
@@ -86,7 +139,7 @@ fi
 pods=`kubectl get pods -l job-name=init-pv -o jsonpath='{.items[*].metadata.name}'`
 for pod in $pods; do
     for c in ${K8S_JOB_GET_BLASTDB} ${K8S_JOB_IMPORT_QUERY_BATCHES}; do
-        ${KUBECTL} logs $pod -c $c --timestamps --since=24h --tail=-1 | ${GSUTIL_COPY} /dev/stdin ${ELB_RESULTS}/logs/k8s-$pod-$c.log
+        ${KUBECTL} logs $pod -c $c --timestamps --since=24h --tail=-1 | copy_stdin_to_url ${ELB_RESULTS}/logs/k8s-$pod-$c.log
     done
 done
 
@@ -109,7 +162,8 @@ if ! $ELB_USE_LOCAL_SSD ; then
     done
 
     # save writable disk id
-    export pv_rwo=$(${KUBECTL} get pvc blast-dbs-pvc-rwo -o jsonpath='{.spec.volumeName}')
+    pv_rwo=$(${KUBECTL} get pvc blast-dbs-pvc-rwo -o jsonpath='{.spec.volumeName}')
+    export pv_rwo
 
     # Delete the job to unmount ReadWrite blastdb volume
     ${KUBECTL} delete job init-pv
@@ -130,8 +184,15 @@ fi
 [ -n "${ELB_DEBUG_SUBMIT_JOB_FAIL:-}" ] && echo Job submit job failed for debug && exit 1
 
 # Get template, batch list, and submit BLAST jobs
-if ${GSUTIL_COPY} ${ELB_RESULTS}/${ELB_METADATA_DIR}/job.yaml.template . && 
-   ${GSUTIL_COPY} ${ELB_RESULTS}/${ELB_METADATA_DIR}/batch_list.txt . ; then
+if copy_from_url ${ELB_RESULTS}/${ELB_METADATA_DIR}/job.yaml.template . ; then
+    if ! copy_from_url ${ELB_RESULTS}/${ELB_METADATA_DIR}/batch_list.txt . ; then
+        echo "batch_list.txt not found; deriving it from query_batches"
+        list_batch_files ${ELB_RESULTS}/query_batches/ > batch_list.txt
+    fi
+    if [ ! -s batch_list.txt ]; then
+        echo "No query batches found"
+        exit 1
+    fi
     echo Submitting jobs
     i=0; j=0; job_dir_num=0; job_dir="jobs/$job_dir_num"
     start=`date +%s`
@@ -159,11 +220,12 @@ if ${GSUTIL_COPY} ${ELB_RESULTS}/${ELB_METADATA_DIR}/job.yaml.template . &&
         echo "jobs/$i/"
         ls "jobs/$i/"
         attempts=6
-        while ! jobs=`${KUBECTL} apply -f "jobs/$i/"`; do
+        while ! jobs="$(${KUBECTL} apply -f "jobs/$i/")"; do
             attempts=$[attempts - 1]
             if [ $attempts -le 0 ]; then break; fi
             sleep 5
         done
+        echo "$jobs"
     done
     end=`date +%s`
     log "submit-jobs" $(($end-$start))
@@ -171,8 +233,8 @@ if ${GSUTIL_COPY} ${ELB_RESULTS}/${ELB_METADATA_DIR}/job.yaml.template . &&
         printf "SPEED to submit-jobs %f jobs/second\n" $(( $num_jobs/($end-$start) ))
     fi
     echo Submitted $num_jobs jobs
-    echo $num_jobs | ${GSUTIL_COPY} /dev/stdin ${ELB_RESULTS}/${ELB_METADATA_DIR}/${ELB_NUM_JOBS_SUBMITTED}
-    if [ ${ELB_NUM_NODES} -ne 1 ] ; then
+    echo $num_jobs | copy_stdin_to_url ${ELB_RESULTS}/${ELB_METADATA_DIR}/${ELB_NUM_JOBS_SUBMITTED}
+    if [ "${ELB_CLOUD_PROVIDER:-}" = "gcp" ] && [ ${ELB_NUM_NODES} -ne 1 ] ; then
         echo Reconfiguring cluster to auto-scale to ${ELB_NUM_NODES} nodes
         ${GCLOUD} container clusters update ${ELB_CLUSTER_NAME} --enable-autoscaling --node-pool default-pool --min-nodes 0 --max-nodes ${ELB_NUM_NODES} --project ${ELB_GCP_PROJECT} --zone ${ELB_GCP_ZONE}
     fi
@@ -200,8 +262,10 @@ while true; do
 done
 
 # label the new persistent disk
-export pv=$(${KUBECTL} get -f pvc-rom.yaml -o jsonpath='{.spec.volumeName}')
-export vs=snapshot-$(${KUBECTL} get -f /templates/volume-snapshot.yaml -o jsonpath='{.metadata.uid}')
+pv=$(${KUBECTL} get -f pvc-rom.yaml -o jsonpath='{.spec.volumeName}')
+export pv
+vs=snapshot-$(${KUBECTL} get -f /templates/volume-snapshot.yaml -o jsonpath='{.metadata.uid}')
+export vs
 echo "PV: $pv"
 echo "Volume snapshot: $vs"
 jq -n --arg dd $pv --arg ss $vs '{"disks": [$dd], "snapshots": [$ss]}' | gsutil -qm cp - ${ELB_RESULTS}/${ELB_METADATA_DIR}/$ELB_DISK_ID_FILE

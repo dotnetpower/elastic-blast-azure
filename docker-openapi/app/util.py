@@ -1,7 +1,11 @@
-import os
 import logging
+import os
+import signal
 import subprocess
-from typing import List, Union, Callable, Optional, Dict
+import tempfile
+import time
+from threading import Event
+from typing import Dict, List, Optional, Union
 
 
 def safe_exec(cmd: Union[List[str], str], env: Optional[Dict[str, str]] = None, timeout: Optional[float] = 600) -> subprocess.CompletedProcess:
@@ -39,6 +43,80 @@ def safe_exec(cmd: Union[List[str], str], env: Optional[Dict[str, str]] = None, 
         raise Exception(f'Command timed out after {e.timeout}s: {cmd_str}')
    
     return p
+
+
+def run_cancellable(
+    cmd: Union[List[str], str],
+    env: Optional[Dict[str, str]] = None,
+    timeout: Optional[float] = None,
+    stop_event: Optional[Event] = None,
+    poll_interval: float = 1.0,
+) -> subprocess.CompletedProcess:
+    """Run a long command that can be cancelled by another thread.
+
+    Unlike ``safe_exec``, this helper is intended for ElasticBLAST submissions
+    that may legitimately run for many hours. It has no default wall-clock
+    timeout, writes stdout/stderr to temporary files to avoid pipe deadlocks,
+    and kills the whole process group when ``stop_event`` is set.
+    """
+
+    if isinstance(cmd, str):
+        cmd = cmd.split()
+    if not isinstance(cmd, list):
+        raise ValueError('run_cancellable "cmd" argument must be a list or string')
+
+    run_env = os.environ | env if env else None
+    deadline = time.monotonic() + timeout if timeout is not None else None
+
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout_file, \
+            tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr_file:
+        logging.debug(' '.join(cmd))
+        proc = subprocess.Popen(
+            cmd,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            env=run_env,
+            universal_newlines=True,
+            start_new_session=True,
+        )
+
+        def _read_outputs() -> tuple[str, str]:
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            return stdout_file.read(), stderr_file.read()
+
+        def _terminate(reason: str) -> None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=10)
+            except Exception:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except Exception:
+                    pass
+                proc.wait(timeout=10)
+            stdout, stderr = _read_outputs()
+            raise Exception(f'{reason}: {" ".join(cmd)}\n{handle_error(stderr)}\n{handle_error(stdout)}')
+
+        while True:
+            rc = proc.poll()
+            if rc is not None:
+                stdout, stderr = _read_outputs()
+                if rc != 0:
+                    msg = (
+                        f'The command "{" ".join(cmd)}" returned with exit code {rc}\n'
+                        f'{handle_error(stderr)}\n{handle_error(stdout)}'
+                    )
+                    raise Exception(msg)
+                return subprocess.CompletedProcess(cmd, rc, stdout, stderr)
+
+            if stop_event is not None and stop_event.is_set():
+                _terminate('Command cancelled')
+
+            if deadline is not None and time.monotonic() >= deadline:
+                _terminate(f'Command timed out after {timeout}s')
+
+            time.sleep(poll_interval)
 
 def handle_error(exp_obj):
     """Handle error and decode stderr if necessary."""

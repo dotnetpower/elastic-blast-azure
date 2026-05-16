@@ -11,3 +11,7 @@ dataclasses-json==0.6.7
 azure-core==1.32.0
 azure-identity==1.19.0
 azure-storage-blob==12.24.0
+azure-mgmt-authorization==4.0.0
+azure-mgmt-compute==33.0.0
+azure-mgmt-containerservice==34.0.0
+azure-mgmt-storage==21.2.1

@@ -39,6 +39,9 @@ spec:
           value: "${ELB_DB_PARTITIONS}"
         - name: ELB_BLAST_PROGRAM
           value: "${ELB_BLAST_PROGRAM}"
+        - name: ELB_BLAST_OPTIONS
+          value: >-
+            ${ELB_BLAST_OPTIONS}
         - name: BLAST_ELB_JOB_ID
           value: "${BLAST_ELB_JOB_ID}"
         volumeMounts:

@@ -31,8 +31,17 @@ echo "Submit selector: ${SUBMIT_SELECTOR}"
 MARKER_DIR="${ELB_RESULTS}/${ELB_METADATA_DIR}"
 if azcopy login --identity >/dev/null 2>&1; then
     if azcopy list "${MARKER_DIR}/SUCCESS.txt" >/dev/null 2>&1; then
-        echo "SUCCESS.txt already present at ${MARKER_DIR}; skipping finalizer"
-        exit 0
+        if [ "${ELB_DB_PARTITIONS:-0}" -gt 0 ]; then
+            if azcopy list "${ELB_RESULTS}/merged_results.out.gz" >/dev/null 2>&1 && \
+               azcopy list "${ELB_RESULTS}/merge-report.json" >/dev/null 2>&1; then
+                echo "SUCCESS.txt and merge artifacts already present; skipping finalizer"
+                exit 0
+            fi
+            echo "SUCCESS.txt already present but merge artifacts are missing; continuing merge"
+        else
+            echo "SUCCESS.txt already present at ${MARKER_DIR}; skipping finalizer"
+            exit 0
+        fi
     fi
     if azcopy list "${MARKER_DIR}/FAILURE.txt" >/dev/null 2>&1; then
         echo "FAILURE.txt already present at ${MARKER_DIR}; skipping finalizer"
@@ -107,10 +116,28 @@ else
         MERGE_DIR=$(mktemp -d)
         MERGE_INPUT="$MERGE_DIR/all_hits.tsv"
         MERGE_OUTPUT="$MERGE_DIR/merged.out.gz"
-        MAX_HITS=500
+        MERGE_REPORT="$MERGE_DIR/merge-report.json"
+        MERGE_OUTFMT=$(python3 - "${ELB_BLAST_OPTIONS:-}" <<'PY' 2>/dev/null || echo 6
+import shlex
+import sys
+
+tokens = shlex.split(sys.argv[1] if len(sys.argv) > 1 else "")
+outfmt = "6"
+for idx, token in enumerate(tokens):
+    if token == "-outfmt" and idx + 1 < len(tokens):
+        outfmt = tokens[idx + 1]
+    elif token.startswith("-outfmt="):
+        outfmt = token.split("=", 1)[1]
+print((outfmt.strip().split(maxsplit=1) or ["6"])[0])
+PY
+        )
+        : > "$MERGE_INPUT"
         
         # Download all shard result files
         SHARD_COUNT=0
+        DOWNLOAD_SUCCESS_COUNT=0
+        MISSING_SHARD_COUNT=0
+        READ_FAILURE_COUNT=0
         for i in $(seq 0 $((ELB_DB_PARTITIONS - 1))); do
             SHARD=$(printf '%02d' "$i")
             SHARD_DIR="${ELB_RESULTS}/shard_${SHARD}"
@@ -118,70 +145,104 @@ else
             mkdir -p "$LOCAL_DIR"
             
             # Download .out.gz files from this shard
-            azcopy cp "${SHARD_DIR}/*.out.gz" "$LOCAL_DIR/" --log-level=ERROR 2>/dev/null || true
+            if ! azcopy cp "${SHARD_DIR}/*.out.gz" "$LOCAL_DIR/" --log-level=ERROR 2>/dev/null; then
+                echo "WARNING: no .out.gz files downloaded from shard_${SHARD}"
+            fi
+            found_files=0
             
-            # Extract and append data rows (skip comment lines)
+            # Extract and append data rows for tabular output. XML output is
+            # merged from the downloaded gzip files by merge-sharded-results.sh.
             for f in "$LOCAL_DIR"/*.out.gz; do
                 [ -f "$f" ] || continue
-                zcat "$f" | grep -v '^#' >> "$MERGE_INPUT" 2>/dev/null || true
+                found_files=$((found_files + 1))
+                if [ "$MERGE_OUTFMT" != "5" ]; then
+                    if ! zcat "$f" | awk '!/^#/' >> "$MERGE_INPUT"; then
+                        echo "ERROR: failed to read shard result $f"
+                        READ_FAILURE_COUNT=$((READ_FAILURE_COUNT + 1))
+                    fi
+                fi
                 SHARD_COUNT=$((SHARD_COUNT + 1))
             done
+            if [ "$found_files" -eq 0 ]; then
+                echo "WARNING: shard_${SHARD} has no local .out.gz files"
+                MISSING_SHARD_COUNT=$((MISSING_SHARD_COUNT + 1))
+            else
+                DOWNLOAD_SUCCESS_COUNT=$((DOWNLOAD_SUCCESS_COUNT + 1))
+            fi
         done
-        
-        TOTAL_HITS=$(wc -l < "$MERGE_INPUT" 2>/dev/null || echo 0)
-        echo "Downloaded $SHARD_COUNT shard files, $TOTAL_HITS total hits"
-        
-        if [ "$TOTAL_HITS" -gt 0 ]; then
-            # Merge: sort by E-value (col 11) ascending, bitscore (col 12) descending
-            # Then keep top-N per query (col 1)
-            python3 -c "
-import sys, gzip
-from collections import defaultdict
-
-max_hits = int(sys.argv[1])
-query_hits = defaultdict(list)
-
-with open(sys.argv[2]) as f:
-    for line in f:
-        line = line.rstrip('\n')
-        if not line or line.startswith('#'):
-            continue
-        cols = line.split('\t')
-        if len(cols) < 12:
-            continue
-        try:
-            ev = float(cols[10])
-        except ValueError:
-            ev = float('inf')
-        bs = float(cols[11])
-        query_hits[cols[0]].append((ev, -bs, line))
-
-fields = ('query acc.ver, subject acc.ver, % identity, alignment length, '
-          'mismatches, gap opens, q. start, q. end, s. start, s. end, '
-          'evalue, bit score')
-total = 0
-with gzip.open(sys.argv[3], 'wt') as out:
-    for qid in sorted(query_hits):
-        hits = sorted(query_hits[qid], key=lambda x: (x[0], x[1]))[:max_hits]
-        out.write(f'# BLASTN 2.17.0+\n')
-        out.write(f'# Query: {qid}\n')
-        out.write(f'# Database: merged from {sys.argv[4]} shards\n')
-        out.write(f'# Fields: {fields}\n')
-        out.write(f'# {len(hits)} hits found\n')
-        for h in hits:
-            out.write(h[2] + '\n')
-        total += len(hits)
-print(f'Merged: {total} hits from {len(query_hits)} queries', file=sys.stderr)
-            " "$MAX_HITS" "$MERGE_INPUT" "$MERGE_OUTPUT" "$ELB_DB_PARTITIONS" 2>&1
-            
-            # Upload merged result to base results directory
-            azcopy cp "$MERGE_OUTPUT" "${ELB_RESULTS}/merged_results.out.gz" \
-            --log-level=WARNING 2>/dev/null || \
-            echo "WARNING: Failed to upload merged results"
-            echo "Merged results uploaded to ${ELB_RESULTS}/merged_results.out.gz"
-        else
-            echo "WARNING: No hits found across shards, skipping merge"
+        if [ "$DOWNLOAD_SUCCESS_COUNT" -eq 0 ]; then
+            echo "ERROR: failed to download any shard results"
+            echo "failed to download any shard results" > /tmp/failure.txt
+            azcopy cp /tmp/failure.txt "${MARKER_DIR}/FAILURE.txt" || true
+            rm -rf "$MERGE_DIR"
+            exit 1
         fi
+        if [ "$MISSING_SHARD_COUNT" -gt 0 ] || [ "$READ_FAILURE_COUNT" -gt 0 ]; then
+            echo "ERROR: incomplete shard results: missing_shards=${MISSING_SHARD_COUNT} read_failures=${READ_FAILURE_COUNT}"
+            echo "incomplete shard results" > /tmp/failure.txt
+            azcopy cp /tmp/failure.txt "${MARKER_DIR}/FAILURE.txt" || true
+            rm -rf "$MERGE_DIR"
+            exit 1
+        fi
+        
+        TOTAL_ROWS=$(wc -l < "$MERGE_INPUT" 2>/dev/null || echo 0)
+        echo "Downloaded $SHARD_COUNT shard files, $TOTAL_ROWS tabular rows"
+
+        if ! /scripts/merge-sharded-results.sh \
+            "$MERGE_INPUT" "$MERGE_OUTPUT" "$MERGE_REPORT" \
+            "$ELB_DB_PARTITIONS" "${ELB_BLAST_PROGRAM:-blast}" "${ELB_BLAST_OPTIONS:-}"; then
+            echo "ERROR: failed to merge partitioned results"
+            echo "failed to merge partitioned results" > /tmp/failure.txt
+            azcopy cp /tmp/failure.txt "${MARKER_DIR}/FAILURE.txt" || true
+            rm -rf "$MERGE_DIR"
+            exit 1
+        fi
+
+        if [ ! -s "$MERGE_REPORT" ] || ! gzip -t "$MERGE_OUTPUT"; then
+            echo "ERROR: merge output validation failed"
+            echo "merge output validation failed" > /tmp/failure.txt
+            azcopy cp /tmp/failure.txt "${MARKER_DIR}/FAILURE.txt" || true
+            rm -rf "$MERGE_DIR"
+            exit 1
+        fi
+        if [ "$MERGE_OUTFMT" = "5" ]; then
+            if ! python3 - "$MERGE_OUTPUT" <<'PY'
+import gzip
+import sys
+import xml.etree.ElementTree as ET
+
+with gzip.open(sys.argv[1], "rb") as handle:
+    root = ET.parse(handle).getroot()
+if root.tag != "BlastOutput":
+    raise SystemExit(f"unexpected XML root: {root.tag}")
+PY
+            then
+                echo "ERROR: merged XML validation failed"
+                echo "merged XML validation failed" > /tmp/failure.txt
+                azcopy cp /tmp/failure.txt "${MARKER_DIR}/FAILURE.txt" || true
+                rm -rf "$MERGE_DIR"
+                exit 1
+            fi
+        fi
+
+        azcopy cp "$MERGE_OUTPUT" "${ELB_RESULTS}/merged_results.out.gz" \
+        --log-level=WARNING 2>/dev/null || {
+            echo "ERROR: failed to upload merged results"
+            echo "failed to upload merged results" > /tmp/failure.txt
+            azcopy cp /tmp/failure.txt "${MARKER_DIR}/FAILURE.txt" || true
+            rm -rf "$MERGE_DIR"
+            exit 1
+        }
+        azcopy cp "$MERGE_REPORT" "${ELB_RESULTS}/merge-report.json" \
+        --log-level=WARNING 2>/dev/null || {
+            echo "ERROR: failed to upload merge report"
+            echo "failed to upload merge report" > /tmp/failure.txt
+            azcopy cp /tmp/failure.txt "${MARKER_DIR}/FAILURE.txt" || true
+            rm -rf "$MERGE_DIR"
+            exit 1
+        }
+        echo "Merged results uploaded to ${ELB_RESULTS}/merged_results.out.gz"
+        echo "Merge report uploaded to ${ELB_RESULTS}/merge-report.json"
         
         rm -rf "$MERGE_DIR"
     fi

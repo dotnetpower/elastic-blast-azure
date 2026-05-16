@@ -30,7 +30,13 @@ RUN apt-get -y -m update && \
     # so pip can resolve version conflicts in one pass.
     git clone --filter=blob:none --no-checkout https://github.com/dotnetpower/elastic-blast-azure.git /tmp/elb-src && \
     git -C /tmp/elb-src checkout ${ELB_REF} && \
+    python3 -c "exec('from pathlib import Path\nblock = \"      tolerations:\\\\n      - key: workload\\\\n        operator: Equal\\\\n        value: blast\\\\n        effect: NoSchedule\\\\n\"\nd = Path(\"/tmp/elb-src/src/elastic_blast/templates\")\nfor p in d.glob(\"*-aks.yaml.template\"):\n    t = p.read_text()\n    if \"key: workload\" in t:\n        continue\n    t = t.replace(\"      restartPolicy:\", block + \"      restartPolicy:\")\n    t = t.replace(\"      nodeSelector:\\\\n        kubernetes.io/os: linux\", block + \"      nodeSelector:\\\\n        kubernetes.io/os: linux\")\n    p.write_text(t)')" && \
     pip3 install --no-cache-dir -r /tmp/elb-src/requirements/base.txt && \
+        pip3 install --no-cache-dir \
+            azure-mgmt-authorization==4.0.0 \
+            azure-mgmt-compute==33.0.0 \
+            azure-mgmt-containerservice==34.0.0 \
+            azure-mgmt-storage==21.2.1 && \
     pip3 install --no-cache-dir --no-build-isolation /tmp/elb-src && \
     install -m 0755 /tmp/elb-src/bin/elastic-blast /usr/local/bin/elastic-blast && \
     sed -i '1c#!/usr/local/bin/python3' /usr/local/bin/elastic-blast && \

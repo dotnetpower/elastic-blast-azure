@@ -1003,6 +1003,7 @@ class ElasticBlastAzure(ElasticBlast):
             'ELB_SERVICE_ACCOUNT': 'default',
             'ELB_DB_PARTITIONS': str(cfg.blast.db_partitions) if cfg.blast.db_partitions > 0 else '0',
             'ELB_BLAST_PROGRAM': cfg.blast.program,
+            'ELB_BLAST_OPTIONS': cfg.blast.options,
             'BLAST_ELB_JOB_ID': cfg.azure.elb_job_id,
             'BLAST_ELB_JOB_ID_SHORT': cfg.azure.elb_job_id[-8:],
         }
@@ -1185,9 +1186,10 @@ class ElasticBlastAzure(ElasticBlast):
         else:
             self._generate_partitioned_jobs(query_batches)
 
-        # Deploy finalizer
-        if self.auto_shutdown:
-            self._submit_finalizer_job()
+        # Deploy finalizer for result merge and terminal markers.
+        if not (self.cloud_job_submission or self.auto_shutdown):
+            kubernetes.enable_service_account(cfg)
+        self._submit_finalizer_job()
 
         self.cleanup_stack.clear()
         self.cleanup_stack.append(lambda: self._safe_collect_logs())
