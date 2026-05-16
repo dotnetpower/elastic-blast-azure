@@ -8,7 +8,7 @@
 # thus cannot be copyrighted.  This software is freely available
 # to the public for use.  The National Library of Medicine and the U.S.
 # Government have not placed any restriction on its use or reproduction.
-#   
+#
 # Although all reasonable efforts have been taken to ensure the accuracy
 # and reliability of the software and data, the NLM and the U.S.
 # Government do not and cannot warrant the performance or results that
@@ -16,7 +16,7 @@
 # Government disclaim all warranties, express or implied, including
 # warranties of performance, merchantability or fitness for any particular
 # purpose.
-#   
+#
 # Please cite NCBI in any work or product based on this material.
 #
 # cloud-job-submit.sh: Script to submit BLAST jobs on the cloud
@@ -96,19 +96,19 @@ copy_job_logs_to_results_bucket() {
 
 TEST=${ELB_LOCAL_TEST:-}
 if [ "x$TEST" == "x1" ]; then
-GCLOUD='echo gcloud'
-KUBECTL='echo kubectl'
-ELB_RESULTS="test"
-ELB_CLUSTER_NAME=test-cluster
-ELB_GCP_PROJECT=test-project
-ELB_GCP_ZONE=test-zone
-ELB_USE_LOCAL_SSD=false
-export USE_GKE_GCLOUD_AUTH_PLUGIN=True
-mkdir -p test/metadata
-cp ../src/elastic_blast/templates/blast-batch-job.yaml.template test/metadata/job.yaml.template
-for ((i=0; i<1020; i++)) do printf 'batch_%03d.fa\n' "$i" >> test/metadata/batch_list.txt; done
-mkdir -p test/logs
-set -x
+    GCLOUD='echo gcloud'
+    KUBECTL='echo kubectl'
+    ELB_RESULTS="test"
+    ELB_CLUSTER_NAME=test-cluster
+    ELB_GCP_PROJECT=test-project
+    ELB_GCP_ZONE=test-zone
+    ELB_USE_LOCAL_SSD=false
+    export USE_GKE_GCLOUD_AUTH_PLUGIN=True
+    mkdir -p test/metadata
+    cp ../src/elastic_blast/templates/blast-batch-job.yaml.template test/metadata/job.yaml.template
+    for ((i=0; i<1020; i++)) do printf 'batch_%03d.fa\n' "$i" >> test/metadata/batch_list.txt; done
+    mkdir -p test/logs
+    set -x
 fi
 
 #${GCLOUD} container clusters get-credentials ${ELB_CLUSTER_NAME} --project ${ELB_GCP_PROJECT} --zone ${ELB_GCP_ZONE}
@@ -146,12 +146,12 @@ done
 
 # no need to deal with persistent disks and snapshots if a local SSD is used
 if ! $ELB_USE_LOCAL_SSD ; then
-
+    
     # Create a volume snapshot
     ${KUBECTL} apply -f /templates/volume-snapshot-class.yaml
     ${KUBECTL} apply -f /templates/volume-snapshot.yaml
     sleep 5
-
+    
     # Wait for the snapshot to be ready
     while true; do
         st=$(${KUBECTL} get volumesnapshot blast-dbs-snapshot -o jsonpath='{.status.readyToUse}')
@@ -160,20 +160,20 @@ if ! $ELB_USE_LOCAL_SSD ; then
         echo "Volume snapshot status: $st"
         sleep 30
     done
-
+    
     # save writable disk id
     pv_rwo=$(${KUBECTL} get pvc blast-dbs-pvc-rwo -o jsonpath='{.spec.volumeName}')
     export pv_rwo
-
+    
     # Delete the job to unmount ReadWrite blastdb volume
     ${KUBECTL} delete job init-pv
     # Wait for disk to be unmounted
     echo Waiting for $ELB_PAUSE_AFTER_INIT_PV sec to unmount PV disk
     sleep $ELB_PAUSE_AFTER_INIT_PV
-
+    
     # Delete ReadWriteOnce PVC
     ${KUBECTL} delete pvc blast-dbs-pvc-rwo
-
+    
     # Create ReadOnlyMany PVC
     envsubst '${ELB_PD_SIZE}' </templates/pvc-rom.yaml.template >pvc-rom.yaml
     ${KUBECTL} apply -f pvc-rom.yaml
@@ -213,7 +213,7 @@ if copy_from_url ${ELB_RESULTS}/${ELB_METADATA_DIR}/job.yaml.template . ; then
         fi
     done
     num_jobs=$i
-    if [ $j -eq 0 ]; then 
+    if [ $j -eq 0 ]; then
         job_dir_num=$[job_dir_num - 1]
     fi
     for ((i=0;i<=job_dir_num;i++)); do
@@ -251,6 +251,14 @@ if $ELB_USE_LOCAL_SSD ; then
     exit 0
 fi
 
+# Azure path stops here: PVC labelling and snapshot copying below use
+# gcloud / gsutil which are not installed in the Azure job-submit image.
+# AKS uses ANF / Azure Disk CSI which manage the persistent volume
+# lifecycle independently of ElasticBLAST.
+if [ "${ELB_CLOUD_PROVIDER:-azure}" != "gcp" ]; then
+    exit 0
+fi
+
 
 # wait for PVC to bind
 while true; do
@@ -279,7 +287,7 @@ ${KUBECTL} delete volumesnapshot --all
 if gcloud compute disks describe $pv_rwo --zone $ELB_GCP_ZONE ; then
     gcloud compute disks delete $pv_rwo --zone $ELB_GCP_ZONE
     sleep 10
-
+    
     if gcloud compute disks describe $pv_rwo --zone $ELB_GCP_ZONE ; then
         jq -n --arg d1 $pv_rwo --arg d2 $pv --arg ss $vs '{"disks": [$d1, $d2], "snapshots": [$ss]}' | gsutil -qm cp - ${ELB_RESULTS}/${ELB_METADATA_DIR}/$ELB_DISK_ID_FILE
     fi

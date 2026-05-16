@@ -13,23 +13,31 @@ Includes:
 Authors: Moon Hyuk Choi moonchoi@microsoft.com
 """
 
+import base64
+import fcntl
+import logging
+import math
 import os
 import re
 import shlex
-import time
-import logging
-import threading
-import math
-import uuid
+import shutil
+import subprocess
 import tempfile
-import base64
-from pathlib import Path
-from tempfile import TemporaryDirectory
-from timeit import default_timer as timer
-from typing import Any, DefaultDict, Dict, Optional, List, Tuple
+import threading
+import time
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
+from importlib.resources import files as pkg_files
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from timeit import default_timer as timer
+from types import MappingProxyType
+from typing import Any, DefaultDict, Dict, Iterable, List, Mapping, Optional, Tuple
+
+import requests
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from azure.identity import DefaultAzureCredential  # type: ignore
@@ -39,29 +47,30 @@ from azure.mgmt.storage import StorageManagementClient  # type: ignore
 from azure.mgmt.authorization import AuthorizationManagementClient  # type: ignore
 from azure.core.exceptions import ResourceNotFoundError, HttpResponseError  # type: ignore
 
-from .base import MemoryStr
-from .subst import substitute_params
-from .filehelper import open_for_write_immediate
-from .jobs import read_job_template, write_job_files
-from .util import (ElbSupportedPrograms, safe_exec, UserReportError, SafeExecError,
-                   get_blastdb_info, get_usage_reporting, handle_error)
-from . import kubernetes
-from .constants import (
-    CLUSTER_ERROR, DEPENDENCY_ERROR, INPUT_ERROR,
-    ELB_NUM_JOBS_SUBMITTED, ELB_METADATA_DIR, ELB_STATE_DISK_ID_FILE,
-    ELB_QUERY_BATCH_DIR, ELB_QUERY_LENGTH,
-    K8S_JOB_CLOUD_SPLIT_SSD, K8S_JOB_INIT_PV, K8S_JOB_BLAST,
-    K8S_JOB_GET_BLASTDB, K8S_JOB_IMPORT_QUERY_BATCHES,
-    K8S_JOB_LOAD_BLASTDB_INTO_RAM, K8S_JOB_RESULTS_EXPORT, K8S_JOB_SUBMIT_JOBS,
-    ELB_DFLT_BLAST_JOB_AKS_TEMPLATE, ELB_LOCAL_SSD_BLAST_JOB_AKS_TEMPLATE,
-    ElbExecutionMode, ElbStatus, AKS_PROVISIONING_STATE, STATUS_MESSAGE_ERROR,
-)
-from .elb_config import ElasticBlastConfig, ResourceIds
-from .elasticblast import ElasticBlast
-from . import VERSION
+from . import VERSION, kubernetes
 from .azure_traits import (
     AZURE_VM_HOURLY_PRICES, SPOT_DISCOUNT_FACTOR,
-    get_machine_properties, apply_auto_partition,
+    apply_auto_partition, get_machine_properties,
+)
+from .base import MemoryStr
+from .constants import (
+    AKS_PROVISIONING_STATE, CLUSTER_ERROR, DEPENDENCY_ERROR,
+    ELB_DFLT_BLAST_JOB_AKS_TEMPLATE, ELB_LOCAL_SSD_BLAST_JOB_AKS_TEMPLATE,
+    ELB_METADATA_DIR, ELB_NUM_JOBS_SUBMITTED, ELB_QUERY_BATCH_DIR,
+    ELB_QUERY_LENGTH, ELB_STATE_DISK_ID_FILE, ElbExecutionMode, ElbStatus,
+    INPUT_ERROR, K8S_JOB_BLAST, K8S_JOB_CLOUD_SPLIT_SSD, K8S_JOB_GET_BLASTDB,
+    K8S_JOB_IMPORT_QUERY_BATCHES, K8S_JOB_INIT_PV,
+    K8S_JOB_LOAD_BLASTDB_INTO_RAM, K8S_JOB_RESULTS_EXPORT, K8S_JOB_SUBMIT_JOBS,
+    STATUS_MESSAGE_ERROR,
+)
+from .elasticblast import ElasticBlast
+from .elb_config import ElasticBlastConfig, ResourceIds
+from .filehelper import open_for_read, open_for_write_immediate
+from .jobs import read_job_template, write_job_files
+from .subst import substitute_params
+from .util import (
+    ElbSupportedPrograms, SafeExecError, UserReportError, get_blastdb_info,
+    get_usage_reporting, handle_error, safe_exec,
 )
 
 
@@ -118,8 +127,25 @@ _kubeconfig_thread_lock = threading.Lock()
 
 
 def _get_subscription_id() -> str:
-    """Get Azure subscription ID from az CLI profile or Azure REST API."""
-    import subprocess
+    """Get Azure subscription ID from az CLI profile or Azure REST API.
+
+    Result is cached for the life of the process — the subscription id
+    is fixed once an `AzureClients` instance is bound to it, so re-querying
+    every time we instantiate clients (or every time tests fake them out)
+    is pure overhead and a guaranteed network round-trip.
+    """
+    cached = _SUBSCRIPTION_ID_CACHE.get('value')
+    if cached:
+        return cached
+    sub_id = _resolve_subscription_id_uncached()
+    _SUBSCRIPTION_ID_CACHE['value'] = sub_id
+    return sub_id
+
+
+_SUBSCRIPTION_ID_CACHE: Dict[str, str] = {}
+
+
+def _resolve_subscription_id_uncached() -> str:
     try:
         result = subprocess.run(
             ['az', 'account', 'show', '--query', 'id', '-o', 'tsv'],
@@ -128,12 +154,15 @@ def _get_subscription_id() -> str:
             return result.stdout.strip()
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
-    import requests
     credential = DefaultAzureCredential()
     token = credential.get_token("https://management.azure.com/.default")
+    # Always pass an explicit timeout: ARM is healthy in seconds, never
+    # minutes. An untimed urlopen here previously could wedge the whole
+    # CLI on a flaky network.
     resp = requests.get(
         "https://management.azure.com/subscriptions?api-version=2022-12-01",
-        headers={"Authorization": f"Bearer {token.token}"})
+        headers={"Authorization": f"Bearer {token.token}"},
+        timeout=15)
     resp.raise_for_status()
     subs = resp.json().get("value", [])
     if subs:
@@ -270,8 +299,6 @@ def _sdk_get_aks_credentials(resource_group: str, cluster_name: str, dry_run: bo
     # Without this, two parallel `_sdk_get_aks_credentials` calls can corrupt
     # the merged kubeconfig (truncate during another's read, or interleave
     # `kubectl config view --flatten` output).
-    import fcntl
-    import subprocess
     merged_tmp_path: Optional[str] = None
     try:
         with _kubeconfig_thread_lock, open(lock_path, 'w') as lock_f:
@@ -352,8 +379,20 @@ def _sdk_set_role_assignments(resource_group: str, cluster_name: str,
                 {"role_definition_id": role_def_id, "principal_id": kubelet_id,
                  "principal_type": "ServicePrincipal"})
         except HttpResponseError as e:
-            if 'RoleAssignmentExists' not in str(e):
-                raise
+            # Treat *only* the explicit "already exists" idempotency case as
+            # success. Previously any HttpResponseError that happened to
+            # contain the substring 'RoleAssignmentExists' anywhere in its
+            # str() was swallowed — a forgery-prone substring match that
+            # could mask real auth/quota failures whose message happened
+            # to mention the role.
+            err_code = getattr(e, 'error', None)
+            err_code_value = getattr(err_code, 'code', None) if err_code else None
+            if err_code_value == 'RoleAssignmentExists':
+                continue
+            if getattr(e, 'status_code', None) == 409 and 'RoleAssignmentExists' in (
+                    getattr(e, 'message', '') or ''):
+                continue
+            raise
 
 
 @retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))  # type: ignore
@@ -385,7 +424,6 @@ def _sdk_delete_snapshot(resource_group: str, snapshot_name: str) -> None:
 
 
 def _sdk_check_prerequisites() -> None:
-    import shutil
     try:
         p = safe_exec('kubectl version --output=json --client=true')
         logging.debug(f'{":".join(p.stdout.decode().split())}')
@@ -429,40 +467,46 @@ def _ensure_monitor_initialized():
     with _monitor_init_lock:
         if _monitor_initialized:
             return
-        _monitor_initialized = True
+        # Hold the lock for the entire init so a second caller never sees
+        # ``_monitor_initialized = True`` while another thread is mid-setup.
+        # Previously the flag was flipped *before* the try-block, so a
+        # transient ImportError on first call left the flag latched True
+        # and silently disabled all telemetry for the process lifetime.
+        if not _MONITOR_CONN_STR:
+            _monitor_initialized = True
+            return
+        try:
+            from opentelemetry import trace, metrics  # type: ignore[import-untyped]
+            from opentelemetry.sdk.trace import TracerProvider  # type: ignore[import-untyped]
+            from opentelemetry.sdk.metrics import MeterProvider  # type: ignore[import-untyped]
+            from azure.monitor.opentelemetry.exporter import (  # type: ignore[import-untyped]
+                AzureMonitorTraceExporter, AzureMonitorMetricExporter)
+            from opentelemetry.sdk.trace.export import BatchSpanProcessor  # type: ignore[import-untyped]
+            from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader  # type: ignore[import-untyped]
 
-    if not _MONITOR_CONN_STR:
-        return
+            tp = TracerProvider()
+            tp.add_span_processor(BatchSpanProcessor(AzureMonitorTraceExporter(connection_string=_MONITOR_CONN_STR)))
+            trace.set_tracer_provider(tp)
+            _monitor_tracer = trace.get_tracer('elastic_blast.azure')
 
-    try:
-        from opentelemetry import trace, metrics  # type: ignore[import-untyped]
-        from opentelemetry.sdk.trace import TracerProvider  # type: ignore[import-untyped]
-        from opentelemetry.sdk.metrics import MeterProvider  # type: ignore[import-untyped]
-        from azure.monitor.opentelemetry.exporter import (  # type: ignore[import-untyped]
-            AzureMonitorTraceExporter, AzureMonitorMetricExporter)
-        from opentelemetry.sdk.trace.export import BatchSpanProcessor  # type: ignore[import-untyped]
-        from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader  # type: ignore[import-untyped]
-
-        tp = TracerProvider()
-        tp.add_span_processor(BatchSpanProcessor(AzureMonitorTraceExporter(connection_string=_MONITOR_CONN_STR)))
-        trace.set_tracer_provider(tp)
-        _monitor_tracer = trace.get_tracer('elastic_blast.azure')
-
-        mp = MeterProvider(metric_readers=[PeriodicExportingMetricReader(
-            AzureMonitorMetricExporter(connection_string=_MONITOR_CONN_STR), export_interval_millis=60000)])
-        metrics.set_meter_provider(mp)
-        _monitor_meter = metrics.get_meter('elastic_blast.azure')
-        _monitor_jobs_submitted = _monitor_meter.create_counter(
-            'elb.jobs.submitted', description='Total BLAST jobs submitted')
-        _monitor_jobs_failed = _monitor_meter.create_counter(
-            'elb.jobs.failed', description='BLAST jobs failed')
-        _monitor_cluster_create_duration = _monitor_meter.create_histogram(
-            'elb.cluster.create_duration_s', description='Cluster creation time in seconds')
-        logging.info('Azure Monitor: initialized')
-    except ImportError:
-        logging.debug('Azure Monitor: opentelemetry SDK not installed')
-    except Exception as e:
-        logging.warning(f'Azure Monitor: init failed ({e})')
+            mp = MeterProvider(metric_readers=[PeriodicExportingMetricReader(
+                AzureMonitorMetricExporter(connection_string=_MONITOR_CONN_STR), export_interval_millis=60000)])
+            metrics.set_meter_provider(mp)
+            _monitor_meter = metrics.get_meter('elastic_blast.azure')
+            _monitor_jobs_submitted = _monitor_meter.create_counter(
+                'elb.jobs.submitted', description='Total BLAST jobs submitted')
+            _monitor_jobs_failed = _monitor_meter.create_counter(
+                'elb.jobs.failed', description='BLAST jobs failed')
+            _monitor_cluster_create_duration = _monitor_meter.create_histogram(
+                'elb.cluster.create_duration_s', description='Cluster creation time in seconds')
+            logging.info('Azure Monitor: initialized')
+            _monitor_initialized = True
+        except ImportError:
+            logging.debug('Azure Monitor: opentelemetry SDK not installed')
+            _monitor_initialized = True
+        except Exception as e:
+            logging.warning(f'Azure Monitor: init failed ({e})')
+            _monitor_initialized = True
 
 
 def track_search_submitted(*, job_id: str, program: str, db: str,
@@ -540,23 +584,23 @@ class OptimizationProfile(str, Enum):
     PERFORMANCE = 'performance'
 
 
-_VM_PROFILES = {
-    OptimizationProfile.COST: {
+_VM_PROFILES: Mapping[OptimizationProfile, Mapping[str, Any]] = MappingProxyType({
+    OptimizationProfile.COST: MappingProxyType({
         'default_vm': 'Standard_D8s_v3', 'large_db_vm': 'Standard_E16s_v5',
         'spot': True, 'vmtouch_pct': 0.5, 'azcopy_concurrency': 16,
         'skip_db_verify': True, 'threads_per_pod': 2, 'mem_limit_gb': 4, 'mem_request_gb': 2,
-    },
-    OptimizationProfile.BALANCED: {
+    }),
+    OptimizationProfile.BALANCED: MappingProxyType({
         'default_vm': 'Standard_E32s_v5', 'large_db_vm': 'Standard_E32s_v5',
         'spot': True, 'vmtouch_pct': 0.8, 'azcopy_concurrency': 64,
         'skip_db_verify': True, 'threads_per_pod': 8, 'mem_limit_gb': 8, 'mem_request_gb': 4,
-    },
-    OptimizationProfile.PERFORMANCE: {
+    }),
+    OptimizationProfile.PERFORMANCE: MappingProxyType({
         'default_vm': 'Standard_E64bs_v5', 'large_db_vm': 'Standard_E64bs_v5',
         'spot': False, 'vmtouch_pct': 0.9, 'azcopy_concurrency': 128,
         'skip_db_verify': False, 'threads_per_pod': 16, 'mem_limit_gb': 32, 'mem_request_gb': 16,
-    },
-}
+    }),
+})
 
 _VM_SPECS = {
     'Standard_D8s_v3':   (8,   32,   0.384),  'Standard_D16s_v3':  (16,  64,   0.768),
@@ -721,12 +765,20 @@ class ElasticBlastAzure(ElasticBlast):
         self.cluster_initialized = True
 
     def wait_for_cloud_query_split(self) -> None:
-        """Block until cloud query split job completes."""
+        """Block until cloud query split job completes.
+
+        Has a hard wall-clock timeout (default 2h, override with
+        ``ELB_CLOUD_QUERY_SPLIT_TIMEOUT_S``) so a stuck init-pv / split-ssd
+        job cannot wedge the CLI forever — the previous loop only exited
+        on success or job failure and would block indefinitely if the K8s
+        Job got into a Pending state without progressing to Failed.
+        """
         if not self.query_files:
             return
-        kubectl = self._kubectl()
         job = K8S_JOB_CLOUD_SPLIT_SSD if self.cfg.cluster.use_local_ssd else K8S_JOB_INIT_PV
 
+        timeout_s = max(60, int(os.environ.get('ELB_CLOUD_QUERY_SPLIT_TIMEOUT_S', '7200')))
+        deadline = time.monotonic() + timeout_s
         while True:
             if self.dry_run:
                 return
@@ -740,6 +792,11 @@ class ElasticBlastAzure(ElasticBlast):
                            else 'Cloud query splitting failed')
                     raise UserReportError(returncode=CLUSTER_ERROR, message=msg)
                 return
+            if time.monotonic() >= deadline:
+                raise UserReportError(
+                    returncode=CLUSTER_ERROR,
+                    message=(f'Cloud query split job {job} did not complete within '
+                             f'{timeout_s}s. Inspect with: kubectl describe job {job}'))
             time.sleep(30)
 
     def upload_query_length(self, query_length: int) -> None:
@@ -835,13 +892,13 @@ class ElasticBlastAzure(ElasticBlast):
         else:
             delete_cluster_with_cleanup(self.cfg)
 
-    def run_command(self, cmd: str) -> str:
-        """Run a kubectl command in the cluster context."""
-        full_cmd = f'{cmd} --context={self._get_k8s_ctx()}'
-        if self.dry_run:
-            logging.info(full_cmd)
-            return ''
-        return handle_error(safe_exec(shlex.split(full_cmd)).stdout)
+    # NOTE: A previous helper ``run_command(cmd: str)`` accepted an arbitrary
+    # string, appended ``--context=...`` and executed it via ``shlex.split`` +
+    # ``safe_exec``. It had no callers in the codebase but provided a latent
+    # RCE surface if any future code wired user input into it. Removed as part
+    # of the security audit (Azure-only file). If a generic kubectl bridge is
+    # ever needed, prefer a list-form call site such as
+    # ``safe_exec([self._kubectl_bin(), '--context', ctx, *args])``.
 
     def scale_nodes(self, node_count: int) -> None:
         """Scale AKS node pool. Use 0 to scale down for cost savings."""
@@ -901,14 +958,80 @@ class ElasticBlastAzure(ElasticBlast):
         return self.cfg.appstate.k8s_ctx
 
     def _kubectl(self) -> str:
-        """Return kubectl command prefix with context."""
+        """Return kubectl command prefix with context (string form, legacy callers)."""
         return f'kubectl --context={self._get_k8s_ctx()}'
 
-    def _kubectl_jsonpath(self, resource_cmd: str, jsonpath: str) -> str:
-        """Run kubectl with jsonpath output and return result."""
-        cmd = f'{self._kubectl()} {resource_cmd} -o jsonpath=\'{jsonpath}\''
-        proc = safe_exec(cmd)
+    def _kubectl_argv(self) -> List[str]:
+        """Return kubectl argv prefix with context (preferred — list form)."""
+        return ['kubectl', f'--context={self._get_k8s_ctx()}']
+
+    def _kubectl_run(self, *args: str):
+        """Run kubectl with the cluster context and the supplied trailing args.
+
+        ``args`` are passed verbatim as separate argv elements — never use a
+        single shell-style string here. Returns the ``CompletedProcess`` from
+        ``safe_exec`` so callers can inspect ``stdout`` / ``stderr``.
+        """
+        return safe_exec([*self._kubectl_argv(), *args])
+
+    def _kubectl_jsonpath(self, resource_cmd, jsonpath: str) -> str:
+        """Run ``kubectl <resource_cmd...> -o jsonpath=<jsonpath>`` and return stdout text.
+
+        ``resource_cmd`` may be a list of argv parts (preferred) or a
+        whitespace-separated string (kept for the small number of legacy
+        call sites). ``jsonpath`` is passed as a single argv element so its
+        braces and quotes are never seen by a shell.
+        """
+        if isinstance(resource_cmd, str):
+            resource_parts = resource_cmd.split()
+        else:
+            resource_parts = list(resource_cmd)
+        proc = self._kubectl_run(*resource_parts, '-o', f'jsonpath={jsonpath}')
         return handle_error(proc.stdout)
+
+    def _kubectl_apply_template(self, template_relpath: str,
+                                 subs: Dict[str, str], filename: str,
+                                 *, log_msg: Optional[str] = None) -> None:
+        """Render an Azure-side YAML template and ``kubectl apply`` it.
+
+        Common pattern across finalizer / vmtouch DaemonSet / ANF
+        StorageClass / etc. ``template_relpath`` is relative to the
+        ``elastic_blast.templates`` package. In dry-run mode the rendered
+        path is logged and apply is skipped.
+        """
+        template = pkg_files('elastic_blast').joinpath(template_relpath).read_text()
+        rendered = substitute_params(template, subs)
+        with TemporaryDirectory() as d:
+            path = os.path.join(d, filename)
+            with open(path, 'w') as f:
+                f.write(rendered)
+            if self.cfg.cluster.dry_run:
+                logging.info(f'dry-run: would apply {path}')
+                return
+            self._kubectl_run('apply', '-f', path)
+            if log_msg:
+                logging.info(log_msg)
+
+    def _delete_jobs_for_apps(self, apps: Iterable[str], *, action_label: str) -> None:
+        """Delete K8s Jobs for the given app labels, scoped to this submission.
+
+        Used by both warm-cluster cleanup paths. When ``elb_job_id`` is set
+        the selector includes it so concurrent submissions on the same
+        cluster are not affected; otherwise the app label alone is used.
+        """
+        try:
+            job_id = self.cfg.azure.elb_job_id
+            for app in apps:
+                selector = f'app={app},elb-job-id={job_id}' if job_id else f'app={app}'
+                argv = [*self._kubectl_argv(), 'delete', 'jobs',
+                        '-l', selector, '--ignore-not-found=true']
+                if self.cfg.cluster.dry_run:
+                    logging.info(' '.join(argv))
+                else:
+                    safe_exec(argv)
+            logging.info(f'{action_label} (job_id={job_id})')
+        except Exception as e:
+            logging.warning(f'{action_label} failed: {e}')
 
     def _metadata_path(self, filename: str) -> str:
         """Return full blob path for a metadata file."""
@@ -1007,19 +1130,11 @@ class ElasticBlastAzure(ElasticBlast):
             'BLAST_ELB_JOB_ID': cfg.azure.elb_job_id,
             'BLAST_ELB_JOB_ID_SHORT': cfg.azure.elb_job_id[-8:],
         }
-
-        from importlib.resources import files as pkg_files
-        template = pkg_files('elastic_blast').joinpath(
-            'templates/elb-finalizer-aks.yaml.template').read_text()
-        rendered = substitute_params(template, subs)
-
-        with TemporaryDirectory() as d:
-            path = os.path.join(d, 'elb-finalizer.yaml')
-            with open(path, 'w') as f:
-                f.write(rendered)
-            kubectl = self._kubectl()
-            safe_exec(shlex.split(f'{kubectl} apply -f {path}'))
-            logging.info('Submitted elb-finalizer job')
+        self._kubectl_apply_template(
+            'templates/elb-finalizer-aks.yaml.template',
+            subs, 'elb-finalizer.yaml',
+            log_msg='Submitted elb-finalizer job',
+        )
 
     def _show_optimization_prediction(self, query_batches: List[str], query_length: int) -> None:
         """Apply optimization profile and display time/cost prediction."""
@@ -1040,8 +1155,10 @@ class ElasticBlastAzure(ElasticBlast):
             query_size_gb=query_size_gb, db_size_gb=db_size_gb,
             batch_len=self.cfg.blast.batch_len, num_batches=num_batches)
         logging.info(comparison)
-        if os.isatty(1):
-            print(comparison)
+        # Note: previously also `print(comparison)` when stdout was a TTY.
+        # That double-emission corrupted programmatic callers (CLI tooling
+        # that captures stdout as JSON, the dashboard subprocess wrapper).
+        # Logging covers the human-readable case via the configured handler.
 
         pred = apply_profile(self.cfg, profile,
                              query_size_gb=query_size_gb,
@@ -1060,7 +1177,9 @@ class ElasticBlastAzure(ElasticBlast):
             return
         limit = kubernetes.get_maximum_number_of_allowed_k8s_jobs(self.dry_run)
         if len(queries) > limit:
-            suggested = int(query_length / limit) + 1
+            # math.ceil avoids the off-by-one in the previous int(...) + 1
+            # form for query_length values exactly divisible by ``limit``.
+            suggested = max(1, math.ceil(query_length / limit)) if limit > 0 else query_length
             raise UserReportError(INPUT_ERROR,
                 f'Batch size led to {len(queries)} jobs, exceeding limit of {limit}. '
                 f'Increase batch-len to at least {suggested}.')
@@ -1129,7 +1248,16 @@ class ElasticBlastAzure(ElasticBlast):
             self._deploy_vmtouch_daemonset()
 
     def _initialize_cluster_partitioned(self, queries: Optional[List[str]]) -> None:
-        """Initialize cluster for DB-partitioned search."""
+        """Initialize cluster for DB-partitioned (PV) search.
+
+        Mirrors :meth:`_initialize_cluster` and
+        :meth:`_initialize_cluster_sharded`: kicks off cluster creation
+        asynchronously and uploads the job template in parallel when in
+        cloud-job-submission mode, saving 5-10 min versus the previous
+        sync ``start_cluster(cfg)`` path. Previously the partitioned PV
+        path also forgot to upload the job template entirely, breaking
+        cloud-job-submission for that mode.
+        """
         cfg = self.cfg
 
         if not cfg.cluster.reuse:
@@ -1137,8 +1265,15 @@ class ElasticBlastAzure(ElasticBlast):
         self.cleanup_stack.append(lambda: self._safe_collect_logs())
 
         aks_status = check_cluster(cfg)
+        poller = None
         if not cfg.cluster.reuse or not aks_status:
-            start_cluster(cfg)
+            poller = start_cluster_async(cfg)
+
+        if self.cloud_job_submission:
+            self._upload_job_template(queries)
+
+        if poller:
+            wait_for_cluster(cfg, poller)
 
         self._get_k8s_ctx()
         self._label_nodes()
@@ -1365,18 +1500,13 @@ class ElasticBlastAzure(ElasticBlast):
 
     def _apply_anf_storage_class(self) -> None:
         """Apply Azure NetApp Files StorageClass to enable persistent DB volumes."""
-        kubectl = self._kubectl()
-        from importlib.resources import files as pkg_files
-        sc_path = pkg_files('elastic_blast').joinpath('templates/storage-aks-anf.yaml')
-        with TemporaryDirectory() as d:
-            dest = os.path.join(d, 'storage-aks-anf.yaml')
-            with open(dest, 'w') as f:
-                f.write(sc_path.read_text())
-            if self.cfg.cluster.dry_run:
-                logging.info(f'Would apply ANF StorageClass from {dest}')
-            else:
-                safe_exec(shlex.split(f'{kubectl} apply -f {dest}'))
-                logging.info('Applied azure-netapp-ultra StorageClass')
+        # No template variables — pass an empty subs dict so the file is
+        # written verbatim through the same render-and-apply helper.
+        self._kubectl_apply_template(
+            'templates/storage-aks-anf.yaml',
+            subs={}, filename='storage-aks-anf.yaml',
+            log_msg='Applied azure-netapp-ultra StorageClass',
+        )
 
     # -- Status check -------------------------------------------------------
 
@@ -1424,28 +1554,31 @@ class ElasticBlastAzure(ElasticBlast):
     def _count_blast_jobs(self) -> DefaultDict[str, int]:
         """Count BLAST job statuses via kubectl."""
         counts: DefaultDict[str, int] = defaultdict(int)
-        kubectl = self._kubectl()
+        if self.dry_run:
+            return counts
 
-        if not self.dry_run:
-            proc = safe_exec(f'{kubectl} get jobs -o custom-columns='
-                            f'STATUS:.status.conditions[0].type -l app=blast'.split())
-            for line in handle_error(proc.stdout).split('\n'):
-                if not line or line.startswith('STATUS'):
-                    continue
-                if line.startswith('Complete'):
-                    counts['succeeded'] += 1
-                elif line.startswith('Failed'):
-                    counts['failed'] += 1
-                else:
-                    counts['pending'] += 1
+        pending, succeeded, failed = self._job_status_by_app('blast')
+        counts['pending'] = pending
+        counts['succeeded'] = succeeded
+        counts['failed'] = failed
 
-            proc = safe_exec(f'{kubectl} get pods -o custom-columns='
-                            f'STATUS:.status.phase -l app=blast'.split())
+        try:
+            proc = self._kubectl_run(
+                'get', 'pods',
+                '-o', 'custom-columns=STATUS:.status.phase',
+                '-l', 'app=blast')
             for line in handle_error(proc.stdout).split('\n'):
                 if line == 'Running':
                     counts['running'] += 1
-
-            counts['pending'] -= counts['running']
+        except SafeExecError as e:
+            # Tolerate transient kubectl failures here so a flaky API
+            # server during ``elastic-blast status`` does not abort with a
+            # raw stack trace; the next poll will retry.
+            logging.warning(f'_count_blast_jobs: pod query failed ({e}); reporting partial counts')
+        # Clamp to 0 to avoid going negative during scale-down races where
+        # a Job's active count has already decremented but the pod hasn't
+        # yet transitioned out of Running.
+        counts['pending'] = max(0, counts['pending'] - counts['running'])
         return counts
 
     def _derive_status(self, counts: DefaultDict[str, int]) -> ElbStatus:
@@ -1470,8 +1603,10 @@ class ElasticBlastAzure(ElasticBlast):
         if self.dry_run:
             return pending, succeeded, failed
         try:
-            proc = safe_exec(f'{self._kubectl()} get jobs -o custom-columns='
-                            f'STATUS:.status.conditions[0].type -l app={app}'.split())
+            proc = self._kubectl_run(
+                'get', 'jobs',
+                '-o', 'custom-columns=STATUS:.status.conditions[0].type',
+                '-l', f'app={app}')
             for line in handle_error(proc.stdout).split('\n'):
                 if not line or line.startswith('STATUS'):
                     continue
@@ -1494,41 +1629,17 @@ class ElasticBlastAzure(ElasticBlast):
         concurrent submissions on the same cluster (different elb_job_id)
         are not affected. Falls back to app-only filter when job-id is empty.
         """
-        try:
-            kubectl = self._kubectl()
-            job_id = self.cfg.azure.elb_job_id
-            for app in ('blast', 'submit', 'setup', 'finalizer'):
-                if job_id:
-                    selector = f'app={app},elb-job-id={job_id}'
-                else:
-                    selector = f'app={app}'
-                cmd = f'{kubectl} delete jobs -l {selector} --ignore-not-found=true'
-                if self.cfg.cluster.dry_run:
-                    logging.info(cmd)
-                else:
-                    safe_exec(shlex.split(cmd))
-            logging.info(f'Warm reuse: stale jobs cleaned up (job_id={job_id})')
-        except Exception as e:
-            logging.warning(f'Warm reuse cleanup failed: {e}')
+        self._delete_jobs_for_apps(
+            ('blast', 'submit', 'setup', 'finalizer'),
+            action_label='Warm reuse: stale jobs cleaned up',
+        )
 
     def _cleanup_jobs_only(self) -> None:
         """In reuse mode: delete this submission's BLAST/submit jobs only."""
-        try:
-            kubectl = self._kubectl()
-            job_id = self.cfg.azure.elb_job_id
-            for app in ('blast', 'submit'):
-                if job_id:
-                    selector = f'app={app},elb-job-id={job_id}'
-                else:
-                    selector = f'app={app}'
-                cmd = f'{kubectl} delete jobs -l {selector} --ignore-not-found=true'
-                if self.cfg.cluster.dry_run:
-                    logging.info(cmd)
-                else:
-                    safe_exec(shlex.split(cmd))
-            logging.info(f'Reuse cleanup: jobs deleted (job_id={job_id}), cluster preserved')
-        except Exception as e:
-            logging.warning(f'Reuse cleanup failed: {e}')
+        self._delete_jobs_for_apps(
+            ('blast', 'submit'),
+            action_label='Reuse cleanup: jobs deleted, cluster preserved',
+        )
 
     # -- Warm cluster -------------------------------------------------------
 
@@ -1543,24 +1654,23 @@ class ElasticBlastAzure(ElasticBlast):
         if self.cfg.cluster.dry_run:
             return False
         try:
-            kubectl = self._kubectl()
             if self.cfg.cluster.use_local_ssd:
                 # Local-SSD: the create-workspace DaemonSet in kube-system
                 # persists across runs and indicates that /workspace was
                 # previously initialized with DB files.
-                proc = safe_exec(shlex.split(
-                    f'{kubectl} -n kube-system get daemonset create-workspace'
-                    f' -o jsonpath={{.status.numberReady}}'))
-                ready = self._decode(proc.stdout).strip()
+                ready = self._kubectl_jsonpath(
+                    ['-n', 'kube-system', 'get', 'daemonset', 'create-workspace'],
+                    '{.status.numberReady}').strip()
                 return ready != '' and int(ready) > 0
-            else:
-                proc = safe_exec(shlex.split(
-                    f'{kubectl} get pvc blast-dbs-pvc-rwm -o jsonpath={{.status.phase}}'))
-                if self._decode(proc.stdout).strip() != 'Bound':
-                    return False
-                proc = safe_exec(shlex.split(
-                    f'{kubectl} get job init-pv -o jsonpath={{.status.succeeded}}'))
-                return self._decode(proc.stdout).strip() == '1'
+            phase = self._kubectl_jsonpath(
+                ['get', 'pvc', 'blast-dbs-pvc-rwm'],
+                '{.status.phase}').strip()
+            if phase != 'Bound':
+                return False
+            succeeded = self._kubectl_jsonpath(
+                ['get', 'job', 'init-pv'],
+                '{.status.succeeded}').strip()
+            return succeeded == '1'
         except Exception:
             return False
 
@@ -1579,15 +1689,13 @@ class ElasticBlastAzure(ElasticBlast):
 
     def _deploy_vmtouch_daemonset(self) -> None:
         """Deploy DaemonSet to keep BLAST DB cached in RAM (80% of available)."""
-        kubectl = self._kubectl()
-        dry_run = self.cfg.cluster.dry_run
-
-        # Skip if already deployed
-        if not dry_run:
+        if not self.cfg.cluster.dry_run:
             try:
-                proc = safe_exec(shlex.split(
-                    f'{kubectl} get daemonset vmtouch-db-cache --ignore-not-found -o name'))
-                if self._decode(proc.stdout).strip():
+                # Skip if the DaemonSet has already been deployed.
+                existing = self._kubectl_jsonpath(
+                    ['get', 'daemonset', 'vmtouch-db-cache', '--ignore-not-found'],
+                    '{.metadata.name}')
+                if existing.strip():
                     return
             except Exception:
                 pass
@@ -1598,31 +1706,26 @@ class ElasticBlastAzure(ElasticBlast):
             'ELB_DB': db,
             'ELB_DB_MOL_TYPE': str(ElbSupportedPrograms().get_db_mol_type(self.cfg.blast.program)),
         }
-
-        from importlib.resources import files as pkg_files
-        template = pkg_files('elastic_blast').joinpath(
-            'templates/vmtouch-daemonset-aks.yaml.template').read_text()
-        yaml_content = substitute_params(template, subs)
-
-        with TemporaryDirectory() as d:
-            path = os.path.join(d, 'vmtouch-daemonset.yaml')
-            with open(path, 'w') as f:
-                f.write(yaml_content)
-            if dry_run:
-                logging.info(f'Would apply {path}')
-            else:
-                safe_exec(shlex.split(f'{kubectl} apply -f {path}'))
+        self._kubectl_apply_template(
+            'templates/vmtouch-daemonset-aks.yaml.template',
+            subs, 'vmtouch-daemonset.yaml',
+        )
 
     def _label_nodes(self) -> None:
         """Label nodes with ordinal index for local-SSD affinity."""
         if not self.cfg.cluster.use_local_ssd:
             return
-        kubectl = self._kubectl()
         if self.cfg.cluster.dry_run:
             return
-        proc = safe_exec(f"{kubectl} get nodes -o jsonpath='{{.items[*].metadata.name}}'")
-        for i, name in enumerate(handle_error(proc.stdout).replace("'", "").split()):
-            safe_exec(f'{kubectl} label nodes {name} ordinal={i} --overwrite')
+        # Use list-form argv so node names that contain unexpected whitespace
+        # cannot be split across argument boundaries (defence-in-depth: AKS
+        # node names are tightly constrained, but this avoids a fragile
+        # f-string + .split() pattern).
+        names_out = self._kubectl_jsonpath(
+            ['get', 'nodes'], '{.items[*].metadata.name}')
+        for i, name in enumerate(names_out.split()):
+            self._kubectl_run('label', 'nodes', name,
+                              f'ordinal={i}', '--overwrite')
 
 
 # ---------------------------------------------------------------------------
@@ -1768,7 +1871,6 @@ def _get_resource_ids(cfg: ElasticBlastConfig) -> ResourceIds:
     path = os.path.join(cfg.cluster.results, cfg.azure.elb_job_id,
                         ELB_METADATA_DIR, ELB_STATE_DISK_ID_FILE)
     try:
-        from .filehelper import open_for_read
         with open_for_read(path) as f:
             retval = ResourceIds.from_json(f.read())
         if retval.disks or retval.snapshots:
@@ -1776,6 +1878,19 @@ def _get_resource_ids(cfg: ElasticBlastConfig) -> ResourceIds:
     except Exception as e:
         logging.debug(f'Unable to read {path}: {e}')
     return ResourceIds()
+
+
+def cleanup_jobs_only(cfg: ElasticBlastConfig) -> None:
+    """Public delete-jobs-only helper for reuse-mode submissions.
+
+    Wraps the per-submission ``ElasticBlastAzure._cleanup_jobs_only`` so
+    external callers (``azure_api.delete_search``, dashboards) do not
+    have to reach into a private method on a transient instance. The
+    label scoping (elb-job-id) ensures only the current submission's
+    jobs are removed; cluster-shared resources are preserved.
+    """
+    elb = ElasticBlastAzure(cfg, create=False)
+    elb._cleanup_jobs_only()
 
 
 def delete_cluster_with_cleanup(cfg: ElasticBlastConfig, allow_missing: bool = False,
@@ -1978,27 +2093,48 @@ def _cleanup_k8s_resources(cfg, pds, snapshots, dry_run):
     return pds, snapshots
 
 
+_AZURE_RES_NAME_RE = re.compile(r'^[A-Za-z0-9._-]{1,80}$')
+
+
+def _is_safe_azure_resource_name(name: str) -> bool:
+    """Reject names that could break out of the az CLI argument context.
+
+    Used by the leak-cleanup paths that format suggested ``az disk delete``
+    commands into operator-visible warnings. The matching `_sdk_*` SDK
+    helpers will reject malformed names too, but the suggestion strings
+    were previously vulnerable to log-injection (e.g. embedded quotes or
+    newlines) when the disk listing came from an external source.
+    """
+    return bool(_AZURE_RES_NAME_RE.match(str(name or '')))
+
+
 def _cleanup_leaked_disks(cfg, pds, snapshots, dry_run):
     """Delete any disks/snapshots that survived K8s cleanup."""
     rg = cfg.azure.resourcegroup
     for disk in pds:
+        if not _is_safe_azure_resource_name(disk):
+            logging.error(f'Refusing to clean up suspicious disk name: {disk!r}')
+            continue
         try:
             if disk in get_disks(cfg, dry_run):
                 delete_disk(disk, cfg)
         except Exception as e:
             logging.error(f'Failed to delete disk {disk}: {e}')
             _warn_leaked_resource('disk', disk, rg,
-                f'az disk list --resource-group {rg} --query "[?name==\'{disk}\']" -o table',
+                f"az disk list --resource-group {rg} --query \"[?name=='{disk}']\" -o table",
                 f'az disk delete -y --name {disk} --resource-group {rg}')
 
     for snap in snapshots:
+        if not _is_safe_azure_resource_name(snap):
+            logging.error(f'Refusing to clean up suspicious snapshot name: {snap!r}')
+            continue
         try:
             if snap in get_snapshots(cfg, dry_run):
                 delete_snapshot(snap, cfg)
         except Exception as e:
             logging.error(f'Failed to delete snapshot {snap}: {e}')
             _warn_leaked_resource('snapshot', snap, rg,
-                f'az snapshot list --resource-group {rg} --query "[?name==\'{snap}\']" -o table',
+                f"az snapshot list --resource-group {rg} --query \"[?name=='{snap}']\" -o table",
                 f'az snapshot delete --name {snap} --resource-group {rg}')
 
 
@@ -2017,11 +2153,15 @@ def remove_split_query(cfg: ElasticBlastConfig) -> None:
 def _remove_ancillary_data(cfg: ElasticBlastConfig, bucket_prefix: str) -> None:
     """Remove data under a result subdirectory."""
     path = os.path.join(cfg.cluster.results, cfg.azure.elb_job_id, bucket_prefix)
-    cmd = f'azcopy rm "{path}" --recursive=true'
+    # List form so a future cluster.results / elb_job_id with shell
+    # metacharacters cannot be reinterpreted by a shell. ``safe_exec`` does
+    # not invoke a shell on a list argv, so paths containing spaces or
+    # quotes are passed through verbatim to azcopy.
+    cmd = ['azcopy', 'rm', path, '--recursive=true']
     if cfg.cluster.dry_run:
-        logging.info(cmd)
+        logging.info(' '.join(shlex.quote(c) for c in cmd))
     else:
         try:
-            safe_exec(shlex.split(cmd))
+            safe_exec(cmd)
         except SafeExecError as e:
             logging.warning(e.message.strip().replace('\n', '|'))

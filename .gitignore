@@ -59,3 +59,18 @@ benchmark/private/
 # Local virtualenvs
 .venv/
 venv/
+
+# --- Azure security: prevent local artefacts from leaking secrets ---
+# Working-tree elastic-blast.ini files often hold a placeholder
+# `azure-storage-account-key`; the project policy is Managed Identity
+# only, so block them outright.
+docker-openapi/app/elastic-blast.ini
+docker-openapi/app/*.log
+docker-openapi/app/__pycache__/
+docker-openapi/app/.env
+docker-openapi/app/.env.*
+# Backup / scratch files that historically have been committed by accident.
+**/*.bak
+**/*_bak
+**/*_bak.txt
+**/*.bak.*

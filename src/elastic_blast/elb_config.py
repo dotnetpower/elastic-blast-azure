@@ -380,6 +380,29 @@ class AZUREConfig(CloudProviderBaseConfig, ConfigParserToDataclassMapper):
 
 
 
+# ── Azure security: redact sensitive fields in serialized output ───────────
+#
+# ``dataclass_json`` injects ``to_dict`` AFTER the class body executes, so a
+# normal method override on AZUREConfig is silently shadowed. We wrap the
+# generated ``to_dict`` here, after class creation, to guarantee that the
+# storage account key never leaves the process in plaintext via the JSON
+# metadata blob (``write_config_to_metadata``) or any caller that prints
+# ``cfg.azure.to_dict()``.
+_AZURECONFIG_ORIG_TO_DICT = AZUREConfig.to_dict  # type: ignore[attr-defined]
+
+
+def _azureconfig_redacted_to_dict(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+    data = _AZURECONFIG_ORIG_TO_DICT(self, *args, **kwargs)
+    if isinstance(data, dict):
+        for key in ('storage-account-key', 'storage_account_key'):
+            if key in data and data[key] != ELB_UNKNOWN_AZURE_STORAGE_ACCOUNT_KEY:
+                data[key] = '***REDACTED***'
+    return data
+
+
+AZUREConfig.to_dict = _azureconfig_redacted_to_dict  # type: ignore[assignment]
+
+
 @dataclass_json(letter_case=LetterCase.KEBAB)
 @dataclass
 class GCPConfig(CloudProviderBaseConfig, ConfigParserToDataclassMapper):

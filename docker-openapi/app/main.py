@@ -16,6 +16,8 @@ import logging
 import os
 import re
 import shutil
+import subprocess
+import tempfile
 import time
 import uuid
 import zipfile
@@ -28,7 +30,7 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 import uvicorn
-from fastapi import APIRouter, FastAPI, Header, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
@@ -49,6 +51,22 @@ MACHINE_TYPE = os.environ.get("ELB_MACHINE_TYPE", "Standard_E16s_v5")
 NUM_NODES = int(os.environ.get("ELB_NUM_NODES", "3"))
 CONTROL_PLANE_URL = os.environ.get("CONTROL_PLANE_URL", "")  # optional webhook
 INTERNAL_TOKEN = os.environ.get("ELB_OPENAPI_INTERNAL_TOKEN", "").strip()
+# API gating token. When set, all mutating / data-egress endpoints require
+# the header ``X-ELB-API-Token: <value>``. When empty, the service requires
+# ``ELB_OPENAPI_ALLOW_UNAUTHENTICATED=1`` to start — fail-closed by default
+# so a misconfigured deployment cannot accidentally expose unauthenticated
+# job submission, deletion, or result download.
+API_TOKEN = os.environ.get("ELB_OPENAPI_API_TOKEN", "").strip()
+ALLOW_UNAUTHENTICATED = os.environ.get("ELB_OPENAPI_ALLOW_UNAUTHENTICATED", "").strip().lower() in {"1", "true", "yes"}
+if not API_TOKEN and not ALLOW_UNAUTHENTICATED:
+    # We log instead of raising at import time so the pod can still expose
+    # /healthz for readiness probes — but auth-gated endpoints will reject
+    # all requests until configured. See ``require_api_token`` below.
+    logger.error(
+        "ELB_OPENAPI_API_TOKEN is not configured and "
+        "ELB_OPENAPI_ALLOW_UNAUTHENTICATED is not set. All authenticated "
+        "endpoints will return 503 until one of these env vars is provided."
+    )
 VERSION = "3.3.0"
 
 MAX_ACTIVE_SUBMISSIONS = max(1, int(os.environ.get("ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS", "1")))
@@ -187,23 +205,68 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(SecurityHeadersMiddleware)
 
-# CORS — Control Plane SPA origin. CONTROL_PLANE_URL takes priority;
-# fall back to wildcard only in development. Production deployments should
-# always set CONTROL_PLANE_URL.
-_cors_origins: list[str] = ["*"]
+# CORS — Control Plane SPA origin. Fail-closed: only the configured origin
+# is allowed. A wildcard CORS policy combined with the API-token auth model
+# would let a hostile site read API responses on behalf of any logged-in
+# operator, so we never default to ``*``.
+_cors_origins: list[str] = []
 if CONTROL_PLANE_URL:
     from urllib.parse import urlparse
     _parsed = urlparse(CONTROL_PLANE_URL)
     _origin = f"{_parsed.scheme}://{_parsed.netloc}"
     _cors_origins = [_origin]
+elif ALLOW_UNAUTHENTICATED:
+    # Local development opt-in only.
+    logger.warning(
+        "CONTROL_PLANE_URL is unset; CORS defaults to '*' because "
+        "ELB_OPENAPI_ALLOW_UNAUTHENTICATED=1 (development mode)."
+    )
+    _cors_origins = ["*"]
+else:
+    logger.warning(
+        "CONTROL_PLANE_URL is unset; CORS will reject all cross-origin "
+        "requests. Set CONTROL_PLANE_URL to enable the Control Plane SPA."
+    )
 
 from starlette.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_headers=["Content-Type", "Authorization", "X-ELB-API-Token", "X-ELB-Internal-Token"],
 )
+
+
+# ── Authentication ─────────────────────────────────────────────────────────
+def require_api_token(
+    x_elb_api_token: Optional[str] = Header(None, alias="X-ELB-API-Token"),
+) -> None:
+    """FastAPI dependency: require ``X-ELB-API-Token`` on protected endpoints.
+
+    Behaviour matrix
+    ----------------
+    * ``ELB_OPENAPI_API_TOKEN`` set (recommended) → request must carry a
+      matching token. Comparison uses :func:`hmac.compare_digest` to avoid
+      timing leaks.
+    * ``ELB_OPENAPI_API_TOKEN`` unset and
+      ``ELB_OPENAPI_ALLOW_UNAUTHENTICATED=1`` → access is granted (local
+      development only). A warning is logged on startup.
+    * Otherwise (the default) → return ``503 Service Unavailable`` so the
+      operator notices the missing configuration instead of silently
+      exposing the API.
+    """
+    if API_TOKEN:
+        if not x_elb_api_token or not hmac.compare_digest(x_elb_api_token, API_TOKEN):
+            raise HTTPException(401, "missing or invalid X-ELB-API-Token")
+        return
+    if ALLOW_UNAUTHENTICATED:
+        return
+    raise HTTPException(
+        503,
+        "API authentication is not configured. Set ELB_OPENAPI_API_TOKEN or, "
+        "for local development, ELB_OPENAPI_ALLOW_UNAUTHENTICATED=1.",
+    )
+
 
 # ── ConfigMap-based job storage ────────────────────────────────────────────
 
@@ -323,7 +386,11 @@ def _db_version_detail(db_name: str) -> dict[str, str]:
         return {"version": version, "source": env_key if os.environ.get(env_key) else "ELB_DB_VERSION"}
     safe_db = re.sub(r"[^A-Za-z0-9._-]", "", db_name)
     if safe_db:
-        local_path = f"/tmp/{safe_db}-metadata.json"
+        # Use a per-call unique tmp path: concurrent /v1/jobs/{id}/status
+        # polls for jobs sharing the same db name would otherwise race on
+        # the same fixed file (the metadata file is downloaded fresh each
+        # call so there is no cache benefit to a stable name).
+        local_path = f"/tmp/{safe_db}-metadata-{uuid.uuid4().hex}.json"
         metadata_url = f"{_blob_base()}/blast-db/{safe_db}/{safe_db}-nucl-metadata.json"
         try:
             _azcopy_login()
@@ -366,7 +433,9 @@ def _blast_version_from_result(job_info: dict[str, Any]) -> dict[str, str]:
     first = files[0]
     filename = _safe_result_filename(str(first.get("filename", "")))
     blob_path = _safe_result_blob_path(str(first.get("blob_path", "")), filename)
-    local_path = f"/tmp/{job_info.get('job_id', 'job')}-{filename}"
+    # Per-call unique tmp file to avoid concurrent-poll races where two
+    # threads download into the same path.
+    local_path = f"/tmp/{job_info.get('job_id', 'job')}-{uuid.uuid4().hex}-{filename}"
     try:
         _azcopy_login()
         _cleanup_tmp(local_path)
@@ -406,13 +475,6 @@ def _save_job_cm(job_id: str, data: dict[str, Any]) -> bool:
     data = _ensure_job_defaults(job_id, dict(data))
     payload = json.dumps(data, default=str)
     try:
-        # Try patch first (update)
-        safe_exec([
-            "kubectl", "create", "configmap", cm_name,
-            f"--from-literal=data={payload}",
-            "--dry-run=client", "-o", "json",
-        ], timeout=5)
-        # Apply with labels
         labels = {
             "elb-job": "true",
             "job-id": job_id,
@@ -425,7 +487,9 @@ def _save_job_cm(job_id: str, data: dict[str, Any]) -> bool:
             "data": {"job": payload},
         }
         proc_input = json.dumps(manifest)
-        import subprocess
+        # subprocess is hoisted to module-level imports; calling kubectl
+        # apply with stdin avoids leaving the manifest on disk and the
+        # earlier dry-run-validate pass was unused output.
         subprocess.run(
             ["kubectl", "apply", "-f", "-"],
             input=proc_input, capture_output=True, text=True, timeout=10, check=True,
@@ -439,7 +503,7 @@ def _load_all_jobs_cm() -> dict[str, dict[str, Any]]:
     """Load all job ConfigMaps from K8s."""
     jobs: dict[str, dict[str, Any]] = {}
     try:
-        proc = safe_exec(f"kubectl get configmap -l {_CM_LABEL} -o json", timeout=10)
+        proc = safe_exec(["kubectl", "get", "configmap", "-l", _CM_LABEL, "-o", "json"], timeout=10)
         data = json.loads(proc.stdout)
         for item in data.get("items", []):
             job_data = item.get("data", {}).get("job", "{}")
@@ -453,7 +517,7 @@ def _load_all_jobs_cm() -> dict[str, dict[str, Any]]:
 def _load_job_cm(job_id: str) -> dict[str, Any] | None:
     """Load a single job ConfigMap."""
     try:
-        proc = safe_exec(f"kubectl get configmap {_cm_name(job_id)} -o json", timeout=5)
+        proc = safe_exec(["kubectl", "get", "configmap", _cm_name(job_id), "-o", "json"], timeout=5)
         data = json.loads(proc.stdout)
         return _ensure_job_defaults(job_id, json.loads(data.get("data", {}).get("job", "{}")))
     except Exception:
@@ -461,7 +525,7 @@ def _load_job_cm(job_id: str) -> dict[str, Any] | None:
 
 def _delete_job_cm(job_id: str) -> None:
     try:
-        safe_exec(f"kubectl delete configmap {_cm_name(job_id)}", timeout=10)
+        safe_exec(["kubectl", "delete", "configmap", _cm_name(job_id)], timeout=10)
     except Exception as exc:
         logger.warning("Failed to delete ConfigMap %s: %s", job_id, str(exc)[:200])
 
@@ -647,17 +711,44 @@ def _on_startup() -> None:
 # ── Webhook (optional) ────────────────────────────────────────────────────
 
 def _webhook_notify(job_id: str, data: dict[str, Any]) -> None:
-    """Webhook to Control Plane with exponential backoff (3 attempts). Failure is non-fatal."""
+    """Webhook to Control Plane with exponential backoff (3 attempts). Failure is non-fatal.
+
+    Security:
+    * The destination URL is fixed to ``CONTROL_PLANE_URL`` from the
+      operator-controlled environment. We additionally **enforce HTTPS**
+      (HTTP is only permitted for ``localhost`` / ``127.0.0.1`` to keep
+      local-dev ergonomic) so that intermediate networks cannot tamper
+      with or read the event stream.
+    * If ``ELB_OPENAPI_INTERNAL_TOKEN`` is configured it is sent as
+      ``Authorization: Bearer <token>`` so the Control Plane can
+      authenticate inbound webhooks (defence in depth — Control Plane
+      should still verify on its side).
+    """
     if not CONTROL_PLANE_URL:
         return
     import time
+    from urllib.parse import urlparse
+    parsed = urlparse(CONTROL_PLANE_URL)
+    is_local = parsed.hostname in ("localhost", "127.0.0.1", "::1")
+    if parsed.scheme != "https" and not is_local:
+        # Refuse to send job state to a non-TLS remote endpoint to avoid
+        # credential / job-id disclosure on the wire. This is a hard
+        # configuration error; surface it loudly but stay non-fatal.
+        logger.error(
+            "Webhook suppressed for job %s: CONTROL_PLANE_URL must use https "
+            "(got scheme=%r).", job_id, parsed.scheme,
+        )
+        return
     body = json.dumps({"job_id": job_id, **data}).encode()
+    headers = {"Content-Type": "application/json"}
+    if INTERNAL_TOKEN:
+        headers["Authorization"] = f"Bearer {INTERNAL_TOKEN}"
     for attempt in range(3):
         try:
             import urllib.request
             req = urllib.request.Request(
                 f"{CONTROL_PLANE_URL}/api/blast/register-external-job",
-                data=body, headers={"Content-Type": "application/json"},
+                data=body, headers=headers,
                 method="POST",
             )
             urllib.request.urlopen(req, timeout=5)
@@ -699,6 +790,14 @@ def _validate_blob_url(url: str, field: str) -> None:
     parsed = urlparse(url)
     if parsed.query or parsed.fragment:
         raise ValueError(f"{field} must not include query strings, fragments, or SAS tokens")
+    # Defence-in-depth: reject path traversal segments even though Azure
+    # would refuse the request anyway. Blocks `https://x.blob.core.windows.net/c/../../etc/passwd`
+    # before the credential is ever attached, and prevents log entries
+    # for those URLs from misleading operators.
+    path_parts = (parsed.path or "").split("/")
+    if any(p in {"", ".", ".."} for p in path_parts[3:]):
+        # path_parts[0]='' (leading /), [1]=container, [2:]=blob name segments
+        raise ValueError(f"{field} contains path traversal or empty segments")
 
 
 def _validate_short_blob_name(value: str, field: str) -> None:
@@ -713,6 +812,33 @@ def _sanitize_job_id(job_id: str) -> str:
 
 def _blob_base() -> str:
     return f"https://{STORAGE_ACCOUNT}.blob.core.windows.net"
+
+_CONFIG_SECRET_PARTS = (
+    "key", "secret", "token", "password", "passwd", "pwd",
+    "credential", "sas", "signature", "sig",
+    "connection_string", "connectionstring",
+)
+
+
+def _redact_config(cfg: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+    """Mask any value whose key looks like a secret, in case the deployment
+    accidentally ships a stale ``elb-cfg.ini`` containing a storage account
+    key, SAS token, or other credential. The endpoint is auth-gated, but
+    operators may still legitimately copy the response into chat or tickets,
+    so leaking secrets through this surface is unacceptable.
+    """
+    redacted: dict[str, dict[str, str]] = {}
+    for section, items in cfg.items():
+        out: dict[str, str] = {}
+        for k, v in items.items():
+            lower_k = k.lower()
+            if any(part in lower_k for part in _CONFIG_SECRET_PARTS):
+                out[k] = "***REDACTED***"
+            else:
+                out[k] = v
+        redacted[section] = out
+    return redacted
+
 
 def _resolve_config() -> dict[str, dict[str, str]]:
     config = configparser.ConfigParser()
@@ -743,8 +869,11 @@ def _cleanup_tmp(*paths: str) -> None:
 # ROUTES
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Versioned router — all business endpoints live under /v1
-v1 = APIRouter(prefix="/v1")
+# Versioned router — all business endpoints live under /v1.
+# Authentication is enforced at the router level so every current and future
+# endpoint inherits the same access policy. Truly public probes (e.g.
+# ``/healthz`` on the root app) bypass this dependency by design.
+v1 = APIRouter(prefix="/v1", dependencies=[Depends(require_api_token)])
 
 # ── Root redirect ──────────────────────────────────────────────────────────
 
@@ -794,8 +923,12 @@ async def health():
 
 @v1.get("/config", tags=["System"], summary="Active configuration")
 async def get_config():
-    """Get the effective ElasticBLAST configuration. Environment variables override INI defaults."""
-    return JSONResponse(content=_resolve_config())
+    """Get the effective ElasticBLAST configuration. Environment variables override INI defaults.
+
+    Secret-looking values (keys, tokens, SAS, connection strings) are
+    redacted so accidental leaks via this endpoint are impossible.
+    """
+    return JSONResponse(content=_redact_config(_resolve_config()))
 
 # ── Cluster ────────────────────────────────────────────────────────────────
 
@@ -962,7 +1095,10 @@ def _build_external_options(opts: ExternalBlastOptions, taxid: int | None, inclu
     return " ".join(parts)
 
 def _upload_fasta(job_id: str, fasta: str) -> str:
-    local = f"/tmp/query-{job_id}.fa"
+    # job_id is reused across idempotent replays, so two concurrent submits
+    # for the same idempotency_key would race on the same /tmp path. Append
+    # a per-call uuid so each upload has its own staging file.
+    local = f"/tmp/query-{job_id}-{uuid.uuid4().hex}.fa"
     url = f"{_blob_base()}/queries/{job_id}.fa"
     with open(local, "w") as f: f.write(fasta)
     try:
@@ -1002,17 +1138,23 @@ def _ensure_elb_scripts_configmap() -> None:
     except Exception:
         pass
     scripts_dir = files("elastic_blast").joinpath("templates/scripts")
-    if not all((Path(str(scripts_dir)) / name).is_file() for name in required_scripts):
-        missing = sorted(name for name in required_scripts if not (Path(str(scripts_dir)) / name).is_file())
+    scripts_path = Path(str(scripts_dir))
+    if not all((scripts_path / name).is_file() for name in required_scripts):
+        missing = sorted(name for name in required_scripts if not (scripts_path / name).is_file())
         raise RuntimeError(f"Installed ElasticBLAST scripts are incomplete: {missing}")
-    safe_exec(
-        [
-            "sh",
-            "-lc",
-            f"kubectl create configmap elb-scripts --from-file={scripts_dir} "
-            "--dry-run=client -o yaml | kubectl apply -f -",
-        ],
-        timeout=60,
+    # Build the ConfigMap manifest in-process and apply via stdin so we
+    # don't fork a shell. The previous ``sh -lc 'kubectl ... | kubectl ...'``
+    # pattern was vulnerable to a path-with-spaces in ``scripts_dir`` and
+    # added a shell parsing layer to the trusted-input chain.
+    dry_run = subprocess.run(
+        ["kubectl", "create", "configmap", "elb-scripts",
+         f"--from-file={scripts_path}",
+         "--dry-run=client", "-o", "yaml"],
+        capture_output=True, text=True, timeout=30, check=True,
+    )
+    subprocess.run(
+        ["kubectl", "apply", "-f", "-"],
+        input=dry_run.stdout, capture_output=True, text=True, timeout=60, check=True,
     )
 
 
@@ -1656,8 +1798,8 @@ async def download_results(job_id: str):
     results_url = job_info.get("results","")
     if not results_url: raise HTTPException(404, "No results URL")
 
-    work_dir = f"/tmp/results-{job_id}"
-    zip_path = f"/tmp/results-{job_id}.zip"
+    work_dir = f"/tmp/results-{job_id}-{uuid.uuid4().hex}"
+    zip_path = f"/tmp/results-{job_id}-{uuid.uuid4().hex}.zip"
     try:
         os.makedirs(work_dir, exist_ok=True)
         _azcopy_login()
@@ -1676,7 +1818,11 @@ async def download_results(job_id: str):
 
 # ── External ElasticBLAST API facade ───────────────────────────────────────
 
-external_v1 = APIRouter(prefix="/api/v1/elastic-blast", tags=["External ElasticBLAST"])
+external_v1 = APIRouter(
+    prefix="/api/v1/elastic-blast",
+    tags=["External ElasticBLAST"],
+    dependencies=[Depends(require_api_token)],
+)
 
 
 @external_v1.post("/submit", status_code=202, summary="Submit an external ElasticBLAST job")
@@ -1731,7 +1877,7 @@ async def external_download_file(job_id: str, file_id: str):
     results_url = str(job_info.get("results", "")).rstrip("/")
     if not results_url:
         raise HTTPException(404, "No results URL")
-    work_dir = f"/tmp/external-results-{job_id}-{file_id}"
+    work_dir = f"/tmp/external-results-{job_id}-{file_id}-{uuid.uuid4().hex}"
     local_path = os.path.join(work_dir, filename)
     try:
         os.makedirs(work_dir, exist_ok=True)
@@ -1757,4 +1903,18 @@ app.include_router(external_v1)
 
 # ── Entrypoint ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    uvicorn.run(f"{Path(__file__).stem}:app", host="0.0.0.0", port=8000, reload=True)
+    # ``reload=True`` is a development-only convenience that re-imports the
+    # module on every file change. It must never be enabled in production
+    # because the autoreloader (a) keeps a parent process holding stale state
+    # and (b) widens the attack surface by re-executing arbitrary files. Gate
+    # it on an explicit env opt-in so a misconfigured image cannot ship with
+    # reload enabled.
+    _dev_reload = os.environ.get("ELB_OPENAPI_DEV_RELOAD", "").strip().lower() in {"1", "true", "yes"}
+    _bind_host = os.environ.get("ELB_OPENAPI_BIND_HOST", "0.0.0.0").strip() or "0.0.0.0"
+    _bind_port = int(os.environ.get("ELB_OPENAPI_BIND_PORT", "8000"))
+    uvicorn.run(
+        f"{Path(__file__).stem}:app",
+        host=_bind_host,
+        port=_bind_port,
+        reload=_dev_reload,
+    )

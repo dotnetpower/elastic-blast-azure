@@ -47,10 +47,13 @@ RUN apk -U upgrade && \
     apk add --no-cache bash gettext curl unzip jq python3 gcompat libstdc++ && \
     rm -rf /var/cache/apk/*
 
-# Install kubectl
-RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && \
-    chmod +x kubectl && \
-    mv kubectl /usr/local/bin/
+# Install kubectl (pinned version — using ``stable.txt`` makes builds
+# non-deterministic and trusts whatever upstream publishes today, which
+# is a soft supply-chain risk. Bump intentionally when needed.)
+ARG KUBECTL_VERSION=v1.31.4
+RUN curl -fsSL -o /usr/local/bin/kubectl \
+        "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && \
+    chmod +x /usr/local/bin/kubectl
 
 # Install azcopy
 RUN curl -L -o azcopy_v10.tar.gz https://aka.ms/downloadazcopy-v10-linux && \

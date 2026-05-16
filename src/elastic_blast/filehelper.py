@@ -59,10 +59,23 @@ from .constants import ELB_QUERY_BATCH_FILE_PREFIX, ELB_HTTP_PREFIX
 from .constants import ELB_DFLT_FSIZE_FOR_TESTING
 
 def _azure_url_with_auth(url: str, sas_token: Optional[str] = None) -> str:
-    """Build Azure URL with SAS token if available, otherwise return bare URL
-    for use with AZCOPY_AUTO_LOGIN_TYPE=AZCLI or DefaultAzureCredential."""
+    """Return Azure Blob URL for azcopy.
+
+    Security note: ElasticBLAST-Azure mandates Managed Identity / Workload
+    Identity for blob authentication (see copilot-instructions.md). SAS tokens
+    are intentionally NOT appended to URLs because they would be exposed via
+    the process command line (`ps`, `/proc/<pid>/cmdline`) and any callers
+    that log the resulting command. The ``sas_token`` parameter is kept for
+    backward compatibility with older callers but is ignored; a deprecation
+    warning is emitted if a non-empty token is supplied so the dead code path
+    can be located and removed.
+    """
     if sas_token:
-        return f'{url}?{sas_token}'
+        logging.warning(
+            'Ignoring supplied Azure SAS token: ElasticBLAST-Azure uses '
+            'Managed Identity (azcopy login --identity / AZCOPY_AUTO_LOGIN_TYPE=AZCLI). '
+            'Remove SAS plumbing from the caller.'
+        )
     return url
 
 
@@ -114,9 +127,9 @@ def upload_file_to_gcs(filename: str, gcs_location: str, dry_run: bool = False) 
 def upload_file_to_azure(filename: str, azure_location: str, dry_run: bool = False, sas_token: Optional[str] = None) -> None:
     """ Function to copy the filename provided to Azure Blob Storage """
     dest = _azure_url_with_auth(azure_location, sas_token)
-    cmd = f'azcopy cp {filename} {dest}'
+    cmd = ['azcopy', 'cp', filename, dest]
     if dry_run:
-        logging.info(cmd)
+        logging.info(' '.join(cmd))
     else:
         safe_exec(cmd)
 
@@ -143,9 +156,9 @@ def copy_to_bucket(dry_run: bool = False, sas_token: Optional[str] = None):
         if bucket_key.startswith(ELB_AZURE_PREFIX):
             bucket_dir = bucket_key + ('/' if bucket_key[-1] != '/' else '')
             dest = _azure_url_with_auth(bucket_dir, sas_token)
-            cmd = f'azcopy cp {tempdir}/* {dest} --recursive=true'
+            cmd = ['azcopy', 'cp', f'{tempdir}/*', dest, '--recursive=true']
             if dry_run:
-                logging.info(cmd)
+                logging.info(' '.join(cmd))
             else:
                 safe_exec(cmd)
         elif bucket_key.startswith(ELB_GCS_PREFIX):
@@ -278,12 +291,8 @@ def open_for_write_immediate(fname, sas_token: Optional[str] = None):
     
     # TODO: need to test this function
     if fname.startswith(ELB_AZURE_PREFIX):
+        # Buffer in memory then upload with azcopy (Managed Identity).
         temp_file = NamedTemporaryFile(delete=False, mode='w', encoding='utf-8')
-        
-        # proc = subprocess.Popen(['azcopy', 'cp', temp_file.name, f'{fname}?{sas_token}'],
-        #                         stdin=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        #                         universal_newlines=True)
-        # f = proc.stdin
         f = io.TextIOWrapper(buffer=io.BytesIO(), encoding='utf-8')
     elif fname.startswith(ELB_GCS_PREFIX):
         proc = subprocess.Popen(['gsutil', 'cp', '-', fname],
@@ -441,15 +450,14 @@ def check_for_read(fname: str, dry_run : bool = False, print_file_size: bool = F
         return
     if fname.startswith(ELB_AZURE_PREFIX):
         if dry_run:
-            logging.info(f'Open Azure file {fname}?{sas_token}')
+            # Never log the SAS token. Authentication is performed out-of-band
+            # via Managed Identity / azcopy login --identity.
+            logging.info(f'Open Azure file {fname}')
             return
         try:
-            # req = urllib.request.Request(f'{fname}?{sas_token}', method='HEAD')
-            # obj = urllib.request.urlopen(req)
-            # fsize = int(obj.headers['Content-Length'])
             get_length(fname=fname, dry_run=dry_run, gcp_prj=gcp_prj, sas_token=sas_token)
             return
-        except Exception as e:
+        except Exception:
             raise FileNotFoundError(2, f'Length is not available for {fname}')
         
         
@@ -517,23 +525,22 @@ def get_length(fname: str, dry_run: bool = False, gcp_prj: str | None = None, sa
         if dry_run:
             logging.info(f'Check length of URL {fname}')
             return ELB_DFLT_FSIZE_FOR_TESTING
-        # req = urllib.request.Request(f'{fname}?{sas_token}', method='HEAD')
+        temp_file = NamedTemporaryFile(delete=False, mode='wb')
+        temp_file.close()
         try:
-            # obj = urllib.request.urlopen(req)
-            # return int(obj.headers['Content-Length'])
-            temp_file = NamedTemporaryFile(delete=False, mode='wb')
-            temp_file.close()
             src = _azure_url_with_auth(fname, sas_token)
-            cmd = f'azcopy cp {src} {temp_file.name}'
-            safe_exec(cmd.split(' '))
-            file_size = os.path.getsize(temp_file.name)
-            
-            return file_size
-            
-        except Exception as e:
+            # Pass argv as a list to avoid shell interpretation. azcopy uses
+            # Managed Identity / AZCLI auth from the environment, so no
+            # credential ever appears on the command line.
+            safe_exec(['azcopy', 'cp', src, temp_file.name])
+            return os.path.getsize(temp_file.name)
+        except Exception:
             raise FileNotFoundError(2, f'Length is not available for {fname}')
         finally:
-            os.unlink(temp_file.name)
+            try:
+                os.unlink(temp_file.name)
+            except OSError:
+                pass
         
     if fname.startswith(ELB_GCS_PREFIX):
         prj = f'-u {gcp_prj}' if gcp_prj else ''

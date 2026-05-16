@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextvars
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -140,14 +141,24 @@ class SubmissionGate:
             return self._waiters
 
     def acquire(self, timeout: Optional[float] = None) -> bool:
-        """Try to acquire a slot. Returns False if the queue is overloaded."""
+        """Try to acquire a slot. Returns False if the queue is overloaded.
+
+        The waiter accounting is intentionally optimistic-and-correct:
+        ``_waiters`` is incremented under the lock for the rejection check,
+        then released in the ``finally`` block. The semaphore itself is the
+        real concurrency bound; the waiter counter is only used to fail-fast
+        when the queue is full so callers can apply jittered retry instead
+        of blocking forever on the semaphore.
+        """
         with self._waiters_lock:
             if self._waiters >= self._max_concurrent + self._queue_size:
                 return False
             self._waiters += 1
+        acquired = False
         try:
-            return self._sem.acquire(timeout=timeout) if timeout is not None \
+            acquired = self._sem.acquire(timeout=timeout) if timeout is not None \
                 else self._sem.acquire()
+            return acquired
         finally:
             with self._waiters_lock:
                 self._waiters -= 1
@@ -418,7 +429,11 @@ def _count_active_submissions_on_cluster(cfg: ElasticBlastConfig) -> int:
     ]
     try:
         out = handle_error(safe_exec(cmd).stdout)
-    except SafeExecError:
+    except SafeExecError as e:
+        # Distinguish "query failed" from "no jobs" so a flaky kubectl does
+        # not silently inflate available capacity. Log at WARNING so it
+        # surfaces in operator dashboards.
+        logging.warning(f'_count_active_submissions_on_cluster: kubectl failed ({e}); reporting 0')
         return 0
     seen = set()
     for line in out.splitlines():
@@ -495,6 +510,41 @@ def health_check() -> HealthReport:
 # Submission API
 # ---------------------------------------------------------------------------
 
+_IDEMPOTENCY_KEY_RE = re.compile(
+    r'^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$')
+_IDEMPOTENCY_KEY_MAX = 63
+
+
+def _validate_idempotency_key(key: str) -> None:
+    """Reject idempotency keys that would later be rejected by Kubernetes.
+
+    elb_job_id is propagated into K8s label values (elb-job-id=<key>) and
+    Job-name suffixes — both must be DNS-1123 safe. We enforce the strict
+    DNS-1123 rule (start/end alphanumeric, body alphanumeric / `.` / `_` /
+    `-`, length 1–63) at the API boundary instead of surfacing a confusing
+    kubectl error 30 seconds later. The regex matches the one in
+    ``azure_cli_glue.validate_idempotency_key`` so CLI and HTTP callers
+    accept exactly the same set of keys.
+    """
+    if not isinstance(key, str) or not key:
+        raise AzureApiError(
+            ErrorCategory.INVALID,
+            'idempotency_key is required and must be a non-empty string',
+        )
+    if len(key) > _IDEMPOTENCY_KEY_MAX:
+        raise AzureApiError(
+            ErrorCategory.INVALID,
+            f'idempotency_key too long ({len(key)} > {_IDEMPOTENCY_KEY_MAX})',
+        )
+    if not _IDEMPOTENCY_KEY_RE.match(key):
+        raise AzureApiError(
+            ErrorCategory.INVALID,
+            'idempotency_key must match DNS-1123 (alphanumeric, `-`, `_`, `.`; '
+            'must start and end with alphanumeric)',
+            details={'idempotency_key': repr(key)[:120]},
+        )
+
+
 def submit_search(cfg: ElasticBlastConfig, *,
                   query_batches=None,
                   query_length: int = 0,
@@ -515,6 +565,7 @@ def submit_search(cfg: ElasticBlastConfig, *,
     """
     install_correlation_log_filter()
     if idempotency_key:
+        _validate_idempotency_key(idempotency_key)
         cfg.azure.elb_job_id = idempotency_key
 
     correlation_id = cfg.azure.elb_job_id
@@ -631,13 +682,14 @@ def delete_search(cfg: ElasticBlastConfig, *, force: bool = False) -> Dict[str, 
     """
     correlation_id = cfg.azure.elb_job_id
     with correlation_scope(correlation_id):
-        from .azure import (delete_cluster_with_cleanup,
-                            ElasticBlastAzure)
-        elb = ElasticBlastAzure(cfg, create=False)
+        from .azure import (cleanup_jobs_only, delete_cluster_with_cleanup)
         try:
             if cfg.cluster.reuse:
                 # Reuse mode keeps the cluster — only clean up jobs.
-                elb._cleanup_jobs_only()
+                # Use the public ``cleanup_jobs_only`` helper instead of
+                # poking at a private ``ElasticBlastAzure._cleanup_jobs_only``
+                # method through the front door.
+                cleanup_jobs_only(cfg)
             else:
                 delete_cluster_with_cleanup(cfg, force=force)
         except Exception as e:  # noqa: BLE001

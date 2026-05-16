@@ -30,7 +30,6 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
-import re
 import sys
 from contextlib import contextmanager
 from enum import Enum
@@ -52,29 +51,19 @@ LOGGER = logging.getLogger(__name__)
 # Job-name suffix. Both must be DNS-1123-safe: lowercase alphanumeric +
 # `-`, start/end alphanumeric, length <= 63. We accept upper case but
 # normalize to lowercase, and reject anything outside the alphabet.
-# The optional middle group lets us accept single-character keys too.
-_IDEMPOTENCY_KEY_RE = re.compile(
-    r'^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$')
-_IDEMPOTENCY_KEY_MAX = 63
+# The actual regex / length check lives in ``azure_api`` so HTTP and CLI
+# callers stay in lockstep — we just add the lowercase normalization here.
 
 
 def validate_idempotency_key(key: str) -> str:
     """Return a normalized DNS-1123-safe idempotency key, or raise.
 
-    The key is lowercased; rejects empty, too-long, or non-alphanumeric/
-    `-`/`_`/`.` content. The exception is `AzureApiError` with category
-    INVALID so the caller can surface a structured 400 response.
+    Delegates the regex / length check to ``azure_api._validate_idempotency_key``
+    so the two surfaces (CLI + HTTP) cannot drift. The exception is
+    `AzureApiError` with category INVALID so the caller can surface a
+    structured 400 response.
     """
-    if not isinstance(key, str) or not key:
-        raise AzureApiError(ErrorCategory.INVALID,
-            'idempotency_key is required and must be a non-empty string')
-    if len(key) > _IDEMPOTENCY_KEY_MAX:
-        raise AzureApiError(ErrorCategory.INVALID,
-            f'idempotency_key too long ({len(key)} > {_IDEMPOTENCY_KEY_MAX})')
-    if not _IDEMPOTENCY_KEY_RE.match(key):
-        raise AzureApiError(ErrorCategory.INVALID,
-            'idempotency_key must match DNS-1123 (alphanumeric, `-`, `_`, `.`; '
-            'must start and end with alphanumeric)')
+    azure_api._validate_idempotency_key(key)
     return key.lower()
 
 # Map ErrorCategory -> CLI exit code

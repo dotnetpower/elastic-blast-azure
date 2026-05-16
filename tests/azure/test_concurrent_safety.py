@@ -277,14 +277,23 @@ def test_cleanup_stale_jobs_filters_by_elb_job_id():
     """_cleanup_stale_jobs must include elb-job-id=<id> in the kubectl
     delete selector so it cannot delete other submissions' running jobs."""
     src = pkg_files('elastic_blast').joinpath('azure.py').read_text()
-    # Pull the function body
+    # The wrapper delegates to _delete_jobs_for_apps with the four app
+    # labels. Verify both the wrapper's call AND the helper's selector.
     m = re.search(r'def _cleanup_stale_jobs\(self\)[^\n]*\n(?:\s{4,}.*\n)+', src)
     assert m, '_cleanup_stale_jobs function not found'
     body = m.group(0)
-    assert 'elb-job-id=' in body, (
-        '_cleanup_stale_jobs must filter by elb-job-id label')
-    assert 'app=' in body and ',' in body, (
-        '_cleanup_stale_jobs must combine app=X with elb-job-id selector')
+    assert '_delete_jobs_for_apps' in body, (
+        '_cleanup_stale_jobs must delegate to _delete_jobs_for_apps')
+    assert "'blast'" in body and "'submit'" in body and "'setup'" in body and "'finalizer'" in body, (
+        '_cleanup_stale_jobs must request the four expected app labels')
+
+    helper = re.search(r'def _delete_jobs_for_apps\(self[^\n]*\n(?:\s{4,}.*\n)+', src)
+    assert helper, '_delete_jobs_for_apps helper not found'
+    helper_body = helper.group(0)
+    assert 'elb-job-id=' in helper_body, (
+        '_delete_jobs_for_apps must filter by elb-job-id label')
+    assert 'app=' in helper_body and ',' in helper_body, (
+        '_delete_jobs_for_apps must combine app=X with elb-job-id selector')
 
 
 def test_cleanup_jobs_only_filters_by_elb_job_id():
@@ -292,8 +301,11 @@ def test_cleanup_jobs_only_filters_by_elb_job_id():
     m = re.search(r'def _cleanup_jobs_only\(self\)[^\n]*\n(?:\s{4,}.*\n)+', src)
     assert m, '_cleanup_jobs_only function not found'
     body = m.group(0)
-    assert 'elb-job-id=' in body, (
-        '_cleanup_jobs_only must filter by elb-job-id label')
+    assert '_delete_jobs_for_apps' in body, (
+        '_cleanup_jobs_only must delegate to _delete_jobs_for_apps')
+    assert "'blast'" in body and "'submit'" in body, (
+        '_cleanup_jobs_only must request the blast/submit app labels')
+    # Helper-level selector check is covered by the stale_jobs test above.
 
 
 # ---------------------------------------------------------------------------

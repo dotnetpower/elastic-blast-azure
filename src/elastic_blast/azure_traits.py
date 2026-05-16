@@ -9,8 +9,6 @@ Author: Victor Joukov joukovv@ncbi.nlm.nih.gov
 
 import logging
 import math
-import subprocess
-import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from .base import InstanceProperties
@@ -123,7 +121,21 @@ def azure_blob_exists(blob_url: str) -> bool:
 
 
 def get_latest_dir(storage_account: str, storage_account_container: str, storage_account_key: str = '') -> str:
-    """Get the latest directory from Azure Blob Storage using Managed Identity."""
+    """Best-effort 'most recent folder' lookup. **Deprecated for new code.**
+
+    The implementation walks the container with two passes (``walk_blobs``
+    + ``list_blobs``) and matches blob names against folder names \u2014 a
+    semantic mismatch that returns '' for most real layouts. It is kept
+    only because:
+
+      * existing INI configs may still reference it via ``cfg.azure.get_latest_dir()``
+        and a failure here must not break callers that work with absolute
+        ``https://...`` DB URLs;
+      * tests mock it directly.
+
+    New code should pass a fully-qualified blob URL for the DB and avoid
+    this helper. Returns '' on any failure (best-effort).
+    """
     try:
         client = get_blob_service_client(storage_account)
         container = client.get_container_client(storage_account_container)
@@ -162,26 +174,53 @@ def get_machine_properties(machineType: str) -> InstanceProperties:
     return InstanceProperties(ncpu, nram)
 
 def get_instance_type_offerings(region: str) -> List[Dict[str, Any]]:
-    """Get a list of instance types offered in an Azure region"""
+    """Return VM sizes offered in an Azure region that meet minimum specs.
+
+    Uses the Compute SDK (``virtual_machine_sizes.list``) instead of
+    shelling out to ``az vm list-sizes`` so the function works in
+    environments where the Azure CLI is not installed (e.g. minimal
+    container images that only carry the Python SDKs). The return shape
+    matches what the legacy ``az`` JSON output produced \u2014 each item is a
+    ``dict`` with ``name``, ``numberOfCores``, ``memoryInMB``,
+    ``maxDataDiskCount``, ``osDiskSizeInMB``, ``resourceDiskSizeInMB`` \u2014
+    so existing tuner consumers do not need to change.
+    """
     try:
-        jmespath_query = f'[?numberOfCores >= `{MIN_PROCESSORS}` && memoryInMB >= `{MIN_MEMORY*1024}`]'
-        result = subprocess.run(
-            ['az', 'vm', 'list-sizes', '--location', region,
-             '--query', jmespath_query, '-o', 'json'],
-            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        from .azure import _get_clients  # local import to avoid cycle at module load
+        clients = _get_clients()
+        sizes = list(clients.compute.virtual_machine_sizes.list(location=region))
+    except Exception as e:  # noqa: BLE001
+        logging.error(f'Error getting instance types in region {region}: {e}')
+        raise UserReportError(
+            returncode=DEPENDENCY_ERROR,
+            message=f'Error getting instance types in region {region}: {e}',
+        ) from e
+
+    min_memory_mb = MIN_MEMORY * 1024
+    offerings: List[Dict[str, Any]] = []
+    for s in sizes:
+        ncpu = int(getattr(s, 'number_of_cores', 0) or 0)
+        nmem = int(getattr(s, 'memory_in_mb', 0) or 0)
+        if ncpu < MIN_PROCESSORS or nmem < min_memory_mb:
+            continue
+        offerings.append({
+            'name': getattr(s, 'name', ''),
+            'numberOfCores': ncpu,
+            'memoryInMB': nmem,
+            'maxDataDiskCount': int(getattr(s, 'max_data_disk_count', 0) or 0),
+            'osDiskSizeInMB': int(getattr(s, 'os_disk_size_in_mb', 0) or 0),
+            'resourceDiskSizeInMB': int(getattr(s, 'resource_disk_size_in_mb', 0) or 0),
+        })
+
+    if not offerings:
+        raise UserReportError(
+            returncode=DEPENDENCY_ERROR,
+            message=(
+                f"No VM sizes in region '{region}' meet the minimum requirements "
+                f"({MIN_PROCESSORS} vCPU / {MIN_MEMORY} GB RAM). Try a different region."
+            ),
         )
-        
-        vm_list = json.loads(result.stdout)
-        
-        if not vm_list:
-            raise ValueError(f"VM size '{vm_list}' not found in location '{region}'")
-        
-        # return [vm['name'] for vm in vm_list]
-        return vm_list
-        
-    except subprocess.CalledProcessError as e:
-        logging.error(f'Error getting instance types in region {region}: {e.stderr}')
-        raise UserReportError(returncode=DEPENDENCY_ERROR, message=f'Error getting instance types in region {region}')
+    return offerings
 
 
 # ---------------------------------------------------------------------------
@@ -247,11 +286,14 @@ class CostEstimate:
     vm_type: str
     num_nodes: int
     is_spot: bool
+    pricing_source: str = 'catalog'  # 'catalog' (known VM) or 'fallback' (unknown VM, $2/hr guess)
 
     def __str__(self) -> str:
         spot_label = ' (Spot)' if self.is_spot else ''
+        src_label = '' if self.pricing_source == 'catalog' \
+            else f' [pricing fallback: {self.pricing_source}]'
         return (
-            f'Cost Estimate{spot_label}:\n'
+            f'Cost Estimate{spot_label}{src_label}:\n'
             f'  VM: {self.vm_type} x {self.num_nodes} nodes\n'
             f'  Compute: ${self.compute_per_hour:.2f}/hr x {self.estimated_hours:.1f}hr = ${self.total_compute:.2f}\n'
             f'  Storage: ${self.storage_cost:.2f}\n'
@@ -265,9 +307,17 @@ def estimate_cost(machine_type: str, num_nodes: int,
                   use_spot: bool = False) -> CostEstimate:
     """Estimate Azure cost for an ElasticBLAST search."""
     hourly_rate = AZURE_VM_HOURLY_PRICES.get(machine_type)
+    pricing_source = 'catalog'
     if hourly_rate is None:
-        logging.warning(f'No pricing data for {machine_type}, using $2.00/hr estimate')
+        # Surface the missing VM in the result so callers (and the report
+        # generator) can flag the estimate as unreliable instead of treating
+        # it as authoritative. Common cause: typo in the VM size name.
+        logging.warning(
+            f'No pricing data for {machine_type!r}, using $2.00/hr fallback. '
+            f'Add the VM to AZURE_VM_HOURLY_PRICES for an accurate estimate.'
+        )
         hourly_rate = 2.00
+        pricing_source = f'unknown VM {machine_type!r}, $2.00/hr default'
 
     if use_spot:
         hourly_rate *= SPOT_DISCOUNT_FACTOR
@@ -288,6 +338,7 @@ def estimate_cost(machine_type: str, num_nodes: int,
         vm_type=machine_type,
         num_nodes=num_nodes,
         is_spot=use_spot,
+        pricing_source=pricing_source,
     )
 
 

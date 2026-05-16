@@ -66,4 +66,14 @@ RUN wget -O azcopy_v10.tar.gz https://aka.ms/downloadazcopy-v10-linux && \
 # at the deployment env to switch back if needed.
 ENV AZCOPY_AUTO_LOGIN_TYPE=WORKLOAD
 
+# Drop privileges. uvicorn binds 8000 (>1024) so root is not required.
+# /app holds runtime-writable artefacts (logs, tmp ConfigMap dumps), so
+# transfer ownership to the unprivileged uid before switching user.
+RUN groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid 10001 --home-dir /app --no-create-home app \
+    && chown -R app:app /app
+USER app:app
+
+EXPOSE 8000
+
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

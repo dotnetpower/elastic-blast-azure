@@ -1,11 +1,36 @@
 import logging
 import os
+import shlex
 import signal
 import subprocess
 import tempfile
 import time
 from threading import Event
 from typing import Dict, List, Optional, Union
+
+
+# Substring match (case-insensitive) — when found in an env var name the
+# value is replaced with a fixed placeholder before the dict is logged.
+# Defence in depth so a future caller passing storage keys, SAS tokens or
+# bearer tokens via ``env=`` cannot leak them through DEBUG logs.
+_SECRET_ENV_NAME_PARTS = (
+    "key", "secret", "token", "password", "passwd", "pwd",
+    "credential", "sas", "signature", "sig=",
+    "azure_storage", "aws_secret", "aws_session",
+    "connection_string", "connectionstring",
+)
+
+
+def _redact_env_for_log(env: Dict[str, str]) -> Dict[str, str]:
+    """Return a copy of ``env`` with values of secret-looking keys masked."""
+    redacted: Dict[str, str] = {}
+    for key, value in env.items():
+        lower = key.lower()
+        if any(part in lower for part in _SECRET_ENV_NAME_PARTS):
+            redacted[key] = "***REDACTED***"
+        else:
+            redacted[key] = value
+    return redacted
 
 
 def safe_exec(cmd: Union[List[str], str], env: Optional[Dict[str, str]] = None, timeout: Optional[float] = 600) -> subprocess.CompletedProcess:
@@ -19,7 +44,10 @@ def safe_exec(cmd: Union[List[str], str], env: Optional[Dict[str, str]] = None, 
         os.environ and env.
     """
     if isinstance(cmd, str):
-        cmd = cmd.split()
+        # ``shlex.split`` honours quotes and escapes; the previous
+        # ``cmd.split()`` corrupted any argument containing spaces or shell
+        # metacharacters and quietly produced wrong argv.
+        cmd = shlex.split(cmd)
     if not isinstance(cmd, list):
         raise ValueError('safe_exec "cmd" argument must be a list or string')
 
@@ -29,7 +57,7 @@ def safe_exec(cmd: Union[List[str], str], env: Optional[Dict[str, str]] = None, 
     try:
         logging.debug(' '.join(cmd))
         if env:
-            logging.debug(env)
+            logging.debug(_redact_env_for_log(env))
         p = subprocess.run(cmd, check=True, stdout=subprocess.PIPE,
                            stderr=subprocess.PIPE, env=run_env, universal_newlines=True, timeout=timeout)
         
@@ -37,10 +65,10 @@ def safe_exec(cmd: Union[List[str], str], env: Optional[Dict[str, str]] = None, 
         msg = f'The command "{" ".join(e.cmd)}" returned with exit code {e.returncode}\n{handle_error(e.stderr)}\n{handle_error(e.stdout)}'
         if e.output is not None:
             msg = '\n'.join([msg, f'{handle_error(e.output)}'])
-        raise Exception(msg)
+        raise RuntimeError(msg) from e
     except subprocess.TimeoutExpired as e:
         cmd_str = " ".join(e.cmd) if isinstance(e.cmd, list) else str(e.cmd)
-        raise Exception(f'Command timed out after {e.timeout}s: {cmd_str}')
+        raise RuntimeError(f'Command timed out after {e.timeout}s: {cmd_str}') from e
    
     return p
 
@@ -61,7 +89,7 @@ def run_cancellable(
     """
 
     if isinstance(cmd, str):
-        cmd = cmd.split()
+        cmd = shlex.split(cmd)
     if not isinstance(cmd, list):
         raise ValueError('run_cancellable "cmd" argument must be a list or string')
 
@@ -96,7 +124,7 @@ def run_cancellable(
                     pass
                 proc.wait(timeout=10)
             stdout, stderr = _read_outputs()
-            raise Exception(f'{reason}: {" ".join(cmd)}\n{handle_error(stderr)}\n{handle_error(stdout)}')
+            raise RuntimeError(f'{reason}: {" ".join(cmd)}\n{handle_error(stderr)}\n{handle_error(stdout)}')
 
         while True:
             rc = proc.poll()
@@ -107,7 +135,7 @@ def run_cancellable(
                         f'The command "{" ".join(cmd)}" returned with exit code {rc}\n'
                         f'{handle_error(stderr)}\n{handle_error(stdout)}'
                     )
-                    raise Exception(msg)
+                    raise RuntimeError(msg)
                 return subprocess.CompletedProcess(cmd, rc, stdout, stderr)
 
             if stop_event is not None and stop_event.is_set():

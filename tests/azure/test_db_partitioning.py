@@ -298,15 +298,16 @@ class TestInitializeClusterPartitioned:
     @patch('elastic_blast.azure.get_blastdb_info', return_value=('testdb', '', 'testdb'))
     @patch('elastic_blast.azure.get_usage_reporting', return_value=False)
     @patch('elastic_blast.azure.check_cluster', return_value='')
-    @patch('elastic_blast.azure.start_cluster')
+    @patch('elastic_blast.azure.start_cluster_async')
+    @patch('elastic_blast.azure.wait_for_cluster')
     @patch('elastic_blast.azure.set_role_assignment')
     @patch('elastic_blast.kubernetes.enable_service_account')
     @patch('elastic_blast.kubernetes.create_scripts_configmap')
     @patch('elastic_blast.kubernetes.initialize_storage_partitioned')
     def test_creates_cluster_and_inits_partitioned_storage(
-            self, mock_init_part, mock_configmap, mock_sa, mock_role, mock_start,
-            mock_check, mock_usage, mock_dbinfo):
-        """Full cluster creation + partitioned storage init."""
+            self, mock_init_part, mock_configmap, mock_sa, mock_role, mock_wait,
+            mock_start_async, mock_check, mock_usage, mock_dbinfo):
+        """Full cluster creation + partitioned storage init (async path)."""
         cfg = _make_cfg(db_partitions=4, db_partition_prefix=PARTITION_PREFIX)
         elb = ElasticBlastAzure(cfg)
         elb.cloud_job_submission = False
@@ -315,7 +316,8 @@ class TestInitializeClusterPartitioned:
              patch.object(elb, '_label_nodes'):
             elb._initialize_cluster_partitioned(['batch_000.fa'])
 
-        mock_start.assert_called_once()
+        mock_start_async.assert_called_once()
+        mock_wait.assert_called_once()
         mock_sa.assert_called_once()
         mock_configmap.assert_called_once()
         mock_init_part.assert_called_once()
@@ -323,15 +325,16 @@ class TestInitializeClusterPartitioned:
     @patch('elastic_blast.azure.get_blastdb_info', return_value=('testdb', '', 'testdb'))
     @patch('elastic_blast.azure.get_usage_reporting', return_value=False)
     @patch('elastic_blast.azure.check_cluster', return_value=AKS_PROVISIONING_STATE.SUCCEEDED)
-    @patch('elastic_blast.azure.start_cluster')
+    @patch('elastic_blast.azure.start_cluster_async')
+    @patch('elastic_blast.azure.wait_for_cluster')
     @patch('elastic_blast.azure.set_role_assignment')
     @patch('elastic_blast.kubernetes.enable_service_account')
     @patch('elastic_blast.kubernetes.create_scripts_configmap')
     @patch('elastic_blast.kubernetes.initialize_storage_partitioned')
     def test_reuse_skips_cluster_creation(
-            self, mock_init_part, mock_configmap, mock_sa, mock_role, mock_start,
-            mock_check, mock_usage, mock_dbinfo):
-        """In reuse mode with existing cluster, skips start_cluster."""
+            self, mock_init_part, mock_configmap, mock_sa, mock_role, mock_wait,
+            mock_start_async, mock_check, mock_usage, mock_dbinfo):
+        """In reuse mode with existing cluster, skips start_cluster_async."""
         cfg = _make_cfg(db_partitions=4, db_partition_prefix=PARTITION_PREFIX, reuse=True)
         elb = ElasticBlastAzure(cfg)
         elb.cloud_job_submission = False
@@ -340,7 +343,8 @@ class TestInitializeClusterPartitioned:
              patch.object(elb, '_label_nodes'):
             elb._initialize_cluster_partitioned(['batch_000.fa'])
 
-        mock_start.assert_not_called()
+        mock_start_async.assert_not_called()
+        mock_wait.assert_not_called()
         mock_sa.assert_called_once()
         mock_configmap.assert_called_once()
         mock_init_part.assert_called_once()
