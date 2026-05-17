@@ -67,6 +67,47 @@ ORIG_DB=$(echo "${ELB_DB}" | sed 's/_shard_[0-9]*$//')
 DB_URL="${DB_BASE_URL}${ORIG_DB}/"
 echo "DB base URL: ${DB_URL}"
 
+write_volpaths() {
+    local volpaths=""
+    for vol in $VOLUMES; do
+        [ -n "$volpaths" ] && volpaths="$volpaths "
+        volpaths="${volpaths}$(pwd)/${vol}"
+    done
+    echo "VOLPATHS=${volpaths}" > /tmp/shard_volpaths.txt
+    echo "Volume paths: ${volpaths}"
+}
+
+if [ -s .download-complete ]; then
+    missing_volumes=0
+    missing_taxdb=0
+    for vol in $VOLUMES; do
+        if ! find . -maxdepth 1 -name "${vol}.*" | grep -q .; then
+            missing_volumes=1
+            echo "Warm-cache marker found but ${vol} files are missing"
+        fi
+    done
+    for taxdb_file in taxdb.btd taxdb.bti taxonomy4blast.sqlite3; do
+        if [ ! -s "${taxdb_file}" ]; then
+            missing_taxdb=1
+            echo "Warm-cache marker found but ${taxdb_file} is missing"
+        fi
+    done
+    if [ "$missing_volumes" = "0" ] && [ "$missing_taxdb" = "1" ]; then
+        retry_azcopy cp "${DB_URL}*" . \
+            --include-pattern "taxdb.btd;taxdb.bti;taxonomy4blast.sqlite3" \
+            --block-size-mb=256 \
+            --log-level=WARNING || exit 1
+        touch .download-complete
+        write_volpaths
+        exit 0
+    fi
+    if [ "$missing_volumes" = "0" ] && [ "$missing_taxdb" = "0" ]; then
+        echo "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}"
+        write_volpaths
+        exit 0
+    fi
+fi
+
 # Step 3: Download volume files flat using --include-pattern (single azcopy job)
 # Build semicolon-separated include pattern for all volumes + taxonomy files
 PATTERN=""
@@ -74,7 +115,7 @@ for VOL in $VOLUMES; do
     [ -n "$PATTERN" ] && PATTERN="${PATTERN};"
     PATTERN="${PATTERN}${VOL}.*"
 done
-PATTERN="${PATTERN};taxdb.btd;taxdb.bti;${ORIG_DB}.ndb;${ORIG_DB}.ntf;${ORIG_DB}.nto"
+PATTERN="${PATTERN};taxdb.btd;taxdb.bti;taxonomy4blast.sqlite3;${ORIG_DB}.ndb;${ORIG_DB}.ntf;${ORIG_DB}.nto"
 echo "Downloading with pattern: ${PATTERN}"
 
 # Use trailing /* to enable wildcard matching, --flat to prevent subdirectory creation
@@ -88,15 +129,10 @@ log "download-shard-${ELB_SHARD_IDX}" $((end - start))
 
 echo "DB files downloaded: $(ls *.nsq 2>/dev/null | wc -l) .nsq files"
 echo "Total size: $(du -sh . 2>/dev/null | cut -f1)"
+touch .download-complete
 
 # Build volume path string for BLAST -db (space-separated, bypasses .nal)
-VOLPATHS=""
-for VOL in $VOLUMES; do
-    [ -n "$VOLPATHS" ] && VOLPATHS="$VOLPATHS "
-    VOLPATHS="${VOLPATHS}$(pwd)/${VOL}"
-done
-echo "VOLPATHS=${VOLPATHS}" > /tmp/shard_volpaths.txt
-echo "Volume paths: ${VOLPATHS}"
+write_volpaths
 
 # Clean up azcopy processes
 pkill -f azcopy 2>/dev/null || true

@@ -150,7 +150,7 @@ PY
             mkdir -p "$LOCAL_DIR"
             
             # Download .out.gz files from this shard
-            if ! azcopy cp "${SHARD_DIR}/*.out.gz" "$LOCAL_DIR/" --log-level=ERROR 2>/dev/null; then
+            if ! azcopy cp "${SHARD_DIR}/*" "$LOCAL_DIR/" --include-pattern "*.out.gz" --log-level=ERROR 2>/dev/null; then
                 echo "WARNING: no .out.gz files downloaded from shard_${SHARD}"
             fi
             found_files=0

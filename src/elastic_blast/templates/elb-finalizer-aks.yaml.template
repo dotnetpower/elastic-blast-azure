@@ -23,7 +23,7 @@ spec:
           defaultMode: 0755
       containers:
       - name: finalizer
-        image: ${ELB_DOCKER_IMAGE}
+        image: ${ELB_FINALIZER_DOCKER_IMAGE}
         env:
         - name: ELB_RESULTS
           value: "${ELB_RESULTS}"

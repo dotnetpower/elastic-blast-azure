@@ -19,6 +19,7 @@ python3 - "$INPUT_TSV" "$OUTPUT_GZ" "$REPORT_JSON" "$NUM_SHARDS" "$BLAST_PROGRAM
 import copy
 import gzip
 import json
+import re
 import shlex
 import sys
 import xml.etree.ElementTree as ET
@@ -146,6 +147,35 @@ def text_at(element, path, default=""):
     return found.text if found is not None and found.text is not None else default
 
 
+def int_at(element, path):
+    text = text_at(element, path)
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def set_child_text(element, path, value):
+    child = element.find(path)
+    if child is None:
+        child = ET.SubElement(element, path)
+    child.text = str(value)
+
+
+def derive_hsp_len(query_len, db_len, db_num, eff_space):
+    for hsp_len in range(query_len + 1):
+        if (query_len - hsp_len) * (db_len - (db_num * hsp_len)) == eff_space:
+            return hsp_len
+    return None
+
+
+def normalize_sharded_db_name(db_name):
+    stripped = (db_name or "").strip()
+    if not stripped:
+        return stripped
+    return re.sub(r"_shard_\d+$", "", stripped)
+
+
 def hit_rank(hit):
     best_evalue = float("inf")
     best_bitscore = float("-inf")
@@ -199,10 +229,10 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
             iterations_node.clear()
             db_node = base_root.find("BlastOutput_db")
             if db_node is not None:
-                db_node.text = f"merged from {num_shards} shards"
+                db_node.text = normalize_sharded_db_name(db_node.text)
             warnings.append(
-                "BlastOutput metadata is inherited from the first valid shard; "
-                "see merge-report.json for merge provenance"
+                "BlastOutput top-level metadata is normalized from the first valid shard; "
+                "per-query Statistics db length/count are merged across shards"
             )
 
         for iteration in root.findall("./BlastOutput_iterations/Iteration"):
@@ -217,8 +247,26 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
                 if hits_node is None:
                     hits_node = ET.SubElement(template, "Iteration_hits")
                 hits_node.clear()
-                queries[query_id] = {"template": template, "hits": []}
+                queries[query_id] = {
+                    "template": template,
+                    "hits": [],
+                    "db_len": 0,
+                    "db_num": 0,
+                    "eff_spaces": Counter(),
+                    "missing_stats": 0,
+                }
                 query_order.append(query_id)
+            statistics = iteration.find("./Iteration_stat/Statistics")
+            db_len = int_at(statistics, "Statistics_db-len") if statistics is not None else None
+            db_num = int_at(statistics, "Statistics_db-num") if statistics is not None else None
+            eff_space = int_at(statistics, "Statistics_eff-space") if statistics is not None else None
+            if db_len is None or db_num is None:
+                queries[query_id]["missing_stats"] += 1
+            else:
+                queries[query_id]["db_len"] += db_len
+                queries[query_id]["db_num"] += db_num
+            if eff_space is not None:
+                queries[query_id]["eff_spaces"][eff_space] += 1
             for hit in iteration.findall("./Iteration_hits/Hit"):
                 evalue, negative_bitscore, hsp_count = hit_rank(hit)
                 if hsp_count == 0:
@@ -256,6 +304,38 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
             hits_node.append(hit)
             total_output_hits += 1
             total_output_hsps += len(hit.findall("./Hit_hsps/Hsp"))
+
+        statistics = template.find("./Iteration_stat/Statistics")
+        if statistics is None:
+            iteration_stat = template.find("Iteration_stat")
+            if iteration_stat is None:
+                iteration_stat = ET.SubElement(template, "Iteration_stat")
+            statistics = ET.SubElement(iteration_stat, "Statistics")
+        if item["db_len"] and item["db_num"]:
+            set_child_text(statistics, "Statistics_db-len", item["db_len"])
+            set_child_text(statistics, "Statistics_db-num", item["db_num"])
+            if len(item["eff_spaces"]) == 1:
+                eff_space = next(iter(item["eff_spaces"]))
+                set_child_text(statistics, "Statistics_eff-space", eff_space)
+                try:
+                    query_len = int(text_at(template, "Iteration_query-len", "0"))
+                except ValueError:
+                    query_len = 0
+                hsp_len = derive_hsp_len(query_len, item["db_len"], item["db_num"], eff_space)
+                if hsp_len is not None:
+                    set_child_text(statistics, "Statistics_hsp-len", hsp_len)
+                else:
+                    warnings.append(
+                        f"Could not derive merged HSP length for query {query_id}; "
+                        "kept the first shard value"
+                    )
+            elif item["eff_spaces"]:
+                warnings.append(
+                    f"Shard effective search spaces differ for query {query_id}; "
+                    "kept the first shard value"
+                )
+        if item["missing_stats"]:
+            warnings.append(f"Some shard statistics were missing for query {query_id}")
         iterations_node.append(template)
 
     if tie_break_count:

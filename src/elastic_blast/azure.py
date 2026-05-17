@@ -1118,6 +1118,7 @@ class ElasticBlastAzure(ElasticBlast):
 
         subs = {
             'ELB_DOCKER_IMAGE': cfg.azure.elb_docker_image,
+            'ELB_FINALIZER_DOCKER_IMAGE': cfg.azure.cjs_docker_image,
             'ELB_RESULTS': self._results_path(),
             'ELB_AZURE_RESOURCE_GROUP': cfg.azure.resourcegroup,
             'ELB_CLUSTER_NAME': cfg.cluster.name,
