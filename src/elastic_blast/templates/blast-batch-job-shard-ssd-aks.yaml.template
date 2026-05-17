@@ -115,6 +115,11 @@ spec:
           value: "/shared/results"
         command: ["/scripts/results-export-aks.sh"]
       restartPolicy: OnFailure
+      tolerations:
+      - key: workload
+        operator: Equal
+        value: blast
+        effect: NoSchedule
       nodeSelector:
         ordinal: "${ELB_SHARD_IDX}"
   backoffLimit: 3

@@ -50,6 +50,14 @@ spec:
           readOnly: true
         command: ["/scripts/elb-finalizer-aks.sh"]
       restartPolicy: Never
+      tolerations:
+      - key: workload
+        operator: Equal
+        value: blast
+        effect: NoSchedule
+      - key: CriticalAddonsOnly
+        operator: Exists
+        effect: NoSchedule
   # The finalizer writes terminal SUCCESS/FAILURE markers and is NOT
   # safely retryable: a second attempt can observe different cluster state
   # and overwrite a previous attempt's marker. K8s default backoffLimit

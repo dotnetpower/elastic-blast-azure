@@ -89,6 +89,11 @@ spec:
           readOnly: false
         command: ["run.sh", "-i", "${INPUT_QUERY}", "-o", "${ELB_RESULTS}", "-b", "${BATCH_LEN}", "-c", "${COPY_ONLY}", "-q", "/blast/queries/"]
       restartPolicy: Never
+      tolerations:
+      - key: workload
+        operator: Equal
+        value: blast
+        effect: NoSchedule
       nodeSelector:
         ordinal: "${NODE_ORDINAL}"
   backoffLimit: 3

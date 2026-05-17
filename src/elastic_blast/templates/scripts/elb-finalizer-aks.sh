@@ -29,11 +29,16 @@ echo "Submit selector: ${SUBMIT_SELECTOR}"
 # We do not want to flip an existing FAILURE.txt to SUCCESS.txt or vice
 # versa across attempts.
 MARKER_DIR="${ELB_RESULTS}/${ELB_METADATA_DIR}"
+blob_exists() {
+    local output
+    output=$(azcopy list "$1" 2>/dev/null || true)
+    printf '%s\n' "$output" | grep -Ev '^(INFO:|$)' >/dev/null
+}
 if azcopy login --identity >/dev/null 2>&1; then
-    if azcopy list "${MARKER_DIR}/SUCCESS.txt" >/dev/null 2>&1; then
+    if blob_exists "${MARKER_DIR}/SUCCESS.txt"; then
         if [ "${ELB_DB_PARTITIONS:-0}" -gt 0 ]; then
-            if azcopy list "${ELB_RESULTS}/merged_results.out.gz" >/dev/null 2>&1 && \
-               azcopy list "${ELB_RESULTS}/merge-report.json" >/dev/null 2>&1; then
+            if blob_exists "${ELB_RESULTS}/merged_results.out.gz" && \
+               blob_exists "${ELB_RESULTS}/merge-report.json"; then
                 echo "SUCCESS.txt and merge artifacts already present; skipping finalizer"
                 exit 0
             fi
@@ -43,7 +48,7 @@ if azcopy login --identity >/dev/null 2>&1; then
             exit 0
         fi
     fi
-    if azcopy list "${MARKER_DIR}/FAILURE.txt" >/dev/null 2>&1; then
+    if blob_exists "${MARKER_DIR}/FAILURE.txt"; then
         echo "FAILURE.txt already present at ${MARKER_DIR}; skipping finalizer"
         exit 0
     fi
