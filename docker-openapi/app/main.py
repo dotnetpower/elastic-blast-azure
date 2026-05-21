@@ -21,6 +21,7 @@ import tempfile
 import time
 import uuid
 import zipfile
+from collections import OrderedDict
 from datetime import datetime, timezone
 from functools import lru_cache
 from importlib.resources import files
@@ -68,7 +69,7 @@ if not API_TOKEN and not ALLOW_UNAUTHENTICATED:
         "ELB_OPENAPI_ALLOW_UNAUTHENTICATED is not set. All authenticated "
         "endpoints will return 503 until one of these env vars is provided."
     )
-VERSION = "3.5.0"
+VERSION = "3.6.0"
 
 MAX_ACTIVE_SUBMISSIONS = max(1, int(os.environ.get("ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS", "1")))
 DISPATCH_INTERVAL_SECONDS = max(1, int(os.environ.get("ELB_OPENAPI_DISPATCH_INTERVAL_SECONDS", "5")))
@@ -466,9 +467,7 @@ def _is_database_prefix(name: str) -> bool:
 def _list_blast_database_names(
     container: str = "blast-db",
     timeout: int = 30,
-    *,
-    use_cache: bool = True,
-) -> list[str]:
+) -> tuple[list[str], str]:
     """List the top-level prefixes (database names) inside ``container``.
 
     Calls the Azure Blob REST API with ``delimiter=/`` so the response only
@@ -481,18 +480,21 @@ def _list_blast_database_names(
     BLAST databases.
 
     Results are cached in-process with TTL
-    ``ELB_OPENAPI_DB_LIST_TTL_SECONDS`` (default 120s). Pass
-    ``use_cache=False`` to bypass.
+    ``ELB_OPENAPI_DB_LIST_TTL_SECONDS`` (default 120s). The cache cannot be
+    bypassed from a normal request — the catalogue is a fixed shape per
+    pod and the cost of one stale-by-up-to-120s response is preferable to
+    a footgun for callers.
 
-    Raises ``FileNotFoundError`` if the container does not exist; other
-    HTTP errors propagate as :class:`requests.HTTPError`.
+    Returns ``(names, cache_status)`` where ``cache_status`` is ``HIT`` or
+    ``MISS``. Raises ``FileNotFoundError`` if the container does not exist;
+    other HTTP errors propagate as :class:`requests.HTTPError`.
     """
     now = time.time()
-    if use_cache and _DB_LIST_TTL_SECONDS > 0:
-        with _db_cache_lock:
+    if _DB_LIST_TTL_SECONDS > 0:
+        with _db_list_lock:
             cached = _db_list_cache.get(container)
         if cached and (now - cached["fetched_at"]) < _DB_LIST_TTL_SECONDS:
-            return list(cached["names"])
+            return list(cached["names"]), "HIT"
 
     import xml.etree.ElementTree as ET
 
@@ -532,10 +534,10 @@ def _list_blast_database_names(
         if not marker:
             break
     sorted_names = sorted(set(names))
-    if use_cache and _DB_LIST_TTL_SECONDS > 0:
-        with _db_cache_lock:
+    if _DB_LIST_TTL_SECONDS > 0:
+        with _db_list_lock:
             _db_list_cache[container] = {"names": list(sorted_names), "fetched_at": now}
-    return sorted_names
+    return sorted_names, "MISS"
 
 
 # ── BLAST database metadata cache ──────────────────────────────────────────
@@ -545,6 +547,12 @@ def _list_blast_database_names(
 # (~50–100 KB) but change at most weekly when the NCBI snapshot rolls,
 # so we keep an in-process TTL+ETag cache to keep the endpoint sub-ms
 # on cache hits and 304-fast on revalidation.
+#
+# The cache is access-time LRU (``OrderedDict.move_to_end`` on hit) so
+# that frequently read databases survive eviction even when their last
+# *fetch* was long ago. Negative results (genuine blob 404) are recorded
+# separately with a shorter TTL so a hostile or buggy caller cannot
+# amplify a missing name into a stream of Storage 404s.
 
 _DB_METADATA_TTL_SECONDS = max(
     0, int(os.environ.get("ELB_OPENAPI_DB_METADATA_TTL_SECONDS", "600"))
@@ -555,31 +563,84 @@ _DB_LIST_TTL_SECONDS = max(
 _DB_CACHE_MAX_ENTRIES = max(
     8, int(os.environ.get("ELB_OPENAPI_DB_CACHE_MAX_ENTRIES", "128"))
 )
+_DB_NEGATIVE_TTL_SECONDS = max(
+    0, int(os.environ.get("ELB_OPENAPI_DB_NEGATIVE_TTL_SECONDS", "60"))
+)
 
-_db_metadata_cache: dict[tuple[str, str], dict[str, Any]] = {}
+_db_metadata_cache: "OrderedDict[tuple[str, str], dict[str, Any]]" = OrderedDict()
+_db_negative_cache: "OrderedDict[tuple[str, str], float]" = OrderedDict()
 _db_list_cache: dict[str, dict[str, Any]] = {}
-_db_cache_lock = Lock()
+_db_metadata_lock = Lock()
+_db_list_lock = Lock()
 
 
-def _cache_evict_if_full(cache: dict[Any, dict[str, Any]], limit: int) -> None:
-    if len(cache) <= limit:
-        return
-    # Drop oldest entries by fetched_at (simple bounded-LRU)
-    items = sorted(cache.items(), key=lambda kv: kv[1].get("fetched_at", 0.0))
-    for key, _ in items[: len(cache) - limit]:
-        cache.pop(key, None)
+def _cache_trim(cache: "OrderedDict[Any, Any]", limit: int) -> None:
+    """Trim ``cache`` down to ``limit`` entries, evicting the LRU end.
+
+    Callers must hold the cache's lock. ``OrderedDict.popitem(last=False)``
+    removes the least-recently-touched entry, so callers that promote on
+    hit via ``move_to_end`` get true access-LRU behaviour.
+    """
+    while len(cache) > limit:
+        cache.popitem(last=False)
+
+
+_MOLECULE_TYPE_MAP: dict[str, tuple[Literal["dna", "protein"], str]] = {
+    "nucl": ("dna", "mixed DNA"),
+    "nucleotide": ("dna", "mixed DNA"),
+    "nucleotides": ("dna", "mixed DNA"),
+    "dna": ("dna", "mixed DNA"),
+    "prot": ("protein", "protein"),
+    "protein": ("protein", "protein"),
+    "proteins": ("protein", "protein"),
+}
+
+
+def _resolve_molecule_type(
+    molecule_type_raw: str | None,
+) -> tuple[Literal["dna", "protein"], str]:
+    """Map a raw molecule token to ``(molecule_type, molecule_label)``.
+
+    Unknown tokens raise ``ValueError`` rather than silently falling
+    back to ``protein`` so a future NCBI molecule class surfaces as an
+    operator-visible 500 instead of a silently mislabelled response.
+    """
+    key = (molecule_type_raw or "").casefold()
+    if not key:
+        raise ValueError("empty molecule_type")
+    try:
+        return _MOLECULE_TYPE_MAP[key]
+    except KeyError as exc:
+        raise ValueError(f"unsupported molecule_type: {molecule_type_raw!r}") from exc
 
 
 def _molecule_label(molecule_type_raw: str | None) -> str:
-    """Friendly label for the BLAST molecule type (matches the dashboard)."""
+    """Friendly label for the BLAST molecule type (matches the dashboard).
+
+    Unknown values pass through unchanged. Use :func:`_resolve_molecule_type`
+    inside the v1 metadata path where unknown values should surface as an
+    error rather than a guess.
+    """
     if not molecule_type_raw:
         return ""
-    lowered = molecule_type_raw.casefold()
-    if lowered in {"nucl", "nucleotide", "nucleotides", "dna"}:
-        return "mixed DNA"
-    if lowered in {"prot", "protein", "proteins"}:
-        return "protein"
-    return molecule_type_raw
+    try:
+        _, label = _resolve_molecule_type(molecule_type_raw)
+    except ValueError:
+        return molecule_type_raw
+    return label
+
+
+class _MetadataFetchError(Exception):
+    """Wraps a transient (network / 5xx / parse) failure from Storage.
+
+    Callers distinguish this from ``return None`` (genuine "not found")
+    so a Storage outage surfaces as 503 instead of being mistaken for a
+    missing database.
+    """
+
+    def __init__(self, message: str, *, transient: bool = True) -> None:
+        super().__init__(message)
+        self.transient = transient
 
 
 def _fetch_blob_with_etag(
@@ -591,25 +652,49 @@ def _fetch_blob_with_etag(
 
     Returns ``(status_code, parsed_json_or_none, new_etag_or_none)``.
     ``304`` returns ``(304, None, original_etag)``; ``404`` returns
-    ``(404, None, None)``; other ≥400 statuses raise.
+    ``(404, None, None)``; all other failures raise
+    :class:`_MetadataFetchError` so the caller can distinguish a
+    transient outage from a genuinely missing blob.
     """
     import requests
 
-    token = _storage_oauth_token()
+    try:
+        token = _storage_oauth_token()
+    except Exception as exc:  # auth failure is transient from our POV
+        raise _MetadataFetchError(f"storage auth failed: {exc!s:.200}") from exc
     headers: dict[str, str] = {
         "Authorization": f"Bearer {token}",
         "x-ms-version": "2020-04-08",
     }
     if etag:
         headers["If-None-Match"] = etag
-    resp = requests.get(url, headers=headers, timeout=timeout)
+    try:
+        resp = requests.get(url, headers=headers, timeout=timeout)
+    except requests.RequestException as exc:
+        raise _MetadataFetchError(f"network error fetching {url}: {exc!s:.200}") from exc
     if resp.status_code == 304:
         return 304, None, etag
     if resp.status_code == 404:
         return 404, None, None
-    resp.raise_for_status()
+    if resp.status_code >= 500 or resp.status_code == 429:
+        raise _MetadataFetchError(
+            f"storage {resp.status_code} for {url}: {resp.text[:200]}",
+        )
+    if resp.status_code >= 400:
+        # 401/403 etc. are configuration errors, not transient — still surface.
+        raise _MetadataFetchError(
+            f"storage {resp.status_code} for {url}: {resp.text[:200]}",
+            transient=False,
+        )
     new_etag = resp.headers.get("ETag")
-    return resp.status_code, resp.json(), new_etag
+    try:
+        parsed = resp.json()
+    except ValueError as exc:
+        raise _MetadataFetchError(f"invalid JSON from {url}: {exc!s:.200}") from exc
+    return resp.status_code, parsed, new_etag
+
+
+_SNAPSHOT_RE = re.compile(r"/(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})/")
 
 
 def _normalise_metadata(
@@ -619,26 +704,47 @@ def _normalise_metadata(
     *,
     container: str = "blast-db",
 ) -> dict[str, Any]:
-    """Project the raw NCBI metadata JSON into the public API schema."""
+    """Project the raw NCBI metadata JSON into the public API schema.
+
+    Unknown molecule types raise :class:`ValueError` (propagated from
+    :func:`_resolve_molecule_type`) so the caller can return a 500
+    instead of mislabelling the database. A missing snapshot date is
+    logged as a warning — the snapshot field falls back to ``"unknown"``
+    so existing clients keep working, but operators can grep the log
+    for an NCBI path-format change.
+    """
+    molecule_type, molecule_label = _resolve_molecule_type(molecule_type_raw)
     files_list = raw.get("files") if isinstance(raw.get("files"), list) else []
     source_version = ""
     for item in files_list:
-        match = re.search(r"/(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})/", str(item))
+        match = _SNAPSHOT_RE.search(str(item))
         if match:
             source_version = match.group(1)
             break
+    if not source_version:
+        logger.warning(
+            "snapshot regex did not match any entry in metadata.files for %s ("
+            "first=%r); NCBI path format may have changed",
+            db_name,
+            (str(files_list[0]) if files_list else ""),
+        )
     schema_version = str(raw.get("version") or "").strip()
     last_updated = str(
         raw.get("last-updated") or raw.get("last_updated") or raw.get("date") or ""
     ).strip()
-    molecule_type = "dna" if molecule_type_raw == "nucl" else "protein"
+    title = ""
+    for source_key in ("description", "display_name", "title", "name"):
+        value = raw.get(source_key)
+        if isinstance(value, str) and value.strip():
+            title = value.strip()
+            break
     return {
         "name": db_name,
         "container": container,
-        "title": str(raw.get("description") or "").strip(),
+        "title": title,
         "dbtype": str(raw.get("dbtype") or "").strip(),
         "molecule_type": molecule_type,
-        "molecule_label": _molecule_label(molecule_type_raw),
+        "molecule_label": molecule_label,
         "snapshot": source_version or "unknown",
         "last_updated": last_updated or None,
         "number_of_sequences": raw.get("number-of-sequences"),
@@ -653,7 +759,7 @@ def _normalise_metadata(
 def _project_with_cached_at(metadata: dict[str, Any], fetched_at: float) -> dict[str, Any]:
     out = dict(metadata)
     out["cached_at"] = datetime.fromtimestamp(fetched_at, tz=timezone.utc).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
+        "%Y-%m-%dT%H:%M:%S.%fZ"
     )
     return out
 
@@ -663,7 +769,7 @@ def _database_metadata(
     *,
     container: str = "blast-db",
     timeout: int = 30,
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, str]:
     """Read a BLAST database's metadata (nucleotide or protein).
 
     Hits an in-process cache first. On miss / expiry, performs a direct
@@ -671,29 +777,56 @@ def _database_metadata(
     on TTL expiry uses ``If-None-Match`` so unchanged blobs return
     ``304 Not Modified`` and avoid the JSON parse.
 
-    Returns the normalised dict matching the public ``DatabaseMetadata``
-    schema, or ``None`` when neither metadata file is reachable.
+    Returns ``(normalised_metadata_or_none, cache_status)`` where
+    ``cache_status`` is one of ``HIT``, ``REVALIDATE``, ``MISS`` or
+    ``NEGATIVE_HIT``. ``None`` is returned only when both metadata
+    blobs are genuinely 404; transient outages raise
+    :class:`_MetadataFetchError`.
     """
+    from copy import deepcopy
+
     safe_db = re.sub(r"[^A-Za-z0-9._-]", "", db_name)
     if not safe_db:
-        return None
+        return None, "MISS"
     key = (container, safe_db)
     now = time.time()
 
-    with _db_cache_lock:
+    cached_snapshot: dict[str, Any] | None = None
+    cached_suffix: str | None = None
+    cached_etag: str | None = None
+    cached_molecule: str | None = None
+    with _db_metadata_lock:
         cached = _db_metadata_cache.get(key)
-
-    if (
-        cached
-        and _DB_METADATA_TTL_SECONDS > 0
-        and (now - cached.get("fetched_at", 0.0)) < _DB_METADATA_TTL_SECONDS
-    ):
-        return _project_with_cached_at(cached["metadata"], cached["fetched_at"])
+        if cached and _DB_METADATA_TTL_SECONDS > 0 and (
+            now - cached.get("fetched_at", 0.0)
+        ) < _DB_METADATA_TTL_SECONDS:
+            _db_metadata_cache.move_to_end(key)
+            projected = _project_with_cached_at(cached["metadata"], cached["fetched_at"])
+            return projected, "HIT"
+        # Negative cache: a previous full lookup confirmed both suffixes 404.
+        if _DB_NEGATIVE_TTL_SECONDS > 0:
+            neg_until = _db_negative_cache.get(key)
+            if neg_until is not None and neg_until > now:
+                _db_negative_cache.move_to_end(key)
+                return None, "NEGATIVE_HIT"
+            if neg_until is not None and neg_until <= now:
+                _db_negative_cache.pop(key, None)
+        if cached is not None:
+            cached_suffix = cached.get("suffix")
+            cached_etag = cached.get("etag")
+            cached_molecule = cached.get("molecule_type_raw")
+            cached_snapshot = {
+                "metadata": deepcopy(cached["metadata"]),
+                "etag": cached.get("etag"),
+                "suffix": cached.get("suffix"),
+                "molecule_type_raw": cached.get("molecule_type_raw"),
+                "fetched_at": cached.get("fetched_at", 0.0),
+            }
 
     # Try the previously-seen suffix first to avoid an extra 404 round-trip.
     candidates: list[tuple[str, str]] = []
-    if cached and cached.get("suffix"):
-        candidates.append((cached["molecule_type_raw"], cached["suffix"]))
+    if cached_snapshot and cached_suffix and cached_molecule:
+        candidates.append((cached_molecule, cached_suffix))
     for molecule_type_raw, suffix in (
         ("nucl", "-nucl-metadata.json"),
         ("prot", "-prot-metadata.json"),
@@ -701,27 +834,62 @@ def _database_metadata(
         if (molecule_type_raw, suffix) not in candidates:
             candidates.append((molecule_type_raw, suffix))
 
+    saw_404 = False
+    last_transient: _MetadataFetchError | None = None
     for molecule_type_raw, suffix in candidates:
         url = f"{_blob_base()}/{container}/{safe_db}/{safe_db}{suffix}"
-        send_etag = (
-            cached["etag"]
-            if cached and cached.get("suffix") == suffix and cached.get("etag")
-            else None
-        )
+        send_etag = cached_etag if cached_suffix == suffix else None
         try:
-            status, parsed, etag = _fetch_blob_with_etag(url, send_etag, timeout=timeout)
-        except Exception:
-            continue
-        if status == 304 and cached:
-            with _db_cache_lock:
-                cached["fetched_at"] = now
-                _db_metadata_cache[key] = cached
-            return _project_with_cached_at(cached["metadata"], now)
+            status, parsed, etag = _fetch_blob_with_etag(
+                url, send_etag, timeout=timeout,
+            )
+        except _MetadataFetchError as exc:
+            if exc.transient:
+                last_transient = exc
+                logger.warning(
+                    "transient metadata fetch failure for %s%s: %s",
+                    safe_db,
+                    suffix,
+                    exc,
+                )
+                continue
+            # Non-transient (e.g. 401/403) — fail loud immediately.
+            raise
+        if status == 304 and cached_snapshot is not None:
+            refreshed_metadata = cached_snapshot["metadata"]
+            refreshed = {
+                "metadata": refreshed_metadata,
+                "etag": cached_snapshot["etag"],
+                "suffix": cached_snapshot["suffix"],
+                "molecule_type_raw": cached_snapshot["molecule_type_raw"],
+                "fetched_at": now,
+            }
+            with _db_metadata_lock:
+                if _DB_METADATA_TTL_SECONDS > 0:
+                    _db_metadata_cache[key] = {
+                        **refreshed,
+                        "metadata": deepcopy(refreshed_metadata),
+                    }
+                    _db_metadata_cache.move_to_end(key)
+                    _cache_trim(_db_metadata_cache, _DB_CACHE_MAX_ENTRIES)
+            return _project_with_cached_at(refreshed_metadata, now), "REVALIDATE"
         if status == 404:
+            saw_404 = True
             continue
         if parsed is None:
+            last_transient = _MetadataFetchError(
+                f"empty body from {url} (status={status})",
+            )
             continue
-        metadata = _normalise_metadata(safe_db, parsed, molecule_type_raw, container=container)
+        try:
+            metadata = _normalise_metadata(
+                safe_db, parsed, molecule_type_raw, container=container,
+            )
+        except ValueError as exc:
+            logger.error(
+                "normalise_metadata failed for %s%s: %s", safe_db, suffix, exc,
+            )
+            raise _MetadataFetchError(str(exc), transient=False) from exc
         entry = {
             "metadata": metadata,
             "etag": etag,
@@ -729,11 +897,31 @@ def _database_metadata(
             "molecule_type_raw": molecule_type_raw,
             "fetched_at": now,
         }
-        with _db_cache_lock:
-            _db_metadata_cache[key] = entry
-            _cache_evict_if_full(_db_metadata_cache, _DB_CACHE_MAX_ENTRIES)
-        return _project_with_cached_at(metadata, now)
-    return None
+        with _db_metadata_lock:
+            if _DB_METADATA_TTL_SECONDS > 0:
+                _db_metadata_cache[key] = {
+                    **entry,
+                    "metadata": deepcopy(metadata),
+                }
+                _db_metadata_cache.move_to_end(key)
+                _cache_trim(_db_metadata_cache, _DB_CACHE_MAX_ENTRIES)
+            # New positive answer invalidates any stale negative entry.
+            _db_negative_cache.pop(key, None)
+        return _project_with_cached_at(metadata, now), "MISS"
+
+    # No candidate succeeded.
+    if last_transient is not None:
+        # Any transient error during the lookup outweighs a sibling 404 — we
+        # do NOT know whether the failed suffix was the right one, so we
+        # must not synthesise a stable negative cache entry. Re-raise so
+        # the caller turns this into a 503.
+        raise last_transient
+    if saw_404 and _DB_NEGATIVE_TTL_SECONDS > 0:
+        with _db_metadata_lock:
+            _db_negative_cache[key] = now + _DB_NEGATIVE_TTL_SECONDS
+            _db_negative_cache.move_to_end(key)
+            _cache_trim(_db_negative_cache, _DB_CACHE_MAX_ENTRIES)
+    return None, "MISS"
 
 
 def _blast_version_from_result(job_info: dict[str, Any]) -> dict[str, str]:
@@ -1017,9 +1205,62 @@ def _start_background_threads() -> None:
     Thread(target=_watchdog_loop, name="elb-openapi-watchdog", daemon=True).start()
 
 
+def _warm_database_cache() -> None:
+    """Pre-fetch the database catalogue and per-database metadata.
+
+    Cold-start latency on the ``/v1/databases/*`` endpoints used to spike
+    to ~400 ms × N because the in-process cache is wiped on every pod
+    restart. This helper runs once during startup (in a daemon thread)
+    so the first user-facing request hits a warm cache. Failures are
+    logged but never fatal — the pod must still come up if Storage is
+    transiently unreachable.
+    """
+    if os.environ.get("ELB_OPENAPI_DISABLE_WARMUP", "").strip() == "1":
+        logger.info("database warmup disabled via env (ELB_OPENAPI_DISABLE_WARMUP=1)")
+        return
+    try:
+        names, _ = _list_blast_database_names()
+    except FileNotFoundError:
+        logger.info("warmup: blast-db container not yet provisioned")
+        return
+    except Exception as exc:
+        logger.warning("warmup: list failed (non-fatal): %s", str(exc)[:200])
+        return
+    if not names:
+        logger.info("warmup: no databases found")
+        return
+    warmed = 0
+    for name in names:
+        try:
+            meta, status = _database_metadata(name)
+        except _MetadataFetchError as exc:
+            logger.warning(
+                "warmup: metadata fetch for %s failed (non-fatal): %s",
+                name, exc,
+            )
+            continue
+        except Exception as exc:  # defensive — never let warmup crash startup
+            logger.warning(
+                "warmup: unexpected error for %s (non-fatal): %s",
+                name, str(exc)[:200],
+            )
+            continue
+        if meta is not None:
+            warmed += 1
+        logger.info("warmup: %s -> %s", name, status if meta else "404")
+    logger.info("warmup: %d/%d databases primed", warmed, len(names))
+
+
 @app.on_event("startup")
 def _on_startup() -> None:
     _start_background_threads()
+    # Run cache warmup in a daemon thread so an unreachable Storage path
+    # does not block uvicorn startup or its readiness probe.
+    Thread(
+        target=_warm_database_cache,
+        name="elb-openapi-warm-databases",
+        daemon=True,
+    ).start()
 
 # ── Webhook (optional) ────────────────────────────────────────────────────
 
@@ -1346,19 +1587,26 @@ class DatabaseMetadata(BaseModel):
     summary="List prepared BLAST databases",
     response_model=DatabaseList,
 )
-async def list_blast_databases():
+def list_blast_databases(response: StarletteResponse):
     """List databases prepared under the workspace ``blast-db`` container.
 
     Each entry is a top-level prefix (e.g. ``core_nt``, ``nr``,
     ``swissprot``). Call ``GET /v1/databases/{db_name}`` for the
     molecule type, version, and sequence counts.
+
+    The endpoint is a plain ``def`` (run in a threadpool by FastAPI)
+    because the underlying Azure Blob list is synchronous. Exposing it
+    as ``async def`` would let one blocking ``requests.get`` choke the
+    single-worker uvicorn event loop.
     """
     try:
-        names = _list_blast_database_names()
+        names, cache_status = _list_blast_database_names()
     except FileNotFoundError:
+        response.headers["X-Cache"] = "MISS"
         return DatabaseList(databases=[], count=0)
     except Exception as exc:
         raise HTTPException(503, f"Storage list failed: {str(exc)[:200]}") from exc
+    response.headers["X-Cache"] = cache_status
     items = [DatabaseListItem(name=n) for n in names]
     return DatabaseList(databases=items, count=len(items))
 
@@ -1369,20 +1617,34 @@ async def list_blast_databases():
     summary="Get BLAST database metadata",
     response_model=DatabaseMetadata,
 )
-async def get_blast_database(db_name: str):
-    """Return the molecule type, version, and metadata for one database."""
+def get_blast_database(db_name: str, response: StarletteResponse):
+    """Return the molecule type, version, and metadata for one database.
+
+    Sync route on purpose (see :func:`list_blast_databases`).
+    """
     safe = re.sub(r"[^A-Za-z0-9._-]", "", db_name)
     if not safe or safe != db_name:
         raise HTTPException(
             400,
             "db_name must contain only alphanumerics, '.', '_', '-'.",
         )
-    meta = _database_metadata(safe)
+    try:
+        meta, cache_status = _database_metadata(safe)
+    except _MetadataFetchError as exc:
+        # Transient Storage outage / auth failure / parse error.
+        logger.error("metadata fetch failed for %s: %s", safe, exc)
+        raise HTTPException(
+            503,
+            f"Storage metadata fetch failed: {exc!s:.200}",
+            headers={"X-Cache": "BYPASS"},
+        ) from exc
     if not meta:
         raise HTTPException(
             404,
             f"Database {db_name!r} not found or metadata unavailable.",
+            headers={"X-Cache": cache_status},
         )
+    response.headers["X-Cache"] = cache_status
     return meta
 
 # ── Jobs Models ────────────────────────────────────────────────────────────
