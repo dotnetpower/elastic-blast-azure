@@ -27,6 +27,7 @@ Created: Wed 22 Apr 2020 06:31:30 AM EDT
 import os
 import logging
 import math
+from concurrent.futures import ThreadPoolExecutor
 from timeit import default_timer as timer
 from typing import List, Tuple
 from pprint import pformat
@@ -142,8 +143,53 @@ def submit(args, cfg: ElasticBlastConfig, clean_up_stack):
         raise UserReportError(CLUSTER_ERROR, msg)
 
     query_files = assemble_query_file_list(cfg)
-    check_submit_data(query_files, cfg)
-    write_config_to_metadata(cfg)
+
+    # Parallelise the four independent prep calls that each fork an azcopy /
+    # cloud-CLI process. They share only the read-only `cfg` and `query_files`
+    # values, and `safe_exec` is thread-safe (each call spawns its own
+    # subprocess). Sequential cost was ~12-15 s on Azure; running them
+    # concurrently typically lands in ~3-5 s.
+    print('\033[33m[parallel-prep] running 4 azcopy checks concurrently\033[0m')
+    parallel_start = timer()
+    gcp_prj_for_db = (
+        None
+        if cfg.cloud_provider.cloud in (CSP.AWS, CSP.AZURE)
+        else cfg.gcp.get_project_for_gcs_downloads()
+    )
+    sas_token_for_db = (
+        cfg.azure.get_sas_token()
+        if cfg.cloud_provider.cloud == CSP.AZURE
+        else None
+    )
+    db_mol_type = ElbSupportedPrograms().get_db_mol_type(cfg.blast.program)
+    with ThreadPoolExecutor(
+        max_workers=4, thread_name_prefix='elb-submit-prep'
+    ) as prep_pool:
+        f_check_data = prep_pool.submit(check_submit_data, query_files, cfg)
+        f_write_config = prep_pool.submit(write_config_to_metadata, cfg)
+        f_query_mode = prep_pool.submit(get_query_split_mode, cfg, query_files)
+        f_db_exists = prep_pool.submit(
+            check_user_provided_blastdb_exists,
+            cfg.blast.db,
+            db_mol_type,
+            cfg.cluster.db_source,
+            gcp_prj_for_db,
+            sas_token=sas_token_for_db,
+        )
+
+        # Resolve in dependency order. ``check_submit_data`` / ``write_config``
+        # have no return value but may raise, so we wait for them first to
+        # surface user-facing errors before we touch any cloud state.
+        f_check_data.result()
+        f_write_config.result()
+        try:
+            f_db_exists.result()
+        except ValueError as err:
+            raise UserReportError(returncode=BLASTDB_ERROR, message=str(err))
+        query_split_mode = f_query_mode.result()
+    logging.debug(
+        f'RUNTIME parallel-prep {timer() - parallel_start:.2f} seconds'
+    )
 
     #mode_str = "synchronous" if args.sync else "asynchronous"
     #logging.info(f'Running ElasticBLAST on {cfg.cloud_provider.cloud.name} in {mode_str} mode')
@@ -151,7 +197,6 @@ def submit(args, cfg: ElasticBlastConfig, clean_up_stack):
     queries = None
     query_length = 0
 
-    query_split_mode = get_query_split_mode(cfg, query_files)
     logging.debug(f'Query split mode {query_split_mode.name}')
 
     # query splitting
@@ -163,14 +208,6 @@ def submit(args, cfg: ElasticBlastConfig, clean_up_stack):
 
     # setup taxonomy filtering, if requested
     setup_taxid_filtering(cfg)
-
-    # check database availability
-    gcp_prj = None if cfg.cloud_provider.cloud == CSP.AWS or cfg.cloud_provider.cloud == CSP.AZURE else cfg.gcp.get_project_for_gcs_downloads()
-    sas_token = cfg.azure.get_sas_token() if cfg.cloud_provider.cloud == CSP.AZURE else None
-    try:
-        check_user_provided_blastdb_exists(cfg.blast.db, ElbSupportedPrograms().get_db_mol_type(cfg.blast.program), cfg.cluster.db_source, gcp_prj, sas_token=sas_token)
-    except ValueError as err:
-        raise UserReportError(returncode=BLASTDB_ERROR, message=str(err))
 
     elastic_blast = ElasticBlastFactory(cfg, True, clean_up_stack)
     elastic_blast.upload_workfiles()
@@ -185,7 +222,7 @@ def submit(args, cfg: ElasticBlastConfig, clean_up_stack):
             elastic_blast.wait_for_cloud_query_split()
             qs_res = harvest_query_splitting_results(cfg.cluster.results,
                                                      dry_run,
-                                                     gcp_project=gcp_prj)
+                                                     gcp_project=gcp_prj_for_db)
             queries = qs_res.query_batches
             query_length = qs_res.query_length
 
