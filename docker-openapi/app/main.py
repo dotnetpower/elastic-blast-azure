@@ -7,8 +7,8 @@ optionally forwards events to Control Plane via webhook.
 from __future__ import annotations
 
 import configparser
-import gzip
 import glob
+import gzip
 import hashlib
 import hmac
 import json
@@ -26,14 +26,15 @@ from functools import lru_cache
 from importlib.resources import files
 from pathlib import Path
 from threading import Event, Lock, Thread
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
 import uvicorn
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
+
 from util import run_cancellable, safe_exec
 
 # ── Logging ────────────────────────────────────────────────────────────────
@@ -195,6 +196,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import Response as StarletteResponse
 
+
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: StarletteRequest, call_next):
         response: StarletteResponse = await call_next(request)
@@ -229,6 +231,7 @@ else:
     )
 
 from starlette.middleware.cors import CORSMiddleware
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
@@ -1787,32 +1790,112 @@ async def delete_job(job_id: str):
 
 # ── Jobs — Results ─────────────────────────────────────────────────────────
 
+_MERGED_RESULTS_BLOB = "merged_results.out.gz"
+
+
 @v1.get("/jobs/{job_id}/results", tags=["Jobs"], summary="Download results")
-async def download_results(job_id: str):
-    """Download BLAST results for a completed job as a ZIP archive."""
+async def download_results(
+    job_id: str,
+    content: Literal["full", "merged", "xml"] = Query(
+        default="full",
+        description=(
+            "Result packaging mode. 'full' (default, backward-compatible) returns "
+            "a ZIP of every shard *.out.gz / *.out from the results container. "
+            "'merged' returns a ZIP containing only merged_results.out.gz "
+            "(404 if the merger has not uploaded it yet). 'xml' streams the "
+            "gunzipped BLAST XML (outfmt=5) from merged_results.out.gz as "
+            "application/xml."
+        ),
+    ),
+):
+    """Download BLAST results for a completed job.
+
+    - ``content=full`` (default): every shard's ``*.out.gz``/``*.out`` packed
+      into ``blast-results-<job_id>.zip``. This preserves the original
+      contract.
+    - ``content=merged``: a ZIP that contains only ``merged_results.out.gz``
+      from the sharded merger. Returns 404 when the merger has not yet
+      published that file.
+    - ``content=xml``: the gunzipped BLAST XML (outfmt=5) from
+      ``merged_results.out.gz``, served as ``application/xml``. Returns 404
+      when the merger output is not yet available.
+    """
     _ensure_loaded()
     job_id = _sanitize_job_id(job_id)
     with _jobs_lock: job_info = _jobs.get(job_id)
     if not job_info: job_info = _load_job_cm(job_id)
     if not job_info: raise HTTPException(404, f"Job {job_id} not found")
-    results_url = job_info.get("results","")
+    results_url = job_info.get("results", "").rstrip("/")
     if not results_url: raise HTTPException(404, "No results URL")
 
     work_dir = f"/tmp/results-{job_id}-{uuid.uuid4().hex}"
     zip_path = f"/tmp/results-{job_id}-{uuid.uuid4().hex}.zip"
+    xml_path = f"/tmp/results-{job_id}-{uuid.uuid4().hex}.xml"
     try:
         os.makedirs(work_dir, exist_ok=True)
         _azcopy_login()
-        safe_exec(["azcopy","cp",f"{results_url}/*",work_dir,"--recursive","--include-pattern","*.out.gz;*.out"], timeout=300)
-        files = glob.glob(os.path.join(work_dir,"**","*.out*"), recursive=True)
-        if not files: raise HTTPException(404, "No result files found")
-        with zipfile.ZipFile(zip_path,"w",zipfile.ZIP_DEFLATED) as zf:
-            for f in files: zf.write(f, os.path.relpath(f, work_dir))
-        return FileResponse(zip_path, filename=f"blast-results-{job_id}.zip", media_type="application/zip",
-                           background=BackgroundTask(_cleanup_tmp, work_dir, zip_path))
-    except HTTPException: raise
+
+        if content == "full":
+            safe_exec(
+                ["azcopy", "cp", f"{results_url}/*", work_dir,
+                 "--recursive", "--include-pattern", "*.out.gz;*.out"],
+                timeout=300,
+            )
+            files = glob.glob(os.path.join(work_dir, "**", "*.out*"), recursive=True)
+            if not files:
+                raise HTTPException(404, "No result files found")
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for f in files:
+                    zf.write(f, os.path.relpath(f, work_dir))
+            return FileResponse(
+                zip_path,
+                filename=f"blast-results-{job_id}.zip",
+                media_type="application/zip",
+                background=BackgroundTask(_cleanup_tmp, work_dir, zip_path),
+            )
+
+        # content == 'merged' or 'xml' — both need merged_results.out.gz.
+        # Use azcopy's include-pattern so the call succeeds (with no file)
+        # when the merger has not uploaded yet, instead of returning a
+        # non-zero exit. Then verify locally and 404 if missing.
+        safe_exec(
+            ["azcopy", "cp", f"{results_url}/*", work_dir,
+             "--recursive", "--include-pattern", _MERGED_RESULTS_BLOB],
+            timeout=300,
+        )
+        candidates = glob.glob(
+            os.path.join(work_dir, "**", _MERGED_RESULTS_BLOB), recursive=True
+        )
+        if not candidates:
+            raise HTTPException(
+                404,
+                f"{_MERGED_RESULTS_BLOB} is not available for this job yet",
+            )
+        merged_local = candidates[0]
+
+        if content == "merged":
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.write(merged_local, _MERGED_RESULTS_BLOB)
+            return FileResponse(
+                zip_path,
+                filename=f"blast-results-{job_id}-merged.zip",
+                media_type="application/zip",
+                background=BackgroundTask(_cleanup_tmp, work_dir, zip_path),
+            )
+
+        # content == 'xml'
+        with gzip.open(merged_local, "rb") as src, open(xml_path, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        return FileResponse(
+            xml_path,
+            filename=f"blast-results-{job_id}.xml",
+            media_type="application/xml",
+            background=BackgroundTask(_cleanup_tmp, work_dir, xml_path),
+        )
+    except HTTPException:
+        raise
     except Exception as e:
-        _cleanup_tmp(work_dir, zip_path)
+        _cleanup_tmp(work_dir, zip_path, xml_path)
         raise HTTPException(500, str(e)[:500])
 
 

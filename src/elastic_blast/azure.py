@@ -14,6 +14,7 @@ Authors: Moon Hyuk Choi moonchoi@microsoft.com
 """
 
 import base64
+import concurrent.futures
 import fcntl
 import logging
 import math
@@ -38,30 +39,48 @@ from types import MappingProxyType
 from typing import Any, DefaultDict, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import requests
-from tenacity import retry, stop_after_attempt, wait_exponential
-
+from azure.core.exceptions import (  # type: ignore
+    HttpResponseError,
+    ResourceNotFoundError,
+)
 from azure.identity import DefaultAzureCredential  # type: ignore
-from azure.mgmt.containerservice import ContainerServiceClient  # type: ignore
-from azure.mgmt.compute import ComputeManagementClient  # type: ignore
-from azure.mgmt.storage import StorageManagementClient  # type: ignore
 from azure.mgmt.authorization import AuthorizationManagementClient  # type: ignore
-from azure.core.exceptions import ResourceNotFoundError, HttpResponseError  # type: ignore
+from azure.mgmt.compute import ComputeManagementClient  # type: ignore
+from azure.mgmt.containerservice import ContainerServiceClient  # type: ignore
+from azure.mgmt.storage import StorageManagementClient  # type: ignore
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from . import VERSION, kubernetes
 from .azure_traits import (
-    AZURE_VM_HOURLY_PRICES, SPOT_DISCOUNT_FACTOR,
-    apply_auto_partition, get_machine_properties,
+    AZURE_VM_HOURLY_PRICES,
+    SPOT_DISCOUNT_FACTOR,
+    apply_auto_partition,
+    get_machine_properties,
 )
 from .base import MemoryStr
 from .constants import (
-    AKS_PROVISIONING_STATE, CLUSTER_ERROR, DEPENDENCY_ERROR,
-    ELB_DFLT_BLAST_JOB_AKS_TEMPLATE, ELB_LOCAL_SSD_BLAST_JOB_AKS_TEMPLATE,
-    ELB_METADATA_DIR, ELB_NUM_JOBS_SUBMITTED, ELB_QUERY_BATCH_DIR,
-    ELB_QUERY_LENGTH, ELB_STATE_DISK_ID_FILE, ElbExecutionMode, ElbStatus,
-    INPUT_ERROR, K8S_JOB_BLAST, K8S_JOB_CLOUD_SPLIT_SSD, K8S_JOB_GET_BLASTDB,
-    K8S_JOB_IMPORT_QUERY_BATCHES, K8S_JOB_INIT_PV,
-    K8S_JOB_LOAD_BLASTDB_INTO_RAM, K8S_JOB_RESULTS_EXPORT, K8S_JOB_SUBMIT_JOBS,
+    AKS_PROVISIONING_STATE,
+    CLUSTER_ERROR,
+    DEPENDENCY_ERROR,
+    ELB_DFLT_BLAST_JOB_AKS_TEMPLATE,
+    ELB_LOCAL_SSD_BLAST_JOB_AKS_TEMPLATE,
+    ELB_METADATA_DIR,
+    ELB_NUM_JOBS_SUBMITTED,
+    ELB_QUERY_BATCH_DIR,
+    ELB_QUERY_LENGTH,
+    ELB_STATE_DISK_ID_FILE,
+    INPUT_ERROR,
+    K8S_JOB_BLAST,
+    K8S_JOB_CLOUD_SPLIT_SSD,
+    K8S_JOB_GET_BLASTDB,
+    K8S_JOB_IMPORT_QUERY_BATCHES,
+    K8S_JOB_INIT_PV,
+    K8S_JOB_LOAD_BLASTDB_INTO_RAM,
+    K8S_JOB_RESULTS_EXPORT,
+    K8S_JOB_SUBMIT_JOBS,
     STATUS_MESSAGE_ERROR,
+    ElbExecutionMode,
+    ElbStatus,
 )
 from .elasticblast import ElasticBlast
 from .elb_config import ElasticBlastConfig, ResourceIds
@@ -69,10 +88,14 @@ from .filehelper import open_for_read, open_for_write_immediate
 from .jobs import read_job_template, write_job_files
 from .subst import substitute_params
 from .util import (
-    ElbSupportedPrograms, SafeExecError, UserReportError, get_blastdb_info,
-    get_usage_reporting, handle_error, safe_exec,
+    ElbSupportedPrograms,
+    SafeExecError,
+    UserReportError,
+    get_blastdb_info,
+    get_usage_reporting,
+    handle_error,
+    safe_exec,
 )
-
 
 # ===========================================================================
 # Azure SDK Clients
@@ -476,13 +499,23 @@ def _ensure_monitor_initialized():
             _monitor_initialized = True
             return
         try:
-            from opentelemetry import trace, metrics  # type: ignore[import-untyped]
-            from opentelemetry.sdk.trace import TracerProvider  # type: ignore[import-untyped]
-            from opentelemetry.sdk.metrics import MeterProvider  # type: ignore[import-untyped]
             from azure.monitor.opentelemetry.exporter import (  # type: ignore[import-untyped]
-                AzureMonitorTraceExporter, AzureMonitorMetricExporter)
-            from opentelemetry.sdk.trace.export import BatchSpanProcessor  # type: ignore[import-untyped]
-            from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader  # type: ignore[import-untyped]
+                AzureMonitorMetricExporter,
+                AzureMonitorTraceExporter,
+            )
+            from opentelemetry import metrics, trace  # type: ignore[import-untyped]
+            from opentelemetry.sdk.metrics import (
+                MeterProvider,  # type: ignore[import-untyped]
+            )
+            from opentelemetry.sdk.metrics.export import (
+                PeriodicExportingMetricReader,  # type: ignore[import-untyped]
+            )
+            from opentelemetry.sdk.trace import (
+                TracerProvider,  # type: ignore[import-untyped]
+            )
+            from opentelemetry.sdk.trace.export import (
+                BatchSpanProcessor,  # type: ignore[import-untyped]
+            )
 
             tp = TracerProvider()
             tp.add_span_processor(BatchSpanProcessor(AzureMonitorTraceExporter(connection_string=_MONITOR_CONN_STR)))
@@ -1201,9 +1234,33 @@ class ElasticBlastAzure(ElasticBlast):
             if status == AKS_PROVISIONING_STATE.SUCCEEDED.value and self._db_already_loaded():
                 logging.info('Warm cluster reuse: skipping init')
                 self._get_k8s_ctx()
-                self._cleanup_stale_jobs()
-                kubernetes.create_scripts_configmap(cfg.appstate.k8s_ctx, cfg.cluster.dry_run)
-                self._upload_queries_only(queries)
+                # Run the three independent warm-reuse steps in parallel so
+                # warm submits aren't gated by the slowest sequential op.
+                # _cleanup_stale_jobs (Jobs), create_scripts_configmap
+                # (ConfigMap), and _upload_queries_only (blob upload +
+                # optionally a PVC-import Job) touch disjoint resources and
+                # are individually idempotent. Set ELB_PARALLEL_WARM_REUSE=0
+                # to fall back to sequential if a regression appears.
+                if os.environ.get('ELB_PARALLEL_WARM_REUSE', '1') != '0':
+                    with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=3,
+                        thread_name_prefix='elb-warm-reuse',
+                    ) as pool:
+                        futures = [
+                            pool.submit(self._cleanup_stale_jobs),
+                            pool.submit(
+                                kubernetes.create_scripts_configmap,
+                                cfg.appstate.k8s_ctx,
+                                cfg.cluster.dry_run,
+                            ),
+                            pool.submit(self._upload_queries_only, queries),
+                        ]
+                        for fut in concurrent.futures.as_completed(futures):
+                            fut.result()
+                else:
+                    self._cleanup_stale_jobs()
+                    kubernetes.create_scripts_configmap(cfg.appstate.k8s_ctx, cfg.cluster.dry_run)
+                    self._upload_queries_only(queries)
                 self.cleanup_stack.append(lambda: self._safe_collect_logs())
                 return
 
