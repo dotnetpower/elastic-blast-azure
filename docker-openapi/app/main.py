@@ -68,7 +68,7 @@ if not API_TOKEN and not ALLOW_UNAUTHENTICATED:
         "ELB_OPENAPI_ALLOW_UNAUTHENTICATED is not set. All authenticated "
         "endpoints will return 503 until one of these env vars is provided."
     )
-VERSION = "3.4.0"
+VERSION = "3.4.1"
 
 MAX_ACTIVE_SUBMISSIONS = max(1, int(os.environ.get("ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS", "1")))
 DISPATCH_INTERVAL_SECONDS = max(1, int(os.environ.get("ELB_OPENAPI_DISPATCH_INTERVAL_SECONDS", "5")))
@@ -440,6 +440,29 @@ def _storage_oauth_token() -> str:
     return cred.get_token("https://storage.azure.com/.default").token
 
 
+_NON_DATABASE_PREFIXES: frozenset[str] = frozenset(
+    {"metadata", "custom-db-build", ".staging", "custom_db"}
+)
+_SHARD_PREFIX_RE = re.compile(r"^\d+shards$")
+
+
+def _is_database_prefix(name: str) -> bool:
+    """Return ``True`` only for prefixes that represent a real BLAST DB.
+
+    The ``blast-db`` container also carries non-database top-level
+    prefixes — ``{N}shards/`` (prepare-db shard layouts), ``metadata/``
+    (oracle staging area), ``.staging/``, ``custom-db-build/``, and
+    ``custom_db/`` (each custom DB lives one level deeper). Filtering
+    here mirrors the dashboard's ``list_databases`` skip-rules so that
+    ``GET /v1/databases`` only surfaces user-actionable database names.
+    """
+    if not name or name in _NON_DATABASE_PREFIXES:
+        return False
+    if _SHARD_PREFIX_RE.match(name):
+        return False
+    return True
+
+
 def _list_blast_database_names(container: str = "blast-db", timeout: int = 30) -> list[str]:
     """List the top-level prefixes (database names) inside ``container``.
 
@@ -447,6 +470,10 @@ def _list_blast_database_names(container: str = "blast-db", timeout: int = 30) -
     enumerates the first-level "directories" — the database names. Avoids
     fetching the entire blob list, which on a populated cluster runs into
     tens of thousands of entries.
+
+    Drops non-database prefixes (shard layouts, oracle metadata, custom-db
+    staging) via :func:`_is_database_prefix` so callers receive only real
+    BLAST databases.
 
     Raises ``FileNotFoundError`` if the container does not exist; other
     HTTP errors propagate as :class:`requests.HTTPError`.
@@ -478,7 +505,7 @@ def _list_blast_database_names(container: str = "blast-db", timeout: int = 30) -
         root = ET.fromstring(resp.text)
         for prefix in root.findall(".//BlobPrefix/Name"):
             value = (prefix.text or "").strip().rstrip("/")
-            if value:
+            if _is_database_prefix(value):
                 names.append(value)
         next_marker = root.find("NextMarker")
         marker = (
