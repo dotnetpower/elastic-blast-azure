@@ -24,38 +24,61 @@ elb/commands/submit.py - Command to submit ElasticBLAST searches
 Author: Christiam Camacho (camacho@ncbi.nlm.nih.gov)
 Created: Wed 22 Apr 2020 06:31:30 AM EDT
 """
-import os
 import logging
 import math
+import os
 from concurrent.futures import ThreadPoolExecutor
+from pprint import pformat
 from timeit import default_timer as timer
 from typing import List, Tuple
-from pprint import pformat
-from elastic_blast import elasticblast
-from elastic_blast.elasticblast_factory import ElasticBlastFactory
 
-from elastic_blast.resources.quotas.quota_check import check_resource_quotas
+from elastic_blast import elasticblast
 from elastic_blast.aws import check_cluster as aws_check_cluster
-from elastic_blast.filehelper import open_for_read, open_for_read_iter, open_for_write_immediate
-from elastic_blast.filehelper import check_for_read, check_dir_for_write, cleanup_temp_bucket_dirs
-from elastic_blast.filehelper import get_length, harvest_query_splitting_results
-from elastic_blast.split import FASTAReader
+from elastic_blast.azure import check_cluster as azure_check_cluster
+from elastic_blast.config import validate_cloud_storage_object_uri
+from elastic_blast.constants import (
+    BLASTDB_ERROR,
+    CLUSTER_ERROR,
+    CSP,
+    ELB_AWS_JOB_IDS,
+    ELB_AZURE_PREFIX,
+    ELB_DFLT_MIN_QUERY_FILESIZE_TO_SPLIT_ON_CLIENT_COMPRESSED,
+    ELB_DFLT_MIN_QUERY_FILESIZE_TO_SPLIT_ON_CLIENT_UNCOMPRESSED,
+    ELB_GCS_PREFIX,
+    ELB_META_CONFIG_FILE,
+    ELB_METADATA_DIR,
+    ELB_QUERY_BATCH_DIR,
+    ELB_S3_PREFIX,
+    ELB_STATE_DISK_ID_FILE,
+    INPUT_ERROR,
+    PERMISSIONS_ERROR,
+    QUERY_LIST_EXT,
+    ElbCommand,
+    QuerySplitMode,
+)
+from elastic_blast.elasticblast_factory import ElasticBlastFactory
+from elastic_blast.elb_config import ElasticBlastConfig
+from elastic_blast.filehelper import (
+    check_dir_for_write,
+    check_for_read,
+    cleanup_temp_bucket_dirs,
+    get_length,
+    harvest_query_splitting_results,
+    open_for_read,
+    open_for_read_iter,
+    open_for_write_immediate,
+)
 from elastic_blast.gcp import check_cluster as gcp_check_cluster
 from elastic_blast.gcp_traits import get_machine_properties
-from elastic_blast.azure import check_cluster as azure_check_cluster
-from elastic_blast.util import check_user_provided_blastdb_exists, UserReportError
-from elastic_blast.util import get_resubmission_error_msg
-from elastic_blast.util import ElbSupportedPrograms
-from elastic_blast.constants import ELB_AWS_JOB_IDS, ELB_METADATA_DIR, ELB_STATE_DISK_ID_FILE, QuerySplitMode
-from elastic_blast.constants import ELB_QUERY_BATCH_DIR, BLASTDB_ERROR, INPUT_ERROR
-from elastic_blast.constants import PERMISSIONS_ERROR, CLUSTER_ERROR, CSP, QUERY_LIST_EXT
-from elastic_blast.constants import ElbCommand, ELB_META_CONFIG_FILE
-from elastic_blast.constants import ELB_DFLT_MIN_QUERY_FILESIZE_TO_SPLIT_ON_CLIENT_COMPRESSED
-from elastic_blast.constants import ELB_DFLT_MIN_QUERY_FILESIZE_TO_SPLIT_ON_CLIENT_UNCOMPRESSED
-from elastic_blast.constants import ELB_S3_PREFIX, ELB_GCS_PREFIX, ELB_AZURE_PREFIX
+from elastic_blast.resources.quotas.quota_check import check_resource_quotas
+from elastic_blast.split import FASTAReader
 from elastic_blast.taxonomy import setup_taxid_filtering
-from elastic_blast.config import validate_cloud_storage_object_uri
-from elastic_blast.elb_config import ElasticBlastConfig
+from elastic_blast.util import (
+    ElbSupportedPrograms,
+    UserReportError,
+    check_user_provided_blastdb_exists,
+    get_resubmission_error_msg,
+)
 
 
 def get_query_split_mode(cfg: ElasticBlastConfig, query_files):
@@ -131,7 +154,9 @@ def submit(args, cfg: ElasticBlastConfig, clean_up_stack):
 
     # Azure-specific prerequisites check (kubectl, azcopy, Azure SDK auth)
     if cfg.cloud_provider.cloud == CSP.AZURE:
-        from elastic_blast.azure import _sdk_check_prerequisites as azure_check_prerequisites
+        from elastic_blast.azure import (
+            _sdk_check_prerequisites as azure_check_prerequisites,
+        )
         azure_check_prerequisites()
 
     # For now, checking resources is only implemented for AWS
