@@ -27,6 +27,7 @@ import os
 import json
 import logging
 import pathlib
+import re
 import time
 from tenacity import retry, stop_after_delay, stop_after_attempt, wait_random
 from timeit import default_timer as timer
@@ -53,6 +54,10 @@ from .constants import ELB_DFLT_JANITOR_SCHEDULE_GCP, PERMISSIONS_ERROR, DEPENDE
 from .constants import CLUSTER_ERROR
 from .filehelper import open_for_write_immediate
 from .elb_config import ElasticBlastConfig
+
+
+DASHBOARD_WARMUP_APP_LABEL = 'elb-db-warmup'
+DASHBOARD_WARMUP_SOURCE_VERSION_ANNOTATION = 'elb.dashboard/source-version'
 
 
 def get_maximum_number_of_allowed_k8s_jobs(dry_run: bool = False) -> int:
@@ -123,7 +128,99 @@ def get_persistent_disks(k8s_ctx: str, dry_run: bool = False) -> list[str]:
                 elif 'nfs' in spec:
                     result.append(spec['nfs'].get('server', 'nfs-volume'))
             return result
+
     return list()
+
+
+def _dashboard_warmup_label_value(value: str) -> str:
+    label = re.sub(r'[^A-Za-z0-9._-]+', '-', value).strip('-_.')
+    if not label:
+        return 'db'
+    return label[:63].rstrip('-_.') or 'db'
+
+
+def _job_source_version(job: dict) -> str:
+    metadata = job.get('metadata', {}) or {}
+    annotations = metadata.get('annotations', {}) or {}
+    value = annotations.get(DASHBOARD_WARMUP_SOURCE_VERSION_ANNOTATION)
+    if isinstance(value, str) and value:
+        return value
+    template_metadata = job.get('spec', {}).get('template', {}).get('metadata', {}) or {}
+    template_annotations = template_metadata.get('annotations', {}) or {}
+    value = template_annotations.get(DASHBOARD_WARMUP_SOURCE_VERSION_ANNOTATION)
+    return value if isinstance(value, str) else ''
+
+
+def _dashboard_warmup_jobs_ready(cfg: ElasticBlastConfig, db_name: str, num_shards: int) -> bool:
+    if not getattr(cfg.cluster, 'skip_warmed_ssd_init', False):
+        return False
+    if cfg.cloud_provider.cloud != CSP.AZURE:
+        return False
+    if not cfg.cluster.reuse:
+        return False
+    if not db_name or num_shards <= 0 or not cfg.appstate.k8s_ctx:
+        return False
+    if cfg.cluster.dry_run:
+        logging.info('Skipping dashboard warmup lookup in dry-run mode')
+        return False
+
+    expected_shards = {
+        f'{idx:02d}' for idx in range(min(num_shards, cfg.cluster.num_nodes))
+    }
+    db_label = _dashboard_warmup_label_value(db_name)
+    selector = f'app={DASHBOARD_WARMUP_APP_LABEL},db={db_label}'
+    cmd = f'kubectl --context={cfg.appstate.k8s_ctx} get jobs -l {selector} -o json'
+    try:
+        proc = safe_exec(cmd)
+        payload = json.loads(handle_error(proc.stdout) or '{}')
+    except Exception as err:
+        logging.info('Dashboard warmup lookup failed; running SSD init: %s', err)
+        return False
+
+    ready_shards = set()
+    active_shards = set()
+    failed_shards = set()
+    source_versions = set()
+    for job in payload.get('items', []) or []:
+        metadata = job.get('metadata', {}) or {}
+        labels = metadata.get('labels', {}) or {}
+        shard = str(labels.get('shard') or '')
+        if shard not in expected_shards:
+            continue
+        status = job.get('status', {}) or {}
+        if int(status.get('succeeded') or 0) > 0:
+            ready_shards.add(shard)
+            source_version = _job_source_version(job)
+            if source_version:
+                source_versions.add(source_version)
+        elif int(status.get('failed') or 0) > 0:
+            failed_shards.add(shard)
+        elif int(status.get('active') or 0) > 0:
+            active_shards.add(shard)
+
+    if source_versions and len(source_versions) > 1:
+        logging.info(
+            'Dashboard warmup jobs for %s have mixed source versions; running SSD init',
+            db_name,
+        )
+        return False
+    if expected_shards.issubset(ready_shards):
+        logging.info(
+            'Skipping sharded local SSD init for %s; dashboard warmup is ready for shards %s',
+            db_name,
+            ','.join(sorted(expected_shards)),
+        )
+        return True
+
+    missing = ','.join(sorted(expected_shards - ready_shards))
+    logging.info(
+        'Dashboard warmup incomplete for %s; running SSD init (missing=%s active=%s failed=%s)',
+        db_name,
+        missing,
+        ','.join(sorted(active_shards)),
+        ','.join(sorted(failed_shards)),
+    )
+    return False
 
 
 def get_volume_snapshots(k8s_ctx: str, dry_run: bool = False) -> list[str]:
@@ -896,6 +993,9 @@ def initialize_local_ssd_sharded(cfg: ElasticBlastConfig, query_files: list[str]
     num_shards = cfg.blast.db_partitions
     partition_prefix = cfg.blast.db_partition_prefix
     program = cfg.blast.program
+
+    if _dashboard_warmup_jobs_ready(cfg, db, num_shards):
+        return
 
     results_bucket = cfg.cluster.results
     if cfg.cloud_provider.cloud == CSP.AZURE:

@@ -86,7 +86,8 @@ from .constants import CFG_CLUSTER_NUM_NODES, CFG_CLUSTER_NUM_CPUS
 from .constants import CFG_CLUSTER_PD_SIZE, CFG_CLUSTER_USE_PREEMPTIBLE
 from .constants import CFG_CLUSTER_DRY_RUN, CFG_CLUSTER_DISK_TYPE, CFG_CLUSTER_REUSE
 from .constants import CFG_CLUSTER_PROVISIONED_IOPS, CFG_CLUSTER_BID_PERCENTAGE
-from .constants import CFG_CLUSTER_LABELS, CFG_CLUSTER_EXP_USE_LOCAL_SSD, CFG_CLUSTER_REUSE, CFG_CLUSTER_STORAGE_CLASS
+from .constants import CFG_CLUSTER_LABELS, CFG_CLUSTER_EXP_USE_LOCAL_SSD
+from .constants import CFG_CLUSTER_EXP_SKIP_WARMED_SSD_INIT, CFG_CLUSTER_STORAGE_CLASS
 from .constants import CFG_CLUSTER_ENABLE_STACKDRIVER
 from .constants import CFG_TIMEOUTS, CFG_TIMEOUT_INIT_PV
 from .constants import CFG_TIMEOUT_BLAST_K8S_JOB
@@ -646,6 +647,7 @@ class ClusterConfig(ConfigParserToDataclassMapper):
     labels: str = ''
     db_source: DBSource = field(init=False)
     use_local_ssd: bool = False
+    skip_warmed_ssd_init: bool = False
     storage_class: str = ''
     enable_stackdriver: bool = False
     dry_run: bool = False
@@ -668,6 +670,7 @@ class ClusterConfig(ConfigParserToDataclassMapper):
                'labels': ParamInfo(CFG_CLUSTER, CFG_CLUSTER_LABELS),
                'db_source': ParamInfo(CFG_BLAST, CFG_BLAST_DB_SRC),
                'use_local_ssd': ParamInfo(CFG_CLUSTER, CFG_CLUSTER_EXP_USE_LOCAL_SSD),
+               'skip_warmed_ssd_init': ParamInfo(CFG_CLUSTER, CFG_CLUSTER_EXP_SKIP_WARMED_SSD_INIT),
                'storage_class': ParamInfo(CFG_CLUSTER, CFG_CLUSTER_STORAGE_CLASS),
                'enable_stackdriver': ParamInfo(CFG_CLUSTER, CFG_CLUSTER_ENABLE_STACKDRIVER),
                'dry_run': ParamInfo(CFG_CLUSTER, CFG_CLUSTER_DRY_RUN),

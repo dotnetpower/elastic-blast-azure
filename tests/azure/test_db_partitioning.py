@@ -18,20 +18,19 @@ Author: Moon Hyuk Choi moonchoi@microsoft.com
 import gzip
 import json
 import os
-import shlex
 import subprocess
 import xml.etree.ElementTree as ET
 from argparse import Namespace
 from pathlib import Path
-from unittest.mock import patch, MagicMock, call, ANY
+from unittest.mock import patch, MagicMock
 from tempfile import TemporaryDirectory
 import pytest
 from elastic_blast.azure import ElasticBlastAzure
-from elastic_blast.constants import ElbCommand, AKS_PROVISIONING_STATE, INPUT_ERROR
+from elastic_blast.constants import ElbCommand, AKS_PROVISIONING_STATE
 from elastic_blast.elb_config import ElasticBlastConfig
 from elastic_blast.db_metadata import DbMetadata
 from elastic_blast import config, kubernetes
-from elastic_blast.util import SafeExecError, UserReportError
+from elastic_blast.util import UserReportError
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'azure', 'data')
 INI = os.path.join(DATA_DIR, 'test-cfg-file.ini')
@@ -53,7 +52,8 @@ DB_METADATA = DbMetadata(version='1',
 
 def _make_cfg(db_partitions: int = 0, db_partition_prefix: str = '',
               reuse: bool = False, dry_run: bool = True,
-              use_local_ssd: bool = False) -> ElasticBlastConfig:
+              use_local_ssd: bool = False,
+              skip_warmed_ssd_init: bool = False) -> ElasticBlastConfig:
     """Create a test config with optional partitioning settings.
     
     Mocks get_latest_dir and get_db_metadata to avoid Azure Storage
@@ -68,6 +68,7 @@ def _make_cfg(db_partitions: int = 0, db_partition_prefix: str = '',
     cfg.cluster.reuse = reuse
     cfg.cluster.dry_run = dry_run
     cfg.cluster.use_local_ssd = use_local_ssd
+    cfg.cluster.skip_warmed_ssd_init = skip_warmed_ssd_init
     return cfg
 
 
@@ -85,6 +86,11 @@ class TestPartitionConfig:
         cfg = _make_cfg(db_partitions=10, db_partition_prefix=PARTITION_PREFIX)
         assert cfg.blast.db_partitions == 10
         assert cfg.blast.db_partition_prefix == PARTITION_PREFIX
+
+    def test_cluster_skip_warmed_ssd_init_default(self):
+        """Warm SSD init skip is opt-in."""
+        cfg = _make_cfg()
+        assert cfg.cluster.skip_warmed_ssd_init is False
 
     def test_validation_prefix_required_when_partitions_set(self):
         """Validation: prefix required when partitions > 0."""
@@ -704,6 +710,53 @@ class TestInitializeStoragePartitioned:
             'Expected num_partitions=3 in env var'
         assert PARTITION_PREFIX in yaml_content, \
             'Expected partition prefix in env var'
+
+
+class TestInitializeLocalSsdSharded:
+    """Tests for kubernetes.initialize_local_ssd_sharded()."""
+
+    def test_skips_init_jobs_when_dashboard_warmup_ready(self):
+        """Dashboard-warmed shards can skip redundant init-ssd jobs."""
+        cfg = _make_cfg(db_partitions=3, db_partition_prefix=PARTITION_PREFIX,
+                        reuse=True, dry_run=False, use_local_ssd=True,
+                        skip_warmed_ssd_init=True)
+        cfg.appstate.k8s_ctx = 'test-ctx'
+        cfg.blast.db = 'RNAvirome.S2.RDRP'
+
+        warmup_payload = {
+            'items': [
+                {
+                    'metadata': {
+                        'labels': {
+                            'app': 'elb-db-warmup',
+                            'db': 'RNAvirome.S2.RDRP',
+                            'shard': shard,
+                        },
+                        'annotations': {'elb.dashboard/source-version': 'v1'},
+                    },
+                    'status': {'succeeded': 1},
+                }
+                for shard in ('00', '01', '02')
+            ]
+        }
+        safe_exec_calls = []
+
+        def mock_safe_exec(cmd, **kwargs):
+            cmd_str = cmd if isinstance(cmd, str) else ' '.join(cmd)
+            safe_exec_calls.append(cmd_str)
+            result = MagicMock()
+            if 'get jobs -l app=elb-db-warmup' in cmd_str:
+                result.stdout = json.dumps(warmup_payload).encode()
+            else:
+                result.stdout = b''
+            return result
+
+        with patch('elastic_blast.kubernetes.safe_exec', side_effect=mock_safe_exec):
+            kubernetes.initialize_local_ssd_sharded(cfg, wait=False)
+
+        assert any('get jobs -l app=elb-db-warmup,db=RNAvirome.S2.RDRP' in c
+                   for c in safe_exec_calls)
+        assert not any('apply -f' in c for c in safe_exec_calls)
 
 
 class TestCreateScriptsConfigMap:
