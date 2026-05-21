@@ -23,38 +23,62 @@ Help functions to access and manipulate Kubernetes clusters
 
 """
 
-import os
 import json
 import logging
+import os
 import pathlib
 import re
 import time
-from tenacity import retry, stop_after_delay, stop_after_attempt, wait_random
-from timeit import default_timer as timer
-from importlib_resources import files, as_file
 from tempfile import TemporaryDirectory
+from timeit import default_timer as timer
 from typing import List, Optional
 
-from .util import safe_exec, gcp_get_blastdb_latest_path, ElbSupportedPrograms, SafeExecError
-from .util import get_blastdb_info, UserReportError, handle_error
-from .subst import substitute_params
-from .constants import CSP, ELB_JANITOR_DOCKER_IMAGE_GCP, ELB_PAUSE_AFTER_INIT_PV, ELB_DOCKER_IMAGE_GCP, ELB_QS_DOCKER_IMAGE_GCP, K8S_JOB_SUBMIT_JOBS
-from .constants import ELB_DOCKER_IMAGE_AZURE, ELB_QS_DOCKER_IMAGE_AZURE
-from .constants import K8S_JOB_BLAST, K8S_JOB_GET_BLASTDB
-from .constants import K8S_JOB_IMPORT_QUERY_BATCHES, K8S_JOB_LOAD_BLASTDB_INTO_RAM, K8S_JOB_RESULTS_EXPORT
-from .constants import ELB_K8S_JOB_SUBMISSION_MAX_WAIT
-from .constants import ELB_K8S_JOB_SUBMISSION_MIN_WAIT
-from .constants import ELB_K8S_JOB_SUBMISSION_MAX_RETRIES
-from .constants import ELB_K8S_JOB_SUBMISSION_TIMEOUT, ELB_METADATA_DIR
-from .constants import K8S_MAX_JOBS_PER_DIR, ELB_STATE_DISK_ID_FILE, ELB_QUERY_BATCH_DIR
-from .constants import ELB_CJS_DOCKER_IMAGE_GCP
-from .constants import ELB_CJS_DOCKER_IMAGE_AZURE
-from .constants import ElbExecutionMode, ELB_JANITOR_SCHEDULE
-from .constants import ELB_DFLT_JANITOR_SCHEDULE_GCP, PERMISSIONS_ERROR, DEPENDENCY_ERROR
-from .constants import CLUSTER_ERROR
-from .filehelper import open_for_write_immediate
-from .elb_config import ElasticBlastConfig
+from importlib_resources import as_file, files
+from tenacity import retry, stop_after_attempt, stop_after_delay, wait_random
 
+from .constants import (
+    CLUSTER_ERROR,
+    CSP,
+    DEPENDENCY_ERROR,
+    ELB_CJS_DOCKER_IMAGE_AZURE,
+    ELB_CJS_DOCKER_IMAGE_GCP,
+    ELB_DFLT_JANITOR_SCHEDULE_GCP,
+    ELB_DOCKER_IMAGE_AZURE,
+    ELB_DOCKER_IMAGE_GCP,
+    ELB_JANITOR_DOCKER_IMAGE_GCP,
+    ELB_JANITOR_SCHEDULE,
+    ELB_K8S_JOB_SUBMISSION_MAX_RETRIES,
+    ELB_K8S_JOB_SUBMISSION_MAX_WAIT,
+    ELB_K8S_JOB_SUBMISSION_MIN_WAIT,
+    ELB_K8S_JOB_SUBMISSION_TIMEOUT,
+    ELB_METADATA_DIR,
+    ELB_PAUSE_AFTER_INIT_PV,
+    ELB_QS_DOCKER_IMAGE_AZURE,
+    ELB_QS_DOCKER_IMAGE_GCP,
+    ELB_QUERY_BATCH_DIR,
+    ELB_STATE_DISK_ID_FILE,
+    K8S_JOB_BLAST,
+    K8S_JOB_GET_BLASTDB,
+    K8S_JOB_IMPORT_QUERY_BATCHES,
+    K8S_JOB_LOAD_BLASTDB_INTO_RAM,
+    K8S_JOB_RESULTS_EXPORT,
+    K8S_JOB_SUBMIT_JOBS,
+    K8S_MAX_JOBS_PER_DIR,
+    PERMISSIONS_ERROR,
+    ElbExecutionMode,
+)
+from .elb_config import ElasticBlastConfig
+from .filehelper import open_for_write_immediate
+from .subst import substitute_params
+from .util import (
+    ElbSupportedPrograms,
+    SafeExecError,
+    UserReportError,
+    gcp_get_blastdb_latest_path,
+    get_blastdb_info,
+    handle_error,
+    safe_exec,
+)
 
 DASHBOARD_WARMUP_APP_LABEL = 'elb-db-warmup'
 DASHBOARD_WARMUP_SOURCE_VERSION_ANNOTATION = 'elb.dashboard/source-version'

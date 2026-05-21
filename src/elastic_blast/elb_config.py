@@ -25,113 +25,197 @@ Author: Greg Boratyn (boratyng@ncbi.nlm.nih.gov)
 Created: Tue 09 Feb 2021 03:52:31 PM EDT
 """
 
-import os
-from dataclasses import dataclass
-from dataclasses import InitVar, field, fields, asdict
-import uuid
-from dataclasses_json import dataclass_json, LetterCase, config
-from dataclasses_json import DataClassJsonMixin
-import getpass
-from hashlib import md5
 import configparser
-import re
-import time
 import datetime
-import socket
-import logging
-import shlex
-from collections import defaultdict
+import getpass
 import json
-import boto3 # type: ignore
+import logging
+import os
+import re
+import shlex
+import socket
+import time
+import uuid
+from collections import defaultdict
+from dataclasses import InitVar, asdict, dataclass, field, fields
 from enum import Enum
-from typing import Optional, List, Dict, Any
-from typing import cast
+from hashlib import md5
+from typing import Any, Dict, List, Optional, cast
+
+import boto3  # type: ignore
+from dataclasses_json import DataClassJsonMixin, LetterCase, config, dataclass_json
+
 from . import VERSION
-from .constants import CSP, ElbCommand
-from .constants import ELB_DFLT_NUM_NODES
-from .constants import ELB_DFLT_USE_PREEMPTIBLE
-from .constants import ELB_DFLT_GCP_PD_SIZE, ELB_DFLT_AWS_PD_SIZE, ELB_DFLT_AZURE_PD_SIZE, ELB_DFLT_AZURE_PD_SIZE_BIG
-from .constants import ELB_DFLT_GCP_MACHINE_TYPE, ELB_DFLT_AWS_MACHINE_TYPE
-from .constants import ELB_DFLT_AZURE_MACHINE_TYPE
-from .constants import ELB_DFLT_INIT_PV_TIMEOUT, ELB_DFLT_BLAST_K8S_TIMEOUT
-from .constants import ELB_DFLT_AWS_SPOT_BID_PERCENTAGE
-from .constants import ELB_DFLT_AWS_DISK_TYPE, ELB_DFLT_OUTFMT
-from .constants import ELB_BLASTDB_MEMORY_MARGIN
-from .constants import CFG_CLOUD_PROVIDER
-from .constants import CFG_CP_GCP_PROJECT, CFG_CP_GCP_REGION, CFG_CP_GCP_ZONE
-from .constants import CFG_CP_GCP_NETWORK, CFG_CP_GCP_SUBNETWORK
-from .constants import CFG_CP_AZURE_ACR_RESOURCE_GROUP, CFG_CP_AZURE_ACR_NAME
-from .constants import CFG_CP_AZURE_RESOURCE_GROUP, CFG_CP_AZURE_REGION
-from .constants import CFG_CP_AZURE_STORAGE_ACCOUNT, CFG_CP_AZURE_STORAGE_ACCOUNT_CONTAINER, CFG_CP_AZURE_STORAGE_ACCOUNT_KEY
-from .constants import CFG_CP_AZURE_VNET, CFG_CP_AZURE_SUBNET
-from .constants import CFG_CP_AZURE_K8S_VERSION
-from .constants import ELB_PRIVATE_AZURE_BLASTDB_ENDPOINT
-from .constants import CFG_CP_GCP_K8S_VERSION
-from .constants import CFG_CP_AWS_REGION, CFG_CP_AWS_VPC, CFG_CP_AWS_SUBNET
-from .constants import CFG_CP_AWS_JOB_ROLE, CFG_CP_AWS_BATCH_SERVICE_ROLE
-from .constants import CFG_CP_AWS_INSTANCE_ROLE, CFG_CP_AWS_SPOT_FLEET_ROLE
-from .constants import CFG_CP_AWS_SECURITY_GROUP, CFG_CP_AWS_KEY_PAIR
-from .constants import CFG_CP_AWS_JANITOR_EXECUTION_ROLE
-from .constants import CFG_CP_AWS_JANITOR_COPY_ZIPS_ROLE
-from .constants import CFG_BLAST, CFG_BLAST_PROGRAM, CFG_BLAST_DB
-from .constants import CFG_BLAST_DB_SRC, CFG_BLAST_RESULTS, CFG_BLAST_QUERY
-from .constants import CFG_BLAST_OPTIONS, CFG_BLAST_BATCH_LEN
-from .constants import CFG_BLAST_MEM_REQUEST, CFG_BLAST_MEM_LIMIT
-from .constants import CFG_BLAST_DB_MEM_MARGIN
-from .constants import CFG_BLAST_MIN_QSIZE_TO_SPLIT_ON_CLIENT_COMPRESSED
-from .constants import CFG_BLAST_MIN_QSIZE_TO_SPLIT_ON_CLIENT_UNCOMPRESSED
-from .constants import CFG_BLAST_DB_PARTITIONS, CFG_BLAST_DB_PARTITION_PREFIX, CFG_BLAST_DB_AUTO_PARTITION
-from .constants import CFG_CLUSTER, CFG_CLUSTER_NAME, CFG_CLUSTER_MACHINE_TYPE
-from .constants import CFG_CLUSTER_NUM_NODES, CFG_CLUSTER_NUM_CPUS
-from .constants import CFG_CLUSTER_PD_SIZE, CFG_CLUSTER_USE_PREEMPTIBLE
-from .constants import CFG_CLUSTER_DRY_RUN, CFG_CLUSTER_DISK_TYPE, CFG_CLUSTER_REUSE
-from .constants import CFG_CLUSTER_PROVISIONED_IOPS, CFG_CLUSTER_BID_PERCENTAGE
-from .constants import CFG_CLUSTER_LABELS, CFG_CLUSTER_EXP_USE_LOCAL_SSD
-from .constants import CFG_CLUSTER_EXP_SKIP_WARMED_SSD_INIT, CFG_CLUSTER_STORAGE_CLASS
-from .constants import CFG_CLUSTER_ENABLE_STACKDRIVER
-from .constants import CFG_TIMEOUTS, CFG_TIMEOUT_INIT_PV
-from .constants import CFG_TIMEOUT_BLAST_K8S_JOB
-from .constants import INPUT_ERROR, ELB_NOT_INITIALIZED_MEM, ELB_NOT_INITIALIZED_NUM
-from .constants import GCP_MAX_LABEL_LENGTH, AWS_MAX_TAG_LENGTH, AZURE_MAX_TAG_LENGTH
-from .constants import GCP_MAX_NUM_LABELS, AWS_MAX_NUM_LABELS, AZURE_MAX_NUM_LABELS
-from .constants import SYSTEM_MEMORY_RESERVE, ELB_AWS_ARM_INSTANCE_TYPE_REGEX
-from .constants import ELB_DFLT_AWS_NUM_CPUS, ELB_DFLT_GCP_NUM_CPUS, ELB_DFLT_AZURE_NUM_CPUS
-from .constants import ELB_S3_PREFIX, ELB_GCS_PREFIX, ELB_UNKNOWN_MAX_NUMBER_OF_CONCURRENT_JOBS
-from .constants import ELB_AZURE_PREFIX
-from .constants import AWS_ROLE_PREFIX, CFG_CP_AWS_AUTO_SHUTDOWN_ROLE
-from .constants import BLASTDB_ERROR, ELB_UNKNOWN, ELB_JANITOR_SCHEDULE
-from .constants import ELB_DFLT_GCP_REGION, ELB_DFLT_GCP_ZONE
-from .constants import ELB_DFLT_AWS_REGION, ELB_UNKNOWN_GCP_PROJECT
-from .constants import ELB_UNKNOWN_AZURE_ACR_RESOURCEGROUP, ELB_UNKNOWN_AZURE_ACR_NAME
-from .constants import ELB_DFLT_AZURE_REGION, ELB_UNKNOWN_AZURE_RESOURCEGROUP, ELB_UNKNOWN_AZURE_STORAGE_ACCOUNT
-from .constants import ELB_UNKNOWN_AZURE_STORAGE_ACCOUNT_CONTAINER, ELB_UNKNOWN_AZURE_STORAGE_ACCOUNT_KEY
-from .constants import ELB_DFLT_GCP_K8S_VERSION, ELB_DFLT_AZURE_K8S_VERSION
-from .constants import ELB_DFLT_AZURE_SYSTEM_VM_SIZE, CFG_CP_AZURE_SYSTEM_VM_SIZE
-from .constants import ELB_DFLT_MIN_QUERY_FILESIZE_TO_SPLIT_ON_CLIENT_COMPRESSED
-from .constants import ELB_DFLT_MIN_QUERY_FILESIZE_TO_SPLIT_ON_CLIENT_UNCOMPRESSED
-from .constants import ELB_DFLT_AKS_ACR_NAME, ELB_DFLT_AKS_ACR_RESOURCE_GROUP
-from .constants import ELB_DOCKER_IMAGE_AZURE, ELB_QS_DOCKER_IMAGE_AZURE, ELB_JANITOR_DOCKER_IMAGE_AZURE, ELB_CJS_DOCKER_IMAGE_AZURE
-from .util import validate_gcp_string, check_aws_region_for_invalid_characters
-from .util import validate_gke_cluster_name, ElbSupportedPrograms
-from .util import get_query_batch_size, get_gcp_project
-from .util import UserReportError, safe_exec
-from .util import gcp_get_regions, sanitize_for_k8s
-from .util import validate_azure_region, validate_azure_resource_group
-from .util import azure_get_regions
-from .gcp_traits import get_machine_properties as gcp_get_machine_properties
-from .gcp_traits import enable_gcp_api
+from .aws_traits import create_aws_config
 from .aws_traits import get_machine_properties as aws_get_machine_properties
 from .aws_traits import get_regions as aws_get_regions
-from .aws_traits import create_aws_config
+from .azure_traits import get_latest_dir, get_sas_token
 from .azure_traits import get_machine_properties as azure_get_machine_properties
-from .azure_traits import get_sas_token, get_latest_dir
-from .base import InstanceProperties, PositiveInteger, Percentage
-from .base import ParamInfo, ConfigParserToDataclassMapper, DBSource, MemoryStr
-from .config import validate_cloud_storage_object_uri, _validate_csp
+from .base import (
+    ConfigParserToDataclassMapper,
+    DBSource,
+    InstanceProperties,
+    MemoryStr,
+    ParamInfo,
+    Percentage,
+    PositiveInteger,
+)
+from .config import _validate_csp, validate_cloud_storage_object_uri
+from .constants import (
+    AWS_MAX_NUM_LABELS,
+    AWS_MAX_TAG_LENGTH,
+    AWS_ROLE_PREFIX,
+    AZURE_MAX_NUM_LABELS,
+    AZURE_MAX_TAG_LENGTH,
+    BLASTDB_ERROR,
+    CFG_BLAST,
+    CFG_BLAST_BATCH_LEN,
+    CFG_BLAST_DB,
+    CFG_BLAST_DB_AUTO_PARTITION,
+    CFG_BLAST_DB_MEM_MARGIN,
+    CFG_BLAST_DB_PARTITION_PREFIX,
+    CFG_BLAST_DB_PARTITIONS,
+    CFG_BLAST_DB_SRC,
+    CFG_BLAST_MEM_LIMIT,
+    CFG_BLAST_MEM_REQUEST,
+    CFG_BLAST_MIN_QSIZE_TO_SPLIT_ON_CLIENT_COMPRESSED,
+    CFG_BLAST_MIN_QSIZE_TO_SPLIT_ON_CLIENT_UNCOMPRESSED,
+    CFG_BLAST_OPTIONS,
+    CFG_BLAST_PROGRAM,
+    CFG_BLAST_QUERY,
+    CFG_BLAST_RESULTS,
+    CFG_CLOUD_PROVIDER,
+    CFG_CLUSTER,
+    CFG_CLUSTER_BID_PERCENTAGE,
+    CFG_CLUSTER_DISK_TYPE,
+    CFG_CLUSTER_DRY_RUN,
+    CFG_CLUSTER_ENABLE_STACKDRIVER,
+    CFG_CLUSTER_EXP_SKIP_WARMED_SSD_INIT,
+    CFG_CLUSTER_EXP_USE_LOCAL_SSD,
+    CFG_CLUSTER_LABELS,
+    CFG_CLUSTER_MACHINE_TYPE,
+    CFG_CLUSTER_NAME,
+    CFG_CLUSTER_NUM_CPUS,
+    CFG_CLUSTER_NUM_NODES,
+    CFG_CLUSTER_PD_SIZE,
+    CFG_CLUSTER_PROVISIONED_IOPS,
+    CFG_CLUSTER_REUSE,
+    CFG_CLUSTER_STORAGE_CLASS,
+    CFG_CLUSTER_USE_PREEMPTIBLE,
+    CFG_CP_AWS_AUTO_SHUTDOWN_ROLE,
+    CFG_CP_AWS_BATCH_SERVICE_ROLE,
+    CFG_CP_AWS_INSTANCE_ROLE,
+    CFG_CP_AWS_JANITOR_COPY_ZIPS_ROLE,
+    CFG_CP_AWS_JANITOR_EXECUTION_ROLE,
+    CFG_CP_AWS_JOB_ROLE,
+    CFG_CP_AWS_KEY_PAIR,
+    CFG_CP_AWS_REGION,
+    CFG_CP_AWS_SECURITY_GROUP,
+    CFG_CP_AWS_SPOT_FLEET_ROLE,
+    CFG_CP_AWS_SUBNET,
+    CFG_CP_AWS_VPC,
+    CFG_CP_AZURE_ACR_NAME,
+    CFG_CP_AZURE_ACR_RESOURCE_GROUP,
+    CFG_CP_AZURE_K8S_VERSION,
+    CFG_CP_AZURE_REGION,
+    CFG_CP_AZURE_RESOURCE_GROUP,
+    CFG_CP_AZURE_STORAGE_ACCOUNT,
+    CFG_CP_AZURE_STORAGE_ACCOUNT_CONTAINER,
+    CFG_CP_AZURE_STORAGE_ACCOUNT_KEY,
+    CFG_CP_AZURE_SUBNET,
+    CFG_CP_AZURE_SYSTEM_VM_SIZE,
+    CFG_CP_AZURE_VNET,
+    CFG_CP_GCP_K8S_VERSION,
+    CFG_CP_GCP_NETWORK,
+    CFG_CP_GCP_PROJECT,
+    CFG_CP_GCP_REGION,
+    CFG_CP_GCP_SUBNETWORK,
+    CFG_CP_GCP_ZONE,
+    CFG_TIMEOUT_BLAST_K8S_JOB,
+    CFG_TIMEOUT_INIT_PV,
+    CFG_TIMEOUTS,
+    CSP,
+    ELB_AWS_ARM_INSTANCE_TYPE_REGEX,
+    ELB_AZURE_PREFIX,
+    ELB_BLASTDB_MEMORY_MARGIN,
+    ELB_CJS_DOCKER_IMAGE_AZURE,
+    ELB_DFLT_AKS_ACR_NAME,
+    ELB_DFLT_AKS_ACR_RESOURCE_GROUP,
+    ELB_DFLT_AWS_DISK_TYPE,
+    ELB_DFLT_AWS_MACHINE_TYPE,
+    ELB_DFLT_AWS_NUM_CPUS,
+    ELB_DFLT_AWS_PD_SIZE,
+    ELB_DFLT_AWS_REGION,
+    ELB_DFLT_AWS_SPOT_BID_PERCENTAGE,
+    ELB_DFLT_AZURE_K8S_VERSION,
+    ELB_DFLT_AZURE_MACHINE_TYPE,
+    ELB_DFLT_AZURE_NUM_CPUS,
+    ELB_DFLT_AZURE_PD_SIZE,
+    ELB_DFLT_AZURE_PD_SIZE_BIG,
+    ELB_DFLT_AZURE_REGION,
+    ELB_DFLT_AZURE_SYSTEM_VM_SIZE,
+    ELB_DFLT_BLAST_K8S_TIMEOUT,
+    ELB_DFLT_GCP_K8S_VERSION,
+    ELB_DFLT_GCP_MACHINE_TYPE,
+    ELB_DFLT_GCP_NUM_CPUS,
+    ELB_DFLT_GCP_PD_SIZE,
+    ELB_DFLT_GCP_REGION,
+    ELB_DFLT_GCP_ZONE,
+    ELB_DFLT_INIT_PV_TIMEOUT,
+    ELB_DFLT_MIN_QUERY_FILESIZE_TO_SPLIT_ON_CLIENT_COMPRESSED,
+    ELB_DFLT_MIN_QUERY_FILESIZE_TO_SPLIT_ON_CLIENT_UNCOMPRESSED,
+    ELB_DFLT_NUM_NODES,
+    ELB_DFLT_OUTFMT,
+    ELB_DFLT_USE_PREEMPTIBLE,
+    ELB_DOCKER_IMAGE_AZURE,
+    ELB_GCS_PREFIX,
+    ELB_JANITOR_DOCKER_IMAGE_AZURE,
+    ELB_JANITOR_SCHEDULE,
+    ELB_NOT_INITIALIZED_MEM,
+    ELB_NOT_INITIALIZED_NUM,
+    ELB_PRIVATE_AZURE_BLASTDB_ENDPOINT,
+    ELB_QS_DOCKER_IMAGE_AZURE,
+    ELB_S3_PREFIX,
+    ELB_UNKNOWN,
+    ELB_UNKNOWN_AZURE_ACR_NAME,
+    ELB_UNKNOWN_AZURE_ACR_RESOURCEGROUP,
+    ELB_UNKNOWN_AZURE_RESOURCEGROUP,
+    ELB_UNKNOWN_AZURE_STORAGE_ACCOUNT,
+    ELB_UNKNOWN_AZURE_STORAGE_ACCOUNT_CONTAINER,
+    ELB_UNKNOWN_AZURE_STORAGE_ACCOUNT_KEY,
+    ELB_UNKNOWN_GCP_PROJECT,
+    ELB_UNKNOWN_MAX_NUMBER_OF_CONCURRENT_JOBS,
+    GCP_MAX_LABEL_LENGTH,
+    GCP_MAX_NUM_LABELS,
+    INPUT_ERROR,
+    SYSTEM_MEMORY_RESERVE,
+    ElbCommand,
+)
 from .db_metadata import DbMetadata, get_db_metadata
-from .tuner import get_mem_limit, get_machine_type, get_mt_mode, get_batch_length
-from .tuner import MTMode
-
+from .gcp_traits import enable_gcp_api
+from .gcp_traits import get_machine_properties as gcp_get_machine_properties
+from .tuner import (
+    MTMode,
+    get_batch_length,
+    get_machine_type,
+    get_mem_limit,
+    get_mt_mode,
+)
+from .util import (
+    ElbSupportedPrograms,
+    UserReportError,
+    azure_get_regions,
+    check_aws_region_for_invalid_characters,
+    gcp_get_regions,
+    get_gcp_project,
+    get_query_batch_size,
+    safe_exec,
+    sanitize_for_k8s,
+    validate_azure_region,
+    validate_azure_resource_group,
+    validate_gcp_string,
+    validate_gke_cluster_name,
+)
 
 # Config parameter types
 
