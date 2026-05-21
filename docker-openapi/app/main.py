@@ -68,7 +68,7 @@ if not API_TOKEN and not ALLOW_UNAUTHENTICATED:
         "ELB_OPENAPI_ALLOW_UNAUTHENTICATED is not set. All authenticated "
         "endpoints will return 503 until one of these env vars is provided."
     )
-VERSION = "3.3.0"
+VERSION = "3.4.0"
 
 MAX_ACTIVE_SUBMISSIONS = max(1, int(os.environ.get("ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS", "1")))
 DISPATCH_INTERVAL_SECONDS = max(1, int(os.environ.get("ELB_OPENAPI_DISPATCH_INTERVAL_SECONDS", "5")))
@@ -174,6 +174,7 @@ def _ensure_az_login() -> None:
 tags_metadata = [
     {"name": "System", "description": "Health checks and configuration"},
     {"name": "Cluster", "description": "AKS cluster status"},
+    {"name": "Databases", "description": "BLAST database catalogue and version metadata"},
     {"name": "Jobs", "description": "BLAST job submission and monitoring"},
 ]
 
@@ -424,6 +425,117 @@ def _db_version_detail(db_name: str) -> dict[str, str]:
         finally:
             _cleanup_tmp(local_path)
     return {"version": "unknown", "source": "not_available"}
+
+
+def _storage_oauth_token() -> str:
+    """Return a short-lived OAuth bearer token for the Azure Blob data plane.
+
+    Uses ``DefaultAzureCredential`` which already runs inside the pod under
+    Workload Identity. The token is acquired fresh on each call — listing
+    the database catalogue is infrequent so caching adds complexity for no
+    real benefit.
+    """
+    from azure.identity import DefaultAzureCredential
+    cred = DefaultAzureCredential()
+    return cred.get_token("https://storage.azure.com/.default").token
+
+
+def _list_blast_database_names(container: str = "blast-db", timeout: int = 30) -> list[str]:
+    """List the top-level prefixes (database names) inside ``container``.
+
+    Calls the Azure Blob REST API with ``delimiter=/`` so the response only
+    enumerates the first-level "directories" — the database names. Avoids
+    fetching the entire blob list, which on a populated cluster runs into
+    tens of thousands of entries.
+
+    Raises ``FileNotFoundError`` if the container does not exist; other
+    HTTP errors propagate as :class:`requests.HTTPError`.
+    """
+    import xml.etree.ElementTree as ET
+
+    import requests
+
+    token = _storage_oauth_token()
+    url = f"{_blob_base()}/{container}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "x-ms-version": "2020-04-08",
+    }
+    names: list[str] = []
+    marker: str | None = None
+    for _ in range(20):  # safety cap; one container should never need 20 pages
+        params: dict[str, str] = {
+            "restype": "container",
+            "comp": "list",
+            "delimiter": "/",
+        }
+        if marker:
+            params["marker"] = marker
+        resp = requests.get(url, params=params, headers=headers, timeout=timeout)
+        if resp.status_code == 404:
+            raise FileNotFoundError(f"Container {container!r} not found")
+        resp.raise_for_status()
+        root = ET.fromstring(resp.text)
+        for prefix in root.findall(".//BlobPrefix/Name"):
+            value = (prefix.text or "").strip().rstrip("/")
+            if value:
+                names.append(value)
+        next_marker = root.find("NextMarker")
+        marker = (
+            next_marker.text.strip()
+            if next_marker is not None and next_marker.text
+            else ""
+        )
+        if not marker:
+            break
+    return sorted(set(names))
+
+
+def _database_metadata(db_name: str) -> dict[str, Any] | None:
+    """Read a BLAST database's metadata file (nucleotide or protein).
+
+    Tries ``{db}-nucl-metadata.json`` first, then ``{db}-prot-metadata.json``.
+    Returns a normalised dict including the inferred molecule type, or
+    ``None`` when neither metadata file is present.
+    """
+    safe_db = re.sub(r"[^A-Za-z0-9._-]", "", db_name)
+    if not safe_db:
+        return None
+    _azcopy_login()
+    for molecule_type, suffix in (
+        ("nucl", "-nucl-metadata.json"),
+        ("prot", "-prot-metadata.json"),
+    ):
+        local_path = f"/tmp/{safe_db}-metadata-{uuid.uuid4().hex}.json"
+        metadata_url = f"{_blob_base()}/blast-db/{safe_db}/{safe_db}{suffix}"
+        try:
+            _cleanup_tmp(local_path)
+            safe_exec(["azcopy", "cp", metadata_url, local_path], timeout=60)
+            with open(local_path, encoding="utf-8") as handle:
+                metadata = json.load(handle)
+        except Exception:
+            _cleanup_tmp(local_path)
+            continue
+        _cleanup_tmp(local_path)
+        files_list = metadata.get("files") if isinstance(metadata.get("files"), list) else []
+        source_version = ""
+        for item in files_list:
+            match = re.search(r"/(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})/", str(item))
+            if match:
+                source_version = match.group(1)
+                break
+        metadata_version = str(metadata.get("version") or "").strip()
+        return {
+            "name": db_name,
+            "molecule_type": molecule_type,
+            "version": source_version or metadata_version or "unknown",
+            "metadata_version": metadata_version,
+            "dbtype": str(metadata.get("dbtype") or ""),
+            "number_of_sequences": metadata.get("number-of-sequences"),
+            "number_of_letters": metadata.get("number-of-letters"),
+            "description": str(metadata.get("description") or ""),
+        }
+    return None
 
 
 def _blast_version_from_result(job_info: dict[str, Any]) -> dict[str, str]:
@@ -960,6 +1072,84 @@ async def get_cluster():
     except Exception as e:
         result["pods_error"] = str(e)[:200]
     return result
+
+# ── Databases ──────────────────────────────────────────────────────────────
+
+class DatabaseListItem(BaseModel):
+    """Lightweight catalogue entry returned by ``GET /v1/databases``."""
+
+    name: str = Field(..., description="Database name as stored under the blast-db container.")
+
+
+class DatabaseList(BaseModel):
+    """Catalogue of prepared BLAST databases."""
+
+    databases: list[DatabaseListItem]
+    count: int = Field(..., ge=0)
+    container: str = Field("blast-db", description="Source container.")
+
+
+class DatabaseMetadata(BaseModel):
+    """Full metadata for a single BLAST database."""
+
+    name: str
+    molecule_type: Literal["nucl", "prot"] = Field(
+        ..., description="Sequence molecule type inferred from the metadata file."
+    )
+    version: str = Field(
+        ..., description="Effective version (source path date or metadata version)."
+    )
+    metadata_version: str = Field("", description="Raw version field from the metadata file.")
+    dbtype: str = Field("", description="BLAST dbtype string from the metadata file.")
+    number_of_sequences: Optional[int] = None
+    number_of_letters: Optional[int] = None
+    description: str = ""
+
+
+@v1.get(
+    "/databases",
+    tags=["Databases"],
+    summary="List prepared BLAST databases",
+    response_model=DatabaseList,
+)
+async def list_blast_databases():
+    """List databases prepared under the workspace ``blast-db`` container.
+
+    Each entry is a top-level prefix (e.g. ``core_nt``, ``nr``,
+    ``swissprot``). Call ``GET /v1/databases/{db_name}`` for the
+    molecule type, version, and sequence counts.
+    """
+    try:
+        names = _list_blast_database_names()
+    except FileNotFoundError:
+        return DatabaseList(databases=[], count=0)
+    except Exception as exc:
+        raise HTTPException(503, f"Storage list failed: {str(exc)[:200]}") from exc
+    items = [DatabaseListItem(name=n) for n in names]
+    return DatabaseList(databases=items, count=len(items))
+
+
+@v1.get(
+    "/databases/{db_name}",
+    tags=["Databases"],
+    summary="Get BLAST database metadata",
+    response_model=DatabaseMetadata,
+)
+async def get_blast_database(db_name: str):
+    """Return the molecule type, version, and metadata for one database."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "", db_name)
+    if not safe or safe != db_name:
+        raise HTTPException(
+            400,
+            "db_name must contain only alphanumerics, '.', '_', '-'.",
+        )
+    meta = _database_metadata(safe)
+    if not meta:
+        raise HTTPException(
+            404,
+            f"Database {db_name!r} not found or metadata unavailable.",
+        )
+    return meta
 
 # ── Jobs Models ────────────────────────────────────────────────────────────
 
