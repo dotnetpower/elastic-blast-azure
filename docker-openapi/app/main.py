@@ -68,7 +68,7 @@ if not API_TOKEN and not ALLOW_UNAUTHENTICATED:
         "ELB_OPENAPI_ALLOW_UNAUTHENTICATED is not set. All authenticated "
         "endpoints will return 503 until one of these env vars is provided."
     )
-VERSION = "3.4.1"
+VERSION = "3.5.0"
 
 MAX_ACTIVE_SUBMISSIONS = max(1, int(os.environ.get("ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS", "1")))
 DISPATCH_INTERVAL_SECONDS = max(1, int(os.environ.get("ELB_OPENAPI_DISPATCH_INTERVAL_SECONDS", "5")))
@@ -463,7 +463,12 @@ def _is_database_prefix(name: str) -> bool:
     return True
 
 
-def _list_blast_database_names(container: str = "blast-db", timeout: int = 30) -> list[str]:
+def _list_blast_database_names(
+    container: str = "blast-db",
+    timeout: int = 30,
+    *,
+    use_cache: bool = True,
+) -> list[str]:
     """List the top-level prefixes (database names) inside ``container``.
 
     Calls the Azure Blob REST API with ``delimiter=/`` so the response only
@@ -475,9 +480,20 @@ def _list_blast_database_names(container: str = "blast-db", timeout: int = 30) -
     staging) via :func:`_is_database_prefix` so callers receive only real
     BLAST databases.
 
+    Results are cached in-process with TTL
+    ``ELB_OPENAPI_DB_LIST_TTL_SECONDS`` (default 120s). Pass
+    ``use_cache=False`` to bypass.
+
     Raises ``FileNotFoundError`` if the container does not exist; other
     HTTP errors propagate as :class:`requests.HTTPError`.
     """
+    now = time.time()
+    if use_cache and _DB_LIST_TTL_SECONDS > 0:
+        with _db_cache_lock:
+            cached = _db_list_cache.get(container)
+        if cached and (now - cached["fetched_at"]) < _DB_LIST_TTL_SECONDS:
+            return list(cached["names"])
+
     import xml.etree.ElementTree as ET
 
     import requests
@@ -515,53 +531,208 @@ def _list_blast_database_names(container: str = "blast-db", timeout: int = 30) -
         )
         if not marker:
             break
-    return sorted(set(names))
+    sorted_names = sorted(set(names))
+    if use_cache and _DB_LIST_TTL_SECONDS > 0:
+        with _db_cache_lock:
+            _db_list_cache[container] = {"names": list(sorted_names), "fetched_at": now}
+    return sorted_names
 
 
-def _database_metadata(db_name: str) -> dict[str, Any] | None:
-    """Read a BLAST database's metadata file (nucleotide or protein).
+# ── BLAST database metadata cache ──────────────────────────────────────────
+#
+# Metadata blobs (``{db}-nucl-metadata.json`` / ``-prot-metadata.json``)
+# are read repeatedly by ``GET /v1/databases/{db_name}``. They're tiny
+# (~50–100 KB) but change at most weekly when the NCBI snapshot rolls,
+# so we keep an in-process TTL+ETag cache to keep the endpoint sub-ms
+# on cache hits and 304-fast on revalidation.
 
-    Tries ``{db}-nucl-metadata.json`` first, then ``{db}-prot-metadata.json``.
-    Returns a normalised dict including the inferred molecule type, or
-    ``None`` when neither metadata file is present.
+_DB_METADATA_TTL_SECONDS = max(
+    0, int(os.environ.get("ELB_OPENAPI_DB_METADATA_TTL_SECONDS", "600"))
+)
+_DB_LIST_TTL_SECONDS = max(
+    0, int(os.environ.get("ELB_OPENAPI_DB_LIST_TTL_SECONDS", "120"))
+)
+_DB_CACHE_MAX_ENTRIES = max(
+    8, int(os.environ.get("ELB_OPENAPI_DB_CACHE_MAX_ENTRIES", "128"))
+)
+
+_db_metadata_cache: dict[tuple[str, str], dict[str, Any]] = {}
+_db_list_cache: dict[str, dict[str, Any]] = {}
+_db_cache_lock = Lock()
+
+
+def _cache_evict_if_full(cache: dict[Any, dict[str, Any]], limit: int) -> None:
+    if len(cache) <= limit:
+        return
+    # Drop oldest entries by fetched_at (simple bounded-LRU)
+    items = sorted(cache.items(), key=lambda kv: kv[1].get("fetched_at", 0.0))
+    for key, _ in items[: len(cache) - limit]:
+        cache.pop(key, None)
+
+
+def _molecule_label(molecule_type_raw: str | None) -> str:
+    """Friendly label for the BLAST molecule type (matches the dashboard)."""
+    if not molecule_type_raw:
+        return ""
+    lowered = molecule_type_raw.casefold()
+    if lowered in {"nucl", "nucleotide", "nucleotides", "dna"}:
+        return "mixed DNA"
+    if lowered in {"prot", "protein", "proteins"}:
+        return "protein"
+    return molecule_type_raw
+
+
+def _fetch_blob_with_etag(
+    url: str,
+    etag: str | None,
+    timeout: int = 30,
+) -> tuple[int, dict[str, Any] | None, str | None]:
+    """GET a small JSON blob with optional ``If-None-Match``.
+
+    Returns ``(status_code, parsed_json_or_none, new_etag_or_none)``.
+    ``304`` returns ``(304, None, original_etag)``; ``404`` returns
+    ``(404, None, None)``; other ≥400 statuses raise.
+    """
+    import requests
+
+    token = _storage_oauth_token()
+    headers: dict[str, str] = {
+        "Authorization": f"Bearer {token}",
+        "x-ms-version": "2020-04-08",
+    }
+    if etag:
+        headers["If-None-Match"] = etag
+    resp = requests.get(url, headers=headers, timeout=timeout)
+    if resp.status_code == 304:
+        return 304, None, etag
+    if resp.status_code == 404:
+        return 404, None, None
+    resp.raise_for_status()
+    new_etag = resp.headers.get("ETag")
+    return resp.status_code, resp.json(), new_etag
+
+
+def _normalise_metadata(
+    db_name: str,
+    raw: dict[str, Any],
+    molecule_type_raw: str,
+    *,
+    container: str = "blast-db",
+) -> dict[str, Any]:
+    """Project the raw NCBI metadata JSON into the public API schema."""
+    files_list = raw.get("files") if isinstance(raw.get("files"), list) else []
+    source_version = ""
+    for item in files_list:
+        match = re.search(r"/(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})/", str(item))
+        if match:
+            source_version = match.group(1)
+            break
+    schema_version = str(raw.get("version") or "").strip()
+    last_updated = str(
+        raw.get("last-updated") or raw.get("last_updated") or raw.get("date") or ""
+    ).strip()
+    molecule_type = "dna" if molecule_type_raw == "nucl" else "protein"
+    return {
+        "name": db_name,
+        "container": container,
+        "title": str(raw.get("description") or "").strip(),
+        "dbtype": str(raw.get("dbtype") or "").strip(),
+        "molecule_type": molecule_type,
+        "molecule_label": _molecule_label(molecule_type_raw),
+        "snapshot": source_version or "unknown",
+        "last_updated": last_updated or None,
+        "number_of_sequences": raw.get("number-of-sequences"),
+        "number_of_letters": raw.get("number-of-letters"),
+        "number_of_volumes": raw.get("number-of-volumes"),
+        "bytes_total": raw.get("bytes-total"),
+        "bytes_to_cache": raw.get("bytes-to-cache"),
+        "metadata_schema_version": schema_version,
+    }
+
+
+def _project_with_cached_at(metadata: dict[str, Any], fetched_at: float) -> dict[str, Any]:
+    out = dict(metadata)
+    out["cached_at"] = datetime.fromtimestamp(fetched_at, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    return out
+
+
+def _database_metadata(
+    db_name: str,
+    *,
+    container: str = "blast-db",
+    timeout: int = 30,
+) -> dict[str, Any] | None:
+    """Read a BLAST database's metadata (nucleotide or protein).
+
+    Hits an in-process cache first. On miss / expiry, performs a direct
+    HTTPS ``GET`` against the metadata blob (no ``azcopy`` subprocess);
+    on TTL expiry uses ``If-None-Match`` so unchanged blobs return
+    ``304 Not Modified`` and avoid the JSON parse.
+
+    Returns the normalised dict matching the public ``DatabaseMetadata``
+    schema, or ``None`` when neither metadata file is reachable.
     """
     safe_db = re.sub(r"[^A-Za-z0-9._-]", "", db_name)
     if not safe_db:
         return None
-    _azcopy_login()
-    for molecule_type, suffix in (
+    key = (container, safe_db)
+    now = time.time()
+
+    with _db_cache_lock:
+        cached = _db_metadata_cache.get(key)
+
+    if (
+        cached
+        and _DB_METADATA_TTL_SECONDS > 0
+        and (now - cached.get("fetched_at", 0.0)) < _DB_METADATA_TTL_SECONDS
+    ):
+        return _project_with_cached_at(cached["metadata"], cached["fetched_at"])
+
+    # Try the previously-seen suffix first to avoid an extra 404 round-trip.
+    candidates: list[tuple[str, str]] = []
+    if cached and cached.get("suffix"):
+        candidates.append((cached["molecule_type_raw"], cached["suffix"]))
+    for molecule_type_raw, suffix in (
         ("nucl", "-nucl-metadata.json"),
         ("prot", "-prot-metadata.json"),
     ):
-        local_path = f"/tmp/{safe_db}-metadata-{uuid.uuid4().hex}.json"
-        metadata_url = f"{_blob_base()}/blast-db/{safe_db}/{safe_db}{suffix}"
+        if (molecule_type_raw, suffix) not in candidates:
+            candidates.append((molecule_type_raw, suffix))
+
+    for molecule_type_raw, suffix in candidates:
+        url = f"{_blob_base()}/{container}/{safe_db}/{safe_db}{suffix}"
+        send_etag = (
+            cached["etag"]
+            if cached and cached.get("suffix") == suffix and cached.get("etag")
+            else None
+        )
         try:
-            _cleanup_tmp(local_path)
-            safe_exec(["azcopy", "cp", metadata_url, local_path], timeout=60)
-            with open(local_path, encoding="utf-8") as handle:
-                metadata = json.load(handle)
+            status, parsed, etag = _fetch_blob_with_etag(url, send_etag, timeout=timeout)
         except Exception:
-            _cleanup_tmp(local_path)
             continue
-        _cleanup_tmp(local_path)
-        files_list = metadata.get("files") if isinstance(metadata.get("files"), list) else []
-        source_version = ""
-        for item in files_list:
-            match = re.search(r"/(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})/", str(item))
-            if match:
-                source_version = match.group(1)
-                break
-        metadata_version = str(metadata.get("version") or "").strip()
-        return {
-            "name": db_name,
-            "molecule_type": molecule_type,
-            "version": source_version or metadata_version or "unknown",
-            "metadata_version": metadata_version,
-            "dbtype": str(metadata.get("dbtype") or ""),
-            "number_of_sequences": metadata.get("number-of-sequences"),
-            "number_of_letters": metadata.get("number-of-letters"),
-            "description": str(metadata.get("description") or ""),
+        if status == 304 and cached:
+            with _db_cache_lock:
+                cached["fetched_at"] = now
+                _db_metadata_cache[key] = cached
+            return _project_with_cached_at(cached["metadata"], now)
+        if status == 404:
+            continue
+        if parsed is None:
+            continue
+        metadata = _normalise_metadata(safe_db, parsed, molecule_type_raw, container=container)
+        entry = {
+            "metadata": metadata,
+            "etag": etag,
+            "suffix": suffix,
+            "molecule_type_raw": molecule_type_raw,
+            "fetched_at": now,
         }
+        with _db_cache_lock:
+            _db_metadata_cache[key] = entry
+            _cache_evict_if_full(_db_metadata_cache, _DB_CACHE_MAX_ENTRIES)
+        return _project_with_cached_at(metadata, now)
     return None
 
 
@@ -1117,20 +1288,56 @@ class DatabaseList(BaseModel):
 
 
 class DatabaseMetadata(BaseModel):
-    """Full metadata for a single BLAST database."""
+    """Full metadata for a single BLAST database (v3.5.0 schema).
+
+    Breaking changes vs. the previous ``DatabaseMetadata`` payload:
+
+    - ``description`` was renamed to ``title`` (the source JSON's
+      ``description`` field is a one-line title, not a long blurb).
+    - ``version`` was renamed to ``snapshot`` to disambiguate the
+      NCBI-snapshot timestamp from the metadata-schema version. The
+      schema version is now ``metadata_schema_version`` (previously
+      ``metadata_version``).
+    - ``molecule_type`` now carries the lowercase natural value
+      (``dna`` / ``protein``) instead of the abbreviated
+      (``nucl`` / ``prot``). A new ``molecule_label`` field carries
+      the display label (``mixed DNA`` / ``protein``).
+    - New fields: ``container``, ``last_updated``, ``number_of_volumes``,
+      ``bytes_total``, ``bytes_to_cache``, ``cached_at``.
+    """
 
     name: str
-    molecule_type: Literal["nucl", "prot"] = Field(
-        ..., description="Sequence molecule type inferred from the metadata file."
+    container: str = Field("blast-db", description="Source container.")
+    title: str = Field(
+        "", description="Short one-line title from the source metadata."
     )
-    version: str = Field(
-        ..., description="Effective version (source path date or metadata version)."
+    dbtype: str = Field(
+        "", description="Raw BLAST dbtype string (e.g. 'Nucleotide', 'Protein')."
     )
-    metadata_version: str = Field("", description="Raw version field from the metadata file.")
-    dbtype: str = Field("", description="BLAST dbtype string from the metadata file.")
+    molecule_type: Literal["dna", "protein"] = Field(
+        ..., description="Sequence molecule type (lowercase natural value)."
+    )
+    molecule_label: str = Field(
+        "", description="Display label for the molecule type (e.g. 'mixed DNA')."
+    )
+    snapshot: str = Field(
+        ..., description="NCBI snapshot timestamp embedded in the source file paths."
+    )
+    last_updated: Optional[str] = Field(
+        None, description="Source metadata's last-updated timestamp (ISO 8601)."
+    )
     number_of_sequences: Optional[int] = None
     number_of_letters: Optional[int] = None
-    description: str = ""
+    number_of_volumes: Optional[int] = None
+    bytes_total: Optional[int] = None
+    bytes_to_cache: Optional[int] = None
+    metadata_schema_version: str = Field(
+        "", description="Schema version of the source metadata JSON."
+    )
+    cached_at: str = Field(
+        ...,
+        description="UTC timestamp (ISO 8601) when this payload was loaded into the server's in-process cache.",
+    )
 
 
 @v1.get(
