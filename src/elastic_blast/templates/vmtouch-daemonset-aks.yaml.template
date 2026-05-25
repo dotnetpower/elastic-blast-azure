@@ -45,4 +45,11 @@ spec:
             memory: "1Gi"
             cpu: "100m"
       restartPolicy: Always
+      tolerations:
+      - key: workload
+        operator: Equal
+        value: blast
+        effect: NoSchedule
+      nodeSelector:
+        workload: blast
       terminationGracePeriodSeconds: 10

@@ -970,7 +970,7 @@ def initialize_local_ssd(cfg: ElasticBlastConfig, query_files: list[str] = [], w
         timeout = init_blastdb_minutes_timeout * 60
         sec2wait = 20
         while timeout > 0:
-            cmd = f'kubectl --context={cfg.appstate.k8s_ctx} get jobs -o jsonpath=' \
+            cmd = f'kubectl --context={cfg.appstate.k8s_ctx} get jobs -l elb-job-id={cfg.azure.elb_job_id} -o jsonpath=' \
                 '{.items[?(@.status.active)].metadata.name}{\'\\t\'}' \
                 '{.items[?(@.status.failed)].metadata.name}{\'\\t\'}' \
                 '{.items[?(@.status.succeeded)].metadata.name}'
@@ -999,7 +999,7 @@ def initialize_local_ssd(cfg: ElasticBlastConfig, query_files: list[str] = [], w
         logging.debug(f'RUNTIME init-storage {end-start} seconds')
         # Delete setup jobs
         if not 'ELB_DONT_DELETE_SETUP_JOBS' in os.environ:
-            cmd = f'kubectl --context={cfg.appstate.k8s_ctx} delete jobs -l app=setup'
+            cmd = f'kubectl --context={cfg.appstate.k8s_ctx} delete jobs -l app=setup,elb-job-id={cfg.azure.elb_job_id}'
             if dry_run:
                 logging.info(cmd)
             else:
@@ -1080,7 +1080,7 @@ def initialize_local_ssd_sharded(cfg: ElasticBlastConfig, query_files: list[str]
         timeout = init_blastdb_minutes_timeout * 60
         sec2wait = 20
         while timeout > 0:
-            cmd = f'kubectl --context={cfg.appstate.k8s_ctx} get jobs -l app=setup -o jsonpath=' \
+            cmd = f'kubectl --context={cfg.appstate.k8s_ctx} get jobs -l app=setup,elb-job-id={cfg.azure.elb_job_id} -o jsonpath=' \
                 '{.items[?(@.status.active)].metadata.name}{\'\\t\'}' \
                 '{.items[?(@.status.failed)].metadata.name}{\'\\t\'}' \
                 '{.items[?(@.status.succeeded)].metadata.name}'
@@ -1106,7 +1106,7 @@ def initialize_local_ssd_sharded(cfg: ElasticBlastConfig, query_files: list[str]
         logging.debug(f'RUNTIME init-sharded-storage {end - start} seconds')
 
         if 'ELB_DONT_DELETE_SETUP_JOBS' not in os.environ:
-            cmd = f'kubectl --context={cfg.appstate.k8s_ctx} delete jobs -l app=setup'
+            cmd = f'kubectl --context={cfg.appstate.k8s_ctx} delete jobs -l app=setup,elb-job-id={cfg.azure.elb_job_id}'
             if dry_run:
                 logging.info(cmd)
             else:

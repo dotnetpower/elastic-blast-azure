@@ -111,4 +111,11 @@ spec:
           value: "/blast/blastdb/results"
         command: ["/scripts/results-export-aks.sh"]
       restartPolicy: OnFailure
+      tolerations:
+      - key: workload
+        operator: Equal
+        value: blast
+        effect: NoSchedule
+      nodeSelector:
+        workload: blast
   backoffLimit: 5

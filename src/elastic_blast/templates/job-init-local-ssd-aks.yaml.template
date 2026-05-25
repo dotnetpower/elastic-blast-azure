@@ -35,7 +35,7 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: init-ssd-${NODE_ORDINAL}
+  name: init-ssd-${BLAST_ELB_JOB_ID_SHORT}-${NODE_ORDINAL}
   labels:
     app: setup
     elb-job-id: "${BLAST_ELB_JOB_ID}"
@@ -98,6 +98,8 @@ spec:
         operator: Equal
         value: blast
         effect: NoSchedule
+      nodeSelector:
+        workload: blast
       nodeSelector:
         ordinal: "${NODE_ORDINAL}"
   backoffLimit: 3

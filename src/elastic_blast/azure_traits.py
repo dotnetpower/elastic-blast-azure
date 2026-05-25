@@ -28,6 +28,12 @@ AZURE_HPC_MACHINES = {
     'Standard_E64s_v3': {'cpu': 64, 'memory': 432},  # 64 vCPU, 432 GB RAM
     'Standard_E64is_v3': {'cpu': 64, 'memory': 504},  # 64 vCPU, 504 GB RAM
     'Standard_D8s_v3': {'cpu': 8, 'memory': 32},  # 8 vCPU, 32 GB RAM
+    # D/E-series v7 AMD (dashboard availability fallback)
+    'Standard_D2as_v7': {'cpu': 2, 'memory': 8},
+    'Standard_D4as_v7': {'cpu': 4, 'memory': 16},
+    'Standard_E16as_v7': {'cpu': 16, 'memory': 128},
+    'Standard_E32as_v7': {'cpu': 32, 'memory': 256},
+    'Standard_E48as_v7': {'cpu': 48, 'memory': 384},
     # E-series v5 (memory-optimized, newer generation)
     'Standard_E16s_v5': {'cpu': 16, 'memory': 128},   # 16 vCPU, 128 GB RAM
     'Standard_E32s_v5': {'cpu': 32, 'memory': 256},    # 32 vCPU, 256 GB RAM
@@ -236,6 +242,12 @@ AZURE_VM_HOURLY_PRICES = {
     'Standard_D16s_v3': 0.768,
     'Standard_D32s_v3': 1.536,
     'Standard_D64s_v3': 3.072,
+    # D/E-series v7 AMD (dashboard availability fallback)
+    'Standard_D2as_v7': 0.096,
+    'Standard_D4as_v7': 0.192,
+    'Standard_E16as_v7': 1.008,
+    'Standard_E32as_v7': 2.016,
+    'Standard_E48as_v7': 3.024,
     # E-series v3 (memory-optimized)
     'Standard_E64s_v3': 3.629,
     'Standard_E64is_v3': 3.629,

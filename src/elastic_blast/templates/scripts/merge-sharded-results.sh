@@ -19,12 +19,118 @@ python3 - "$INPUT_TSV" "$OUTPUT_GZ" "$REPORT_JSON" "$NUM_SHARDS" "$BLAST_PROGRAM
 import copy
 import gzip
 import json
+import os
 import re
 import shlex
 import sys
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 from pathlib import Path
+
+
+def _accession_base(accession):
+    if not accession:
+        return accession
+    if "." not in accession:
+        return accession
+    head, tail = accession.rsplit(".", 1)
+    return head if tail.isdigit() else accession
+
+
+def load_tie_order_oracle(warnings):
+    oracle_path = os.environ.get("ELB_TIE_ORDER_FILE", "").strip()
+    if not oracle_path:
+        return None, {}, 0, []
+    path = Path(oracle_path)
+    if not path.exists():
+        warnings.append(f"Tie-order oracle file was not found: {oracle_path}")
+        return oracle_path, {}, 0, []
+
+    order = {}
+    accessions = []
+    unique_accessions = 0
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        tokens = re.split(r"[\t, ]+", line)
+        if len(tokens) >= 12:
+            accession = tokens[1]
+        elif len(tokens) >= 2 and tokens[0].isdigit():
+            accession = tokens[1]
+        else:
+            accession = tokens[0]
+        if not accession:
+            continue
+        if accession not in order:
+            order[accession] = unique_accessions
+            accessions.append(accession)
+            unique_accessions += 1
+        base = _accession_base(accession)
+        if base and base not in order:
+            order[base] = order[accession]
+    if unique_accessions:
+        warnings.append(
+            "Tie-order oracle is enabled; ties are ordered by the supplied same-snapshot accession list"
+        )
+    else:
+        warnings.append(f"Tie-order oracle file contained no usable accessions: {oracle_path}")
+    return oracle_path, order, unique_accessions, accessions
+
+
+def observed_accession_keys(accessions):
+    keys = set()
+    for accession in accessions:
+        if not accession:
+            continue
+        keys.add(accession)
+        base = _accession_base(accession)
+        if base:
+            keys.add(base)
+    return keys
+
+
+def oracle_missing_accessions(oracle_accessions, observed_keys):
+    missing = []
+    for accession in oracle_accessions:
+        base = _accession_base(accession)
+        if accession not in observed_keys and (not base or base not in observed_keys):
+            missing.append(accession)
+    return missing
+
+
+def strict_oracle_enabled():
+    return os.environ.get("ELB_TIE_ORDER_STRICT", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def oracle_sort_key(order, accession, fallback):
+    if not order:
+        return (0, fallback)
+    rank = order.get(accession, order.get(_accession_base(accession)))
+    if rank is None:
+        return (1, fallback)
+    return (0, rank)
+
+
+def tabular_subject_accession(line):
+    cols = line.split("\t")
+    return cols[1] if len(cols) > 1 else ""
+
+
+def xml_subject_accession(hit):
+    accession = text_at(hit, "Hit_accession")
+    if accession:
+        return accession
+    hit_id = text_at(hit, "Hit_id")
+    if "|" in hit_id:
+        parts = [part for part in hit_id.split("|") if part]
+        return parts[-1] if parts else hit_id
+    return hit_id
 
 
 def parse_max_target_seqs(options_text):
@@ -68,6 +174,10 @@ def parse_outfmt(options_text):
 
 
 def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, max_hits, warnings):
+    oracle_path, tie_order, oracle_unique_accessions, oracle_accessions = load_tie_order_oracle(warnings)
+    strict_oracle = bool(tie_order) and strict_oracle_enabled()
+    if strict_oracle:
+        warnings.append("Strict tie-order oracle is enabled; non-oracle hits are excluded")
     query_hits = defaultdict(list)
     unsupported_rows = 0
     total_input_rows = 0
@@ -103,14 +213,66 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
     )
     blast_label = blast_program.upper() if blast_program else "BLAST"
     tie_break_count = 0
+    tie_cutoff_overflow_count = 0
+    tie_cutoff_queries = []
+    oracle_missing_queries = []
     total_output_hits = 0
 
     with gzip.open(output_gz, "wt") as out:
         for query_id in sorted(query_hits):
             hits = query_hits[query_id]
+            if strict_oracle:
+                observed_keys = observed_accession_keys(
+                    tabular_subject_accession(hit[3]) for hit in hits
+                )
+                missing_accessions = oracle_missing_accessions(oracle_accessions, observed_keys)
+                if missing_accessions:
+                    oracle_missing_queries.append(
+                        {
+                            "query_id": query_id,
+                            "missing_count": len(missing_accessions),
+                            "first_missing_accessions": missing_accessions[:20],
+                        }
+                    )
+                hits = [
+                    hit
+                    for hit in hits
+                    if oracle_sort_key(tie_order, tabular_subject_accession(hit[3]), hit[2])[0] == 0
+                ]
             pair_counts = Counter((hit[0], hit[1]) for hit in hits)
             tie_break_count += sum(count - 1 for count in pair_counts.values() if count > 1)
-            selected = sorted(hits, key=lambda hit: (hit[0], hit[1], hit[2]))[:max_hits]
+            sorted_hits = sorted(
+                hits,
+                key=lambda hit: (
+                    hit[0],
+                    hit[1],
+                    oracle_sort_key(tie_order, tabular_subject_accession(hit[3]), hit[2]),
+                    hit[2],
+                ),
+            )
+            selected = sorted_hits[:max_hits]
+            if selected and len(sorted_hits) > len(selected):
+                cutoff_signature = (selected[-1][0], selected[-1][1])
+                cutoff_input_count = sum(
+                    1 for hit in sorted_hits if (hit[0], hit[1]) == cutoff_signature
+                )
+                cutoff_selected_count = sum(
+                    1 for hit in selected if (hit[0], hit[1]) == cutoff_signature
+                )
+                cutoff_overflow = max(0, cutoff_input_count - cutoff_selected_count)
+                if cutoff_overflow:
+                    tie_cutoff_overflow_count += cutoff_overflow
+                    if len(tie_cutoff_queries) < 10:
+                        tie_cutoff_queries.append(
+                            {
+                                "query_id": query_id,
+                                "evalue": cutoff_signature[0],
+                                "bitscore": -cutoff_signature[1],
+                                "tie_input_count": cutoff_input_count,
+                                "tie_selected_count": cutoff_selected_count,
+                                "tie_overflow_count": cutoff_overflow,
+                            }
+                        )
             out.write(f"# {blast_label}\n")
             out.write(f"# Query: {query_id}\n")
             out.write(f"# Database: merged from {num_shards} shards\n")
@@ -124,6 +286,11 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
         warnings.append(
             "Ties were resolved deterministically but may not match full-DB BLAST internal order"
         )
+    if tie_cutoff_overflow_count:
+        warnings.append(
+            "The max_target_seqs cutoff splits a tied score class; strict Web BLAST "
+            "ordering may require original BLAST DB subject order"
+        )
 
     report = {
         "outfmt": 6,
@@ -134,8 +301,17 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
         "total_output_hits": total_output_hits,
         "unsupported_rows": unsupported_rows,
         "tie_break_count": tie_break_count,
+        "tie_cutoff_overflow_count": tie_cutoff_overflow_count,
+        "tie_cutoff_queries": tie_cutoff_queries,
         "num_shards": int(num_shards),
-        "ranking_basis": "evalue_bitscore_ordinal",
+        "ranking_basis": "evalue_bitscore_oracle_ordinal" if tie_order else "evalue_bitscore_ordinal",
+        "tie_order_oracle_path": oracle_path,
+        "tie_order_oracle_accessions": oracle_unique_accessions,
+        "tie_order_oracle_strict": strict_oracle,
+        "tie_order_oracle_missing_count": sum(
+            item["missing_count"] for item in oracle_missing_queries
+        ),
+        "tie_order_oracle_missing_queries": oracle_missing_queries,
         "warnings": warnings,
     }
     Path(report_json).write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
@@ -191,6 +367,10 @@ def hit_rank(hit):
 
 
 def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings):
+    oracle_path, tie_order, oracle_unique_accessions, oracle_accessions = load_tie_order_oracle(warnings)
+    strict_oracle = bool(tie_order) and strict_oracle_enabled()
+    if strict_oracle:
+        warnings.append("Strict tie-order oracle is enabled; non-oracle hits are excluded")
     input_root = Path(input_tsv).parent
     output_path = Path(output_gz).resolve()
     xml_files = []
@@ -283,14 +463,66 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
         warnings.append("Some XML records were skipped because query or HSP metadata was incomplete")
 
     tie_break_count = 0
+    tie_cutoff_overflow_count = 0
+    tie_cutoff_queries = []
+    oracle_missing_queries = []
     total_output_hits = 0
     total_output_hsps = 0
     for query_id in query_order:
         item = queries[query_id]
         hits = item["hits"]
+        if strict_oracle:
+            observed_keys = observed_accession_keys(xml_subject_accession(hit[4]) for hit in hits)
+            missing_accessions = oracle_missing_accessions(oracle_accessions, observed_keys)
+            if missing_accessions:
+                oracle_missing_queries.append(
+                    {
+                        "query_id": query_id,
+                        "missing_count": len(missing_accessions),
+                        "first_missing_accessions": missing_accessions[:20],
+                    }
+                )
+            hits = [
+                hit
+                for hit in hits
+                if oracle_sort_key(tie_order, xml_subject_accession(hit[4]), hit[3])[0] == 0
+            ]
         pair_counts = Counter((hit[0], hit[1], hit[2]) for hit in hits)
         tie_break_count += sum(count - 1 for count in pair_counts.values() if count > 1)
-        selected = sorted(hits, key=lambda hit: (hit[0], hit[1], hit[2], hit[3]))[:max_hits]
+        sorted_hits = sorted(
+            hits,
+            key=lambda hit: (
+                hit[0],
+                hit[1],
+                hit[2],
+                oracle_sort_key(tie_order, xml_subject_accession(hit[4]), hit[3]),
+                hit[3],
+            ),
+        )
+        selected = sorted_hits[:max_hits]
+        if selected and len(sorted_hits) > len(selected):
+            cutoff_signature = (selected[-1][0], selected[-1][1], selected[-1][2])
+            cutoff_input_count = sum(
+                1 for hit in sorted_hits if (hit[0], hit[1], hit[2]) == cutoff_signature
+            )
+            cutoff_selected_count = sum(
+                1 for hit in selected if (hit[0], hit[1], hit[2]) == cutoff_signature
+            )
+            cutoff_overflow = max(0, cutoff_input_count - cutoff_selected_count)
+            if cutoff_overflow:
+                tie_cutoff_overflow_count += cutoff_overflow
+                if len(tie_cutoff_queries) < 10:
+                    tie_cutoff_queries.append(
+                        {
+                            "query_id": query_id,
+                            "evalue": cutoff_signature[0],
+                            "bitscore": -cutoff_signature[1],
+                            "hsp_count": -cutoff_signature[2],
+                            "tie_input_count": cutoff_input_count,
+                            "tie_selected_count": cutoff_selected_count,
+                            "tie_overflow_count": cutoff_overflow,
+                        }
+                    )
         template = item["template"]
         hits_node = template.find("Iteration_hits")
         if hits_node is None:
@@ -342,6 +574,11 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
         warnings.append(
             "Ties were resolved deterministically but may not match full-DB BLAST internal order"
         )
+    if tie_cutoff_overflow_count:
+        warnings.append(
+            "The max_target_seqs cutoff splits a tied score class; strict Web BLAST "
+            "ordering may require original BLAST DB subject order"
+        )
 
     with gzip.open(output_gz, "wb") as handle:
         ET.ElementTree(base_root).write(handle, encoding="utf-8", xml_declaration=True)
@@ -358,8 +595,21 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
         "unsupported_records": unsupported_records,
         "malformed_xml_count": malformed_xml_count,
         "tie_break_count": tie_break_count,
+        "tie_cutoff_overflow_count": tie_cutoff_overflow_count,
+        "tie_cutoff_queries": tie_cutoff_queries,
         "num_shards": int(num_shards),
-        "ranking_basis": "best_hsp_evalue_bitscore_ordinal",
+        "ranking_basis": (
+            "best_hsp_evalue_bitscore_oracle_ordinal"
+            if tie_order
+            else "best_hsp_evalue_bitscore_ordinal"
+        ),
+        "tie_order_oracle_path": oracle_path,
+        "tie_order_oracle_accessions": oracle_unique_accessions,
+        "tie_order_oracle_strict": strict_oracle,
+        "tie_order_oracle_missing_count": sum(
+            item["missing_count"] for item in oracle_missing_queries
+        ),
+        "tie_order_oracle_missing_queries": oracle_missing_queries,
         "warnings": warnings,
     }
     Path(report_json).write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")

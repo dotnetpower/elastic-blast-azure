@@ -249,6 +249,11 @@ def submit_command(args, cfg: ElasticBlastConfig, clean_up_stack,
 
     # Phase 3: success -> structured ACCEPTED.
     if json_mode and rc == 0:
+        # Dashboard JSON submit has its own log/state collectors.
+        # Avoid running ElasticBLAST's post-submit cleanup hook here,
+        # because it can keep the submit process open while K8s work
+        # is already running or even completed.
+        clean_up_stack.clear()
         result = SubmitResult(
             decision=SubmitDecision.ACCEPTED,
             correlation_id=correlation_id,

@@ -121,5 +121,7 @@ spec:
         value: blast
         effect: NoSchedule
       nodeSelector:
+        workload: blast
+      nodeSelector:
         ordinal: "${ELB_SHARD_IDX}"
   backoffLimit: 3

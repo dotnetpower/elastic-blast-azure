@@ -44,4 +44,11 @@ spec:
         - name: workspace
           mountPath: /workspace
       restartPolicy: Never
+      tolerations:
+      - key: workload
+        operator: Equal
+        value: blast
+        effect: NoSchedule
+      nodeSelector:
+        workload: blast
   backoffLimit: 0

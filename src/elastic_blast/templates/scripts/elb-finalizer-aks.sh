@@ -193,6 +193,62 @@ PY
         TOTAL_ROWS=$(wc -l < "$MERGE_INPUT" 2>/dev/null || echo 0)
         echo "Downloaded $SHARD_COUNT shard files, $TOTAL_ROWS tabular rows"
 
+        ORACLE_FILE="$MERGE_DIR/tie-order-oracle.txt"
+        ORACLE_SEARCH_BASES="$ELB_RESULTS"
+        ORACLE_PARENT_RESULTS="${ELB_RESULTS%/job-*}"
+        if [ "$ORACLE_PARENT_RESULTS" != "$ELB_RESULTS" ]; then
+            ORACLE_SEARCH_BASES="$ORACLE_SEARCH_BASES $ORACLE_PARENT_RESULTS"
+        fi
+        for ORACLE_BASE in $ORACLE_SEARCH_BASES; do
+            [ -n "${ELB_TIE_ORDER_FILE:-}" ] && break
+            ORACLE_BLOB="${ORACLE_BASE}/${ELB_METADATA_DIR}/tie-order-oracle.txt"
+            if blob_exists "$ORACLE_BLOB"; then
+                if azcopy cp "$ORACLE_BLOB" "$ORACLE_FILE" --log-level=ERROR 2>/dev/null; then
+                    export ELB_TIE_ORDER_FILE="$ORACLE_FILE"
+                    export ELB_TIE_ORDER_BASE="$ORACLE_BASE"
+                    echo "Using tie-order oracle from ${ORACLE_BLOB}"
+                else
+                    echo "WARNING: tie-order oracle exists but could not be downloaded: ${ORACLE_BLOB}"
+                fi
+            fi
+        done
+
+        if [ -z "${ELB_TIE_ORDER_FILE:-}" ]; then
+            for ORACLE_BASE in $ORACLE_SEARCH_BASES; do
+                [ -n "${ELB_TIE_ORDER_FILE:-}" ] && break
+                ORACLE_URLS_BLOB="${ORACLE_BASE}/${ELB_METADATA_DIR}/tie-order-oracle-urls.txt"
+                if blob_exists "$ORACLE_URLS_BLOB"; then
+                    ORACLE_URLS_FILE="$MERGE_DIR/tie-order-oracle-urls.txt"
+                    ORACLE_PART_DIR="$MERGE_DIR/tie-order-oracle-parts"
+                    mkdir -p "$ORACLE_PART_DIR"
+                    if azcopy cp "$ORACLE_URLS_BLOB" "$ORACLE_URLS_FILE" --log-level=ERROR 2>/dev/null; then
+                        idx=0
+                        while IFS= read -r part_url; do
+                            [ -z "$part_url" ] && continue
+                            part_file=$(printf "%s/part-%06d.txt" "$ORACLE_PART_DIR" "$idx")
+                            if ! azcopy cp "$part_url" "$part_file" --log-level=ERROR 2>/dev/null; then
+                                echo "WARNING: tie-order oracle part could not be downloaded: ${part_url}"
+                                rm -f "$part_file"
+                            fi
+                            idx=$((idx + 1))
+                        done < "$ORACLE_URLS_FILE"
+                        if find "$ORACLE_PART_DIR" -type f -name "part-*.txt" | grep -q .; then
+                            find "$ORACLE_PART_DIR" -type f -name "part-*.txt" | sort | xargs cat > "$ORACLE_FILE"
+                            export ELB_TIE_ORDER_FILE="$ORACLE_FILE"
+                            export ELB_TIE_ORDER_BASE="$ORACLE_BASE"
+                            echo "Using DB-order tie oracle parts from ${ORACLE_URLS_BLOB}"
+                        fi
+                    fi
+                fi
+            done
+        fi
+        if [ -n "${ELB_TIE_ORDER_FILE:-}" ]; then
+            ORACLE_STRICT_BLOB="${ELB_TIE_ORDER_BASE:-$ELB_RESULTS}/${ELB_METADATA_DIR}/tie-order-oracle-strict.txt"
+            if blob_exists "$ORACLE_STRICT_BLOB"; then
+                export ELB_TIE_ORDER_STRICT="1"
+            fi
+        fi
+
         if ! /scripts/merge-sharded-results.sh \
             "$MERGE_INPUT" "$MERGE_OUTPUT" "$MERGE_REPORT" \
             "$ELB_DB_PARTITIONS" "${ELB_BLAST_PROGRAM:-blast}" "${ELB_BLAST_OPTIONS:-}"; then
