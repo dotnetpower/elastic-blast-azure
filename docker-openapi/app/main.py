@@ -31,7 +31,7 @@ from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
 import uvicorn
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
@@ -69,7 +69,48 @@ if not API_TOKEN and not ALLOW_UNAUTHENTICATED:
         "ELB_OPENAPI_ALLOW_UNAUTHENTICATED is not set. All authenticated "
         "endpoints will return 503 until one of these env vars is provided."
     )
-VERSION = "3.6.0"
+VERSION = "3.7.2"
+
+# /v1/ready hard time budget. The endpoint exists so external callers can
+# pre-flight whether a POST /v1/jobs is likely to succeed without paying the
+# heavy /v1/health cost (DefaultAzureCredential token + full kubectl get nodes).
+# Kept short on purpose: every probe inside uses kubectl --request-timeout=1s
+# so a stopped AKS API server fails the whole call inside the budget.
+# 2.5s instead of 3.0s so the dashboard's 5.0s client timeout has a clean
+# 2× safety margin against Container Apps cold-path jitter.
+READY_BUDGET_SECONDS = max(1.0, float(os.environ.get("ELB_OPENAPI_READY_BUDGET_SECONDS", "2.5")))
+# Label selector for the BLAST workload node pool. Empty disables the check
+# (e.g. autoscale-only clusters where the pool spins up after the first job).
+WORKLOAD_POOL_LABEL = os.environ.get("ELB_OPENAPI_WORKLOAD_POOL_LABEL", "workload=blast").strip()
+# Optional pool *name* the Cluster Autoscaler must actually own for the
+# autoscaler-pending degraded state to apply. When set, the
+# ``cluster-autoscaler-status`` ConfigMap body is inspected and must mention
+# this pool (case-insensitive substring match against ``.data.status``);
+# otherwise the autoscaler ConfigMap existence alone is enough (legacy
+# behaviour, preserved for backward compatibility on single-pool clusters).
+WORKLOAD_POOL_NAME = os.environ.get("ELB_OPENAPI_WORKLOAD_POOL_NAME", "").strip()
+# When the workload pool has zero Ready nodes, /v1/ready normally fails with
+# 'no_workload_nodes'. On clusters where the Cluster Autoscaler is enabled
+# the pool can legitimately be at zero between jobs — the very act of
+# POST /v1/jobs is what scales the pool back up. Set
+# ELB_OPENAPI_AUTOSCALER_AWARE_READY=1 (the default) so /v1/ready degrades
+# the workload_pool check to a non-fatal 'autoscaler_pending' info entry
+# in that case instead of 503-ing the probe.
+READY_AUTOSCALER_AWARE = os.environ.get(
+    "ELB_OPENAPI_AUTOSCALER_AWARE_READY", "1"
+).strip().lower() in {"1", "true", "yes"}
+# Per-token rate limit for /v1/ready. The probe is intentionally cheap but
+# a token holder can still poll it as a cluster-state oracle. 30 req/min /
+# token is generous for a pre-flight check and cuts the enumeration surface.
+READY_RATE_LIMIT_PER_MINUTE = max(
+    1, int(os.environ.get("ELB_OPENAPI_READY_RATE_LIMIT_PER_MINUTE", "30"))
+)
+# Hash the cluster name in the /v1/ready response so the probe does not
+# leak the AKS cluster identifier to anyone holding a token. Off by default
+# to preserve the existing contract; flip to 1 in shared environments.
+READY_MASK_CLUSTER_NAME = os.environ.get(
+    "ELB_OPENAPI_READY_MASK_CLUSTER_NAME", "0"
+).strip().lower() in {"1", "true", "yes"}
 
 MAX_ACTIVE_SUBMISSIONS = max(1, int(os.environ.get("ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS", "1")))
 DISPATCH_INTERVAL_SECONDS = max(1, int(os.environ.get("ELB_OPENAPI_DISPATCH_INTERVAL_SECONDS", "5")))
@@ -1423,6 +1464,115 @@ def _cleanup_tmp(*paths: str) -> None:
 # ROUTES
 # ═══════════════════════════════════════════════════════════════════════════
 
+# ── /v1/ready helpers ──────────────────────────────────────────────────────
+# Per-token rate limit + in-process metric counters live here so the route
+# body stays declarative. All state is process-local; if the pod is replaced
+# the counters reset, which is the same behaviour as in-cluster Prometheus
+# exporters started from a fresh process.
+_READY_RATE_LOCK = Lock()
+_READY_RATE_BUCKETS: dict[str, list[float]] = {}
+_READY_METRICS_LOCK = Lock()
+_READY_METRICS: dict[str, int] = {
+    "ok": 0,
+    "k8s_unreachable": 0,
+    "no_workload_nodes": 0,
+    "workload_pool_check_failed": 0,
+    "openapi_pod_not_ready": 0,
+    "openapi_pod_check_failed": 0,
+    "rate_limited": 0,
+    "autoscaler_pending": 0,
+}
+
+
+def _ready_token_bucket_check(token_or_anon: str) -> bool:
+    """Return True if the request is within budget, False to deny.
+
+    Uses a fixed 60-second sliding window. The bucket key is the SHA-256 of
+    the raw token so a leaked log line cannot replay the token. ``anonymous``
+    (when ELB_OPENAPI_ALLOW_UNAUTHENTICATED=1 in dev) is bucketed separately,
+    and the route additionally suffixes the client IP so a single noisy
+    laptop cannot DoS every other unauthenticated caller.
+    """
+    now = time.monotonic()
+    key = hashlib.sha256(token_or_anon.encode("utf-8", "ignore")).hexdigest()
+    with _READY_RATE_LOCK:
+        bucket = _READY_RATE_BUCKETS.setdefault(key, [])
+        # Drop timestamps older than 60s.
+        cutoff = now - 60.0
+        while bucket and bucket[0] < cutoff:
+            bucket.pop(0)
+        if len(bucket) >= READY_RATE_LIMIT_PER_MINUTE:
+            return False
+        bucket.append(now)
+        # Garbage-collect now-empty buckets so a long-running pod that has
+        # served many distinct tokens / IPs does not accumulate unbounded
+        # SHA-256 keys. The check is O(1) since we already hold the lock
+        # and the bucket reference.
+        if not bucket:
+            _READY_RATE_BUCKETS.pop(key, None)
+    return True
+
+
+def _ready_record_metric(code: str) -> None:
+    with _READY_METRICS_LOCK:
+        _READY_METRICS[code] = _READY_METRICS.get(code, 0) + 1
+
+
+def _ready_masked_cluster_name() -> str:
+    if not READY_MASK_CLUSTER_NAME:
+        return CLUSTER_NAME
+    # 16-char prefix of SHA-256 is a stable opaque identifier the caller
+    # can correlate across calls without learning the real cluster name.
+    digest = hashlib.sha256(CLUSTER_NAME.encode("utf-8", "ignore")).hexdigest()
+    return f"sha256:{digest[:16]}"
+
+
+def _autoscaler_enabled_for_workload_pool() -> bool:
+    """Best-effort check: is Cluster Autoscaler active on a pool that could
+    host BLAST workload nodes?
+
+    We look at the cluster-autoscaler-status ConfigMap published by the
+    autoscaler add-on. The cheap probe is "the ConfigMap exists" — the
+    autoscaler writes it on startup. Returning True here lets /v1/ready
+    degrade a zero-Ready workload pool into ``autoscaler_pending`` instead
+    of failing with ``no_workload_nodes`` (which would be a false-positive
+    on autoscale-to-zero clusters).
+
+    When ``ELB_OPENAPI_WORKLOAD_POOL_NAME`` is set, the probe additionally
+    requires the autoscaler status body to mention that pool. This catches
+    the multi-pool case where the autoscaler is enabled on a different pool
+    (e.g. the system pool) and would otherwise falsely degrade a real
+    no-Ready-workload-nodes outage into ``autoscaler_pending``.
+
+    Errors are swallowed and treated as "no autoscaler" so a probe failure
+    cannot turn a real outage into a soft warning.
+    """
+    if not READY_AUTOSCALER_AWARE:
+        return False
+    try:
+        if not WORKLOAD_POOL_NAME:
+            safe_exec(
+                "kubectl get configmap cluster-autoscaler-status "
+                "-n kube-system --request-timeout=1s -o name",
+                timeout=2,
+            )
+            return True
+        proc = safe_exec(
+            "kubectl get configmap cluster-autoscaler-status "
+            "-n kube-system --request-timeout=1s "
+            "-o jsonpath={.data.status}",
+            timeout=2,
+        )
+        body = (proc.stdout or "").lower()
+        return WORKLOAD_POOL_NAME.lower() in body
+    except Exception:
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ROUTES (router definition)
+# ═══════════════════════════════════════════════════════════════════════════
+
 # Versioned router — all business endpoints live under /v1.
 # Authentication is enforced at the router level so every current and future
 # endpoint inherits the same access policy. Truly public probes (e.g.
@@ -1474,6 +1624,176 @@ async def health():
         "config": {"cluster": CLUSTER_NAME, "storage_account": STORAGE_ACCOUNT, "resource_group": RESOURCE_GROUP, "region": AZURE_REGION},
         "checks": checks,
     }
+
+@v1.get("/ready", tags=["System"], summary="Submit-path readiness probe")
+async def ready(
+    request: Request,
+    x_elb_api_token: Optional[str] = Header(None, alias="X-ELB-API-Token"),
+):
+    """Cheap readiness signal for callers about to POST /v1/jobs.
+
+    Three independent probes share a hard ``READY_BUDGET_SECONDS`` budget:
+      * ``k8s_api``       — ``kubectl get --raw /readyz`` (API server reachable)
+      * ``workload_pool`` — at least one node Ready under ``WORKLOAD_POOL_LABEL``
+      * ``openapi_pod``   — ``elb-openapi`` Deployment has ``readyReplicas >= 1``
+
+    Returns 200 with ``{"ready": true, "checks": {...}, ...}`` only when every
+    probe passes. Otherwise returns 503 with ``{"ready": false, "code": ..,
+    "message": ..., "checks": {...}}`` where ``code`` is one of
+    ``k8s_unreachable`` / ``no_workload_nodes`` / ``workload_pool_check_failed``
+    / ``openapi_pod_not_ready`` / ``openapi_pod_check_failed``. The endpoint
+    deliberately does NOT call ``DefaultAzureCredential.get_token`` so AKS
+    stopped → caller sees a transport timeout / 503 from the upstream proxy,
+    never an opaque 30s ARM hang.
+
+    When ``ELB_OPENAPI_AUTOSCALER_AWARE_READY=1`` (default) and the workload
+    pool reports zero Ready nodes *and* the Cluster Autoscaler ConfigMap is
+    present in kube-system, the probe degrades the workload_pool check to
+    ``autoscaler_pending`` (still ready=True) so autoscale-to-zero pools
+    don't produce false negatives.
+
+    Subject to a per-token sliding-window rate limit
+    (``ELB_OPENAPI_READY_RATE_LIMIT_PER_MINUTE``, default 30/min).
+    """
+    # Per-token sliding-window rate limit. Burned before any kubectl call so
+    # a token holder cannot use the probe as a free polling oracle. When the
+    # caller is anonymous (dev-only ELB_OPENAPI_ALLOW_UNAUTHENTICATED=1), the
+    # bucket is additionally keyed on the client IP so one noisy laptop
+    # cannot DoS every other unauthenticated caller through the shared
+    # ``anonymous`` slot.
+    if x_elb_api_token:
+        token_key = x_elb_api_token
+    else:
+        client_ip = request.client.host if request.client else "unknown"
+        token_key = f"anonymous:{client_ip}"
+    if not _ready_token_bucket_check(token_key):
+        _ready_record_metric("rate_limited")
+        return JSONResponse(
+            status_code=429,
+            content={
+                "ready": False,
+                "code": "rate_limited",
+                "message": (
+                    f"/v1/ready rate limit reached "
+                    f"({READY_RATE_LIMIT_PER_MINUTE}/min). Retry after 60s."
+                ),
+                "limit_per_minute": READY_RATE_LIMIT_PER_MINUTE,
+                "version": VERSION,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+            headers={"Retry-After": "60"},
+        )
+
+    checks: dict[str, Any] = {}
+    code: Optional[str] = None
+    message: Optional[str] = None
+
+    try:
+        safe_exec("kubectl get --raw /readyz --request-timeout=1s", timeout=2)
+        checks["k8s_api"] = {"status": "ok"}
+    except Exception as e:
+        checks["k8s_api"] = {"status": "error", "message": str(e)[:200]}
+        code = "k8s_unreachable"
+        message = f"K8s API server not reachable ({type(e).__name__})"
+
+    if code is None:
+        if not WORKLOAD_POOL_LABEL:
+            checks["workload_pool"] = {"status": "ok", "skipped": "label_disabled"}
+        else:
+            try:
+                proc = safe_exec(
+                    f"kubectl get nodes -l {WORKLOAD_POOL_LABEL} -o json --request-timeout=1s",
+                    timeout=2,
+                )
+                data = json.loads(proc.stdout)
+                ready_nodes = sum(
+                    1
+                    for n in data.get("items", [])
+                    if any(
+                        c.get("type") == "Ready" and c.get("status") == "True"
+                        for c in n.get("status", {}).get("conditions", [])
+                    )
+                )
+                checks["workload_pool"] = {
+                    "status": "ok" if ready_nodes else "error",
+                    "ready_nodes": ready_nodes,
+                    "label": WORKLOAD_POOL_LABEL,
+                }
+                if not ready_nodes:
+                    # Autoscale-to-zero clusters legitimately report 0 Ready
+                    # nodes between jobs. Degrade to a non-fatal status so
+                    # the probe does not flap on every idle period.
+                    if _autoscaler_enabled_for_workload_pool():
+                        checks["workload_pool"]["status"] = "ok"
+                        checks["workload_pool"]["degraded"] = "autoscaler_pending"
+                        _ready_record_metric("autoscaler_pending")
+                    else:
+                        code = "no_workload_nodes"
+                        message = (
+                            f"No Ready nodes match label '{WORKLOAD_POOL_LABEL}' "
+                            "and Cluster Autoscaler ConfigMap is not present"
+                        )
+            except Exception as e:
+                checks["workload_pool"] = {"status": "error", "message": str(e)[:200]}
+                code = "workload_pool_check_failed"
+                message = f"Workload pool probe failed ({type(e).__name__})"
+
+    if code is None:
+        try:
+            proc = safe_exec(
+                "kubectl get deploy elb-openapi -o json --request-timeout=1s",
+                timeout=2,
+            )
+            data = json.loads(proc.stdout)
+            ready_replicas = int((data.get("status") or {}).get("readyReplicas") or 0)
+            checks["openapi_pod"] = {
+                "status": "ok" if ready_replicas else "error",
+                "ready_replicas": ready_replicas,
+            }
+            if not ready_replicas:
+                code = "openapi_pod_not_ready"
+                message = "elb-openapi Deployment has zero ready replicas"
+        except Exception as e:
+            checks["openapi_pod"] = {"status": "error", "message": str(e)[:200]}
+            code = "openapi_pod_check_failed"
+            message = f"openapi pod probe failed ({type(e).__name__})"
+
+    payload: dict[str, Any] = {
+        "version": VERSION,
+        "cluster_name": _ready_masked_cluster_name(),
+        "checks": checks,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "budget_seconds": READY_BUDGET_SECONDS,
+    }
+    if code:
+        _ready_record_metric(code)
+        payload.update({"ready": False, "code": code, "message": message})
+        return JSONResponse(status_code=503, content=payload)
+    _ready_record_metric("ok")
+    payload["ready"] = True
+    return payload
+
+
+@v1.get(
+    "/ready/metrics",
+    tags=["System"],
+    summary="In-process counters for /v1/ready outcomes",
+)
+async def ready_metrics():
+    """Return a snapshot of the per-outcome counter for ``/v1/ready``.
+
+    The counters are process-local and reset on pod restart, so operators
+    should scrape them on a short interval (e.g. every 60 s from a sidecar
+    or a Container Apps `cron` rule) if long-term aggregation is needed.
+    Authenticated via the same router-level ``require_api_token`` dep, so
+    only token holders can read them — same posture as the rest of /v1.
+    """
+    with _READY_METRICS_LOCK:
+        snapshot = dict(_READY_METRICS)
+    snapshot["version"] = VERSION
+    snapshot["rate_limit_per_minute"] = READY_RATE_LIMIT_PER_MINUTE
+    snapshot["timestamp"] = datetime.now(timezone.utc).isoformat()
+    return snapshot
 
 @v1.get("/config", tags=["System"], summary="Active configuration")
 async def get_config():
