@@ -69,7 +69,7 @@ if not API_TOKEN and not ALLOW_UNAUTHENTICATED:
         "ELB_OPENAPI_ALLOW_UNAUTHENTICATED is not set. All authenticated "
         "endpoints will return 503 until one of these env vars is provided."
     )
-VERSION = "3.7.2"
+VERSION = "3.7.3"
 
 # /v1/ready hard time budget. The endpoint exists so external callers can
 # pre-flight whether a POST /v1/jobs is likely to succeed without paying the
@@ -104,6 +104,16 @@ READY_AUTOSCALER_AWARE = os.environ.get(
 # token is generous for a pre-flight check and cuts the enumeration surface.
 READY_RATE_LIMIT_PER_MINUTE = max(
     1, int(os.environ.get("ELB_OPENAPI_READY_RATE_LIMIT_PER_MINUTE", "30"))
+)
+# Hard cap on the number of distinct (token | per-IP-anonymous) buckets that
+# can co-exist in ``_READY_RATE_BUCKETS``. The dict is ordered + accessed
+# LRU-style, so the oldest bucket evicts when the cap is reached. Bounds
+# memory permanently on long-running pods that have served many distinct
+# tokens / IPs (the original GC-on-empty path was a no-op because the prod
+# code always appended a timestamp before the GC check could run — issue
+# #20 P1 #3).
+READY_RATE_BUCKETS_MAX = max(
+    16, int(os.environ.get("ELB_OPENAPI_READY_RATE_BUCKETS_MAX", "4096"))
 )
 # Hash the cluster name in the /v1/ready response so the probe does not
 # leak the AKS cluster identifier to anyone holding a token. Off by default
@@ -1470,7 +1480,7 @@ def _cleanup_tmp(*paths: str) -> None:
 # the counters reset, which is the same behaviour as in-cluster Prometheus
 # exporters started from a fresh process.
 _READY_RATE_LOCK = Lock()
-_READY_RATE_BUCKETS: dict[str, list[float]] = {}
+_READY_RATE_BUCKETS: "OrderedDict[str, list[float]]" = OrderedDict()
 _READY_METRICS_LOCK = Lock()
 _READY_METRICS: dict[str, int] = {
     "ok": 0,
@@ -1492,11 +1502,23 @@ def _ready_token_bucket_check(token_or_anon: str) -> bool:
     (when ELB_OPENAPI_ALLOW_UNAUTHENTICATED=1 in dev) is bucketed separately,
     and the route additionally suffixes the client IP so a single noisy
     laptop cannot DoS every other unauthenticated caller.
+
+    Memory bound: ``_READY_RATE_BUCKETS`` is an ``OrderedDict`` accessed in
+    LRU order. When the dict grows past ``READY_RATE_BUCKETS_MAX`` the
+    least-recently-used bucket evicts. This replaces the original GC-on-empty
+    path which was unreachable in the prod code (the append happened before
+    the empty check) — issue #20 P1 #3.
     """
     now = time.monotonic()
     key = hashlib.sha256(token_or_anon.encode("utf-8", "ignore")).hexdigest()
     with _READY_RATE_LOCK:
-        bucket = _READY_RATE_BUCKETS.setdefault(key, [])
+        bucket = _READY_RATE_BUCKETS.get(key)
+        if bucket is None:
+            bucket = []
+            _READY_RATE_BUCKETS[key] = bucket
+        else:
+            # LRU touch — mark this bucket as most-recently-used.
+            _READY_RATE_BUCKETS.move_to_end(key)
         # Drop timestamps older than 60s.
         cutoff = now - 60.0
         while bucket and bucket[0] < cutoff:
@@ -1504,12 +1526,11 @@ def _ready_token_bucket_check(token_or_anon: str) -> bool:
         if len(bucket) >= READY_RATE_LIMIT_PER_MINUTE:
             return False
         bucket.append(now)
-        # Garbage-collect now-empty buckets so a long-running pod that has
-        # served many distinct tokens / IPs does not accumulate unbounded
-        # SHA-256 keys. The check is O(1) since we already hold the lock
-        # and the bucket reference.
-        if not bucket:
-            _READY_RATE_BUCKETS.pop(key, None)
+        # LRU evict the oldest bucket entries when over the soft cap. The
+        # dict is bounded so a long-running pod that has served many distinct
+        # tokens / IPs cannot accumulate unbounded SHA-256 keys.
+        while len(_READY_RATE_BUCKETS) > READY_RATE_BUCKETS_MAX:
+            _READY_RATE_BUCKETS.popitem(last=False)
     return True
 
 
@@ -1527,6 +1548,61 @@ def _ready_masked_cluster_name() -> str:
     return f"sha256:{digest[:16]}"
 
 
+def _anonymous_client_ip(request: Request) -> str:
+    """Return the real anonymous-caller IP for per-IP bucket keying.
+
+    The /v1/ready route runs behind an in-pod nginx + the Container Apps
+    ingress, so ``request.client.host`` is always the proxy's IP and every
+    unauthenticated caller would collapse into one shared bucket; one noisy
+    laptop could then DoS the whole anonymous slot. We trust the
+    ``X-Forwarded-For`` first hop (the closest reverse-proxy boundary) and
+    fall back to ``X-Real-IP`` then ``request.client.host`` so the function
+    still returns something when the route is called via TestClient or in a
+    deployment that strips the proxy headers.
+
+    Returns ``"unknown"`` when no source is available so the caller key stays
+    a non-empty string. Issue #20 P1 #2.
+    """
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        first = xff.split(",", 1)[0].strip()
+        if first:
+            return first
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        real_ip = real_ip.strip()
+        if real_ip:
+            return real_ip
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+_AUTOSCALER_NAME_LINE_RE = re.compile(
+    r"^\s*(?:pool\s+)?name\s*:\s*(\S+)\s*$", re.IGNORECASE
+)
+
+
+def _autoscaler_status_mentions_pool(body: str, pool_name: str) -> bool:
+    """Return True iff the cluster-autoscaler-status body declares a
+    node-group whose ``Name:`` (or ``Pool Name:``) field exactly matches
+    ``pool_name`` (case-insensitive, anchored on the field line).
+
+    The previous implementation did ``WORKLOAD_POOL_NAME.lower() in body.lower()``
+    which matched any line containing the substring — e.g. ``blast`` matched
+    ``blastlogs`` and ``warmupblast``, ``pool`` matched ``systempool``.
+    Issue #20 P3 #8.
+    """
+    target = pool_name.strip().lower()
+    if not target:
+        return False
+    for line in body.splitlines():
+        m = _AUTOSCALER_NAME_LINE_RE.match(line)
+        if m and m.group(1).lower() == target:
+            return True
+    return False
+
+
 def _autoscaler_enabled_for_workload_pool() -> bool:
     """Best-effort check: is Cluster Autoscaler active on a pool that could
     host BLAST workload nodes?
@@ -1539,10 +1615,22 @@ def _autoscaler_enabled_for_workload_pool() -> bool:
     on autoscale-to-zero clusters).
 
     When ``ELB_OPENAPI_WORKLOAD_POOL_NAME`` is set, the probe additionally
-    requires the autoscaler status body to mention that pool. This catches
-    the multi-pool case where the autoscaler is enabled on a different pool
-    (e.g. the system pool) and would otherwise falsely degrade a real
-    no-Ready-workload-nodes outage into ``autoscaler_pending``.
+    requires the autoscaler status body to declare a node group whose
+    ``Name:`` field *exactly* matches that pool (case-insensitive, anchored
+    on the field line — see :func:`_autoscaler_status_mentions_pool`). This
+    catches the multi-pool case where the autoscaler is enabled on a
+    different pool (e.g. the system pool) and would otherwise falsely
+    degrade a real no-Ready-workload-nodes outage into
+    ``autoscaler_pending``.
+
+    Probe budget: when ``WORKLOAD_POOL_NAME`` is set the kubectl probe
+    fetches the full ``.data.status`` body (typically a few KiB on a
+    multi-pool cluster) instead of the lighter ``-o name`` ConfigMap
+    existence check. Parsing is O(lines) and stays well under the
+    ``READY_BUDGET_SECONDS`` (2.5 s) envelope, but the network round-trip
+    is the dominant cost (~50–200 ms on a healthy cluster). Leave
+    ``WORKLOAD_POOL_NAME`` unset on single-pool clusters to keep the
+    cheap path.
 
     Errors are swallowed and treated as "no autoscaler" so a probe failure
     cannot turn a real outage into a soft warning.
@@ -1563,8 +1651,7 @@ def _autoscaler_enabled_for_workload_pool() -> bool:
             "-o jsonpath={.data.status}",
             timeout=2,
         )
-        body = (proc.stdout or "").lower()
-        return WORKLOAD_POOL_NAME.lower() in body
+        return _autoscaler_status_mentions_pool(proc.stdout or "", WORKLOAD_POOL_NAME)
     except Exception:
         return False
 
@@ -1658,14 +1745,16 @@ async def ready(
     # Per-token sliding-window rate limit. Burned before any kubectl call so
     # a token holder cannot use the probe as a free polling oracle. When the
     # caller is anonymous (dev-only ELB_OPENAPI_ALLOW_UNAUTHENTICATED=1), the
-    # bucket is additionally keyed on the client IP so one noisy laptop
-    # cannot DoS every other unauthenticated caller through the shared
-    # ``anonymous`` slot.
+    # bucket is additionally keyed on the *real* client IP so one noisy
+    # laptop cannot DoS every other unauthenticated caller through the
+    # shared ``anonymous`` slot. ``request.client.host`` behind the in-pod
+    # nginx + Container Apps ingress is always the proxy IP, so we read
+    # ``X-Forwarded-For`` (first hop) first and fall back to ``X-Real-IP``
+    # then ``request.client.host`` — issue #20 P1 #2.
     if x_elb_api_token:
         token_key = x_elb_api_token
     else:
-        client_ip = request.client.host if request.client else "unknown"
-        token_key = f"anonymous:{client_ip}"
+        token_key = f"anonymous:{_anonymous_client_ip(request)}"
     if not _ready_token_bucket_check(token_key):
         _ready_record_metric("rate_limited")
         return JSONResponse(

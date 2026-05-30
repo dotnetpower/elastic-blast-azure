@@ -301,35 +301,125 @@ def test_ready_anonymous_bucket_is_per_client_ip(main_module, monkeypatch):
 
 
 def test_ready_token_bucket_garbage_collects_empty_keys(main_module, monkeypatch):
-    """An empty per-key bucket is removed so distinct tokens / IPs over
-    a long-running pod's lifetime cannot accumulate unbounded SHA-256
-    keys in ``_READY_RATE_BUCKETS``.
+    """LRU-bounded buckets so a long-running pod cannot accumulate unbounded
+    SHA-256 keys in ``_READY_RATE_BUCKETS``.
 
-    Drive the bucket past 60s + back to 0 and assert the key disappears.
+    The original implementation tried to GC empty buckets *after* appending
+    a fresh timestamp, which meant the GC branch was never reached. v3.7.3
+    replaced that with an ``OrderedDict`` LRU eviction bounded by
+    ``READY_RATE_BUCKETS_MAX`` (issue #20 P1 #3).
     """
-    import time
+    # Cap the dict tightly so we can exercise eviction without thousands
+    # of entries.
+    monkeypatch.setattr(main_module, "READY_RATE_BUCKETS_MAX", 3)
+    # Insert 5 distinct tokens; the oldest 2 must evict.
+    for token in ("token-a", "token-b", "token-c", "token-d", "token-e"):
+        assert main_module._ready_token_bucket_check(token) is True
+    assert len(main_module._READY_RATE_BUCKETS) == 3
+    # The most-recently-used three must be the survivors.
+    surviving_digests = set(main_module._READY_RATE_BUCKETS.keys())
+    import hashlib
+    for token in ("token-c", "token-d", "token-e"):
+        d = hashlib.sha256(token.encode()).hexdigest()
+        assert d in surviving_digests
+    for token in ("token-a", "token-b"):
+        d = hashlib.sha256(token.encode()).hexdigest()
+        assert d not in surviving_digests
 
-    # First call inserts the key.
-    assert main_module._ready_token_bucket_check("token-abc") is True
-    digest_key = next(iter(main_module._READY_RATE_BUCKETS.keys()))
-    # Fast-forward by 61s by mutating the bucket directly (cheaper than
-    # monkeypatching time.monotonic for a focused test).
-    now = time.monotonic()
-    main_module._READY_RATE_BUCKETS[digest_key] = [now - 70.0]
-    # Next check drops the stale timestamp, appends fresh, leaves the key
-    # populated — the empty-bucket GC path only fires when the bucket is
-    # actually emptied. Simulate that by removing the appended entry
-    # before re-checking.
-    assert main_module._ready_token_bucket_check("token-abc") is True
-    # Direct simulation: a bucket emptied by the cutoff cleanup and not
-    # re-appended must be GC'd. We exercise that branch by hand.
-    with main_module._READY_RATE_LOCK:
-        main_module._READY_RATE_BUCKETS[digest_key] = []
-        # The GC line runs inside _ready_token_bucket_check; replicate the
-        # invariant the prod path enforces:
-        if not main_module._READY_RATE_BUCKETS[digest_key]:
-            main_module._READY_RATE_BUCKETS.pop(digest_key, None)
-    assert digest_key not in main_module._READY_RATE_BUCKETS
+
+def test_ready_token_bucket_lru_touches_on_reuse(main_module, monkeypatch):
+    """Re-using a token marks it as most-recently-used so it survives
+    eviction even when the dict overflows after it was first inserted.
+    """
+    monkeypatch.setattr(main_module, "READY_RATE_BUCKETS_MAX", 3)
+    main_module._ready_token_bucket_check("token-a")
+    main_module._ready_token_bucket_check("token-b")
+    main_module._ready_token_bucket_check("token-c")
+    # Re-touch token-a so it becomes the most-recently-used.
+    main_module._ready_token_bucket_check("token-a")
+    # Insert a 4th token; the LRU evicts token-b (now oldest), NOT token-a.
+    main_module._ready_token_bucket_check("token-d")
+    import hashlib
+    survivors = set(main_module._READY_RATE_BUCKETS.keys())
+    assert hashlib.sha256(b"token-a").hexdigest() in survivors
+    assert hashlib.sha256(b"token-b").hexdigest() not in survivors
+    assert hashlib.sha256(b"token-c").hexdigest() in survivors
+    assert hashlib.sha256(b"token-d").hexdigest() in survivors
+
+
+def test_anonymous_client_ip_honours_x_forwarded_for(main_module, monkeypatch):
+    """`_anonymous_client_ip` reads the first X-Forwarded-For hop so per-IP
+    bucket keying works behind the in-pod nginx + Container Apps ingress
+    (issue #20 P1 #2).
+    """
+    monkeypatch.setattr(main_module, "READY_RATE_LIMIT_PER_MINUTE", 1)
+    main_module.app.dependency_overrides[main_module.require_api_token] = lambda: None
+    try:
+        _patch_safe_exec(
+            monkeypatch,
+            {
+                "kubectl get --raw /readyz": "",
+                "kubectl get nodes": _ok_nodes(),
+                "kubectl get deploy elb-openapi": _ok_deploy(),
+            },
+        )
+        # Both TestClient invocations share the same proxy IP (the
+        # ``client=`` tuple), but the X-Forwarded-For header carries the
+        # real downstream IP. With the fix in place each downstream IP
+        # gets its own bucket.
+        proxy = TestClient(main_module.app, client=("10.0.0.99", 80))
+        first = proxy.get(
+            "/v1/ready",
+            headers={"X-Forwarded-For": "203.0.113.10, 10.0.0.99"},
+        )
+        assert first.status_code == 200
+        # Same downstream IP exhausts its own bucket.
+        second = proxy.get(
+            "/v1/ready",
+            headers={"X-Forwarded-For": "203.0.113.10"},
+        )
+        assert second.status_code == 429
+        # A different downstream IP still has quota.
+        third = proxy.get(
+            "/v1/ready",
+            headers={"X-Forwarded-For": "203.0.113.11"},
+        )
+        assert third.status_code == 200
+    finally:
+        main_module.app.dependency_overrides.clear()
+
+
+def test_anonymous_client_ip_falls_back_to_x_real_ip_then_client(main_module):
+    """Fallback chain: X-Forwarded-For > X-Real-IP > request.client.host >
+    ``"unknown"`` (issue #20 P1 #2).
+    """
+    from starlette.requests import Request
+
+    def _make(headers: dict[str, str], client: tuple[str, int] | None) -> Request:
+        scope = {
+            "type": "http",
+            "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+            "client": client,
+        }
+        return Request(scope)
+
+    assert (
+        main_module._anonymous_client_ip(
+            _make({"x-forwarded-for": "198.51.100.42, 10.0.0.1"}, ("10.0.0.1", 80))
+        )
+        == "198.51.100.42"
+    )
+    assert (
+        main_module._anonymous_client_ip(
+            _make({"x-real-ip": "198.51.100.7"}, ("10.0.0.1", 80))
+        )
+        == "198.51.100.7"
+    )
+    assert (
+        main_module._anonymous_client_ip(_make({}, ("203.0.113.5", 12345)))
+        == "203.0.113.5"
+    )
+    assert main_module._anonymous_client_ip(_make({}, None)) == "unknown"
 
 
 # ── Autoscaler workload-pool name filter (3.7.2) ──────────────────────────
@@ -339,7 +429,9 @@ def test_ready_autoscaler_pending_requires_matching_pool_name_when_set(
     main_module, monkeypatch
 ):
     """When ``ELB_OPENAPI_WORKLOAD_POOL_NAME`` is configured the autoscaler
-    ConfigMap *body* must mention that pool, not just exist.
+    ConfigMap *body* must declare a node group whose ``Name:`` field
+    exactly matches that pool, not just contain the substring (issue #20
+    P3 #8).
 
     Otherwise a cluster with autoscaler on a non-workload pool (e.g. the
     system pool only) would silently degrade a real ``no_workload_nodes``
@@ -358,14 +450,15 @@ def test_ready_autoscaler_pending_requires_matching_pool_name_when_set(
     resp = TestClient(main_module.app).get(
         "/v1/ready", headers={"X-ELB-API-Token": "test-token"}
     )
-    # Autoscaler body does NOT mention 'blastpool' → real outage, 503.
+    # Autoscaler body does NOT declare 'blastpool' → real outage, 503.
     assert resp.status_code == 503
     assert resp.json()["code"] == "no_workload_nodes"
 
 
 def test_ready_autoscaler_pending_when_pool_name_matches(main_module, monkeypatch):
-    """When the configured pool name *is* in the autoscaler ConfigMap body,
-    keep the existing degraded-to-autoscaler-pending behaviour.
+    """When the configured pool name *is* declared in the autoscaler
+    ConfigMap body (case-insensitive, anchored on ``Name:`` field), keep
+    the existing degraded-to-autoscaler-pending behaviour.
     """
     monkeypatch.setattr(main_module, "WORKLOAD_POOL_NAME", "blastpool")
     _patch_safe_exec(
@@ -383,4 +476,28 @@ def test_ready_autoscaler_pending_when_pool_name_matches(main_module, monkeypatc
     assert resp.status_code == 200
     body = resp.json()
     assert body["checks"]["workload_pool"]["degraded"] == "autoscaler_pending"
+
+
+def test_autoscaler_status_mentions_pool_is_exact_match(main_module):
+    """Substring-on-line is the original bug: ``blast`` would match
+    ``warmupblast``, ``pool`` would match ``systempool``. The 3.7.3 fix
+    parses ``Name:`` / ``Pool Name:`` field lines and exact-matches the
+    captured token (issue #20 P3 #8).
+    """
+    body = (
+        "Cluster-autoscaler status:\n"
+        "  Pool Name: warmupblast\n"
+        "  Ready: 1\n"
+        "  Pool Name: systempool\n"
+        "  Ready: 1\n"
+    )
+    # Substring 'blast' would have matched 'warmupblast' in the old code;
+    # the new exact match rejects it.
+    assert main_module._autoscaler_status_mentions_pool(body, "blast") is False
+    assert main_module._autoscaler_status_mentions_pool(body, "warmupblast") is True
+    # Exact-match against the second entry, case-insensitive.
+    assert main_module._autoscaler_status_mentions_pool(body, "SystemPool") is True
+    # Empty pool name returns False (no implicit wildcard).
+    assert main_module._autoscaler_status_mentions_pool(body, "") is False
+    assert main_module._autoscaler_status_mentions_pool(body, "   ") is False
 
