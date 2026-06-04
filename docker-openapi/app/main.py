@@ -2106,27 +2106,43 @@ _MODE_A_EXAMPLE = {
     },
 }
 
+# Real E. coli K-12 MG1655 16S ribosomal RNA, partial (NCBI NR_024570.1, first ~540 bp).
+# Used by the Mode B examples so they actually hit the 16S_ribosomal_RNA database
+# (the previous synthetic "ATGC..." repeat against a bacterial 16S DB returned no hits).
+_SAMPLE_16S_FASTA = (
+    ">NR_024570.1 Escherichia coli str. K-12 substr. MG1655 16S ribosomal RNA, partial sequence\n"
+    "AAATTGAAGAGTTTGATCATGGCTCAGATTGAACGCTGGCGGCAGGCCTAACACATGCAA\n"
+    "GTCGAACGGTAACAGGAAGAAGCTTGCTTCTTTGCTGACGAGTGGCGGACGGGTGAGTAA\n"
+    "TGTCTGGGAAACTGCCTGATGGAGGGGGATAACTACTGGAAACGGTAGCTAATACCGCAT\n"
+    "AACGTCGCAAGACCAAAGAGGGGGACCTTCGGGCCTCTTGCCATCGGATGTGCCCAGATG\n"
+    "GGATTAGCTAGTAGGTGGGGTAACGGCTCACCTAGGCGACGATCCCTAGCTGGTCTGAGA\n"
+    "GGATGACCAGCCACACTGGAACTGAGACACGGTCCAGACTCCTACGGGAGGCAGCAGTGG\n"
+    "GGAATATTGCACAATGGGCGCAAGCCTGATGCAGCCATGCCGCGTGTATGAAGAAGGCCT\n"
+    "TCGGGTTGTAAAGTACTTTCAGCGGGGAGGAAGGGAGTAAAGTTAATACCTTTGCTCATT\n"
+    "GACGTTACCCGCAGAAGAAGCACCGGCTAACTCCGTGCCAGCAGCCGCGGTAATACGGAG\n"
+)
+
 _MODE_B_EXAMPLE = {
     "summary": "Mode B — Inline FASTA (simple)",
-    "description": "Provide FASTA text inline. Server uploads query and resolves DB/results URLs automatically.",
+    "description": "Provide FASTA text inline. Server uploads query and resolves DB/results URLs automatically. Query is E. coli K-12 16S rRNA partial (NR_024570.1) against the 16S_ribosomal_RNA database. outfmt is 5 (BLAST XML) because the result pipeline requires it.",
     "value": {
         "program": "blastn",
         "db": "16S_ribosomal_RNA",
-        "query_fasta": ">NC_003310.1\nATGCATGCATGCATGCATGCATGCATGCATGC\nGCATGCATGCATGCATGCATGCATGCATGCAT",
-        "blast_options": {"evalue": 0.05, "max_target_seqs": 100},
+        "query_fasta": _SAMPLE_16S_FASTA,
+        "blast_options": {"evalue": 0.05, "max_target_seqs": 100, "outfmt": "5"},
     },
 }
 
 _MODE_B_TAXID_EXAMPLE = {
     "summary": "Mode B — with Taxonomy filter",
-    "description": "Filter BLAST results by organism taxonomy. is_inclusive=true searches within the taxid, false excludes it.",
+    "description": "Filter BLAST results by organism taxonomy. is_inclusive=true searches within the taxid, false excludes it. Query is E. coli K-12 16S rRNA (NR_024570.1) filtered to taxid 562 (Escherichia coli). outfmt is 5 (BLAST XML) because the result pipeline requires it.",
     "value": {
         "program": "blastn",
         "db": "16S_ribosomal_RNA",
-        "query_fasta": ">NC_003310.1\nATGCATGCATGCATGCATGCATGCATGCATGC",
-        "taxid": 10244,
+        "query_fasta": _SAMPLE_16S_FASTA,
+        "taxid": 562,
         "is_inclusive": True,
-        "blast_options": {"evalue": 0.05, "max_target_seqs": 100},
+        "blast_options": {"evalue": 0.05, "max_target_seqs": 100, "outfmt": "5"},
     },
 }
 
