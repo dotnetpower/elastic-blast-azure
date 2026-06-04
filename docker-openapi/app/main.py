@@ -69,7 +69,7 @@ if not API_TOKEN and not ALLOW_UNAUTHENTICATED:
         "ELB_OPENAPI_ALLOW_UNAUTHENTICATED is not set. All authenticated "
         "endpoints will return 503 until one of these env vars is provided."
     )
-VERSION = "3.7.4"
+VERSION = "3.7.5"
 
 # /v1/ready hard time budget. The endpoint exists so external callers can
 # pre-flight whether a POST /v1/jobs is likely to succeed without paying the
