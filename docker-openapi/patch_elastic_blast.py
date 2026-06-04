@@ -1,0 +1,749 @@
+#!/usr/bin/env python3
+"""Patch the vendored elastic-blast-azure clone for dashboard sharded runs.
+
+Responsibility: Patch the vendored elastic-blast-azure clone for dashboard sharded runs
+Edit boundaries: Keep terminal-side behavior here; api/worker callers should use service
+wrappers.
+Key entry points: `_replace_once`, `_replace_once_unless_present`,
+`_replace_all_unless_present`, `patch_azure_py`, `patch_azure_cli_glue`,
+`patch_finalizer_template`, `patch_finalizer_script`
+Risky contracts: Do not expose terminal services directly to the internet or log secrets.
+Validation: `uv run pytest -q api/tests/test_terminal_toolchain.py
+api/tests/test_terminal_command_guard.py`.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+
+def _replace_once(path: Path, old: str, new: str) -> None:
+    text = path.read_text()
+    count = text.count(old)
+    if count != 1:
+        raise RuntimeError(f"expected one match in {path}, found {count}")
+    path.write_text(text.replace(old, new, 1))
+
+
+def _replace_once_unless_present(
+    path: Path, old: str, new: str, marker: str, *, allow_absent: bool = False
+) -> None:
+    text = path.read_text()
+    if marker in text:
+        return
+    count = text.count(old)
+    if count == 0 and allow_absent:
+        return
+    if count != 1:
+        raise RuntimeError(f"expected one match in {path}, found {count}")
+    path.write_text(text.replace(old, new, 1))
+
+
+def _replace_all_unless_present(path: Path, old: str, new: str, marker: str) -> None:
+    text = path.read_text()
+    if marker in text:
+        return
+    count = text.count(old)
+    if count < 1:
+        raise RuntimeError(f"expected at least one match in {path}, found {count}")
+    path.write_text(text.replace(old, new))
+
+
+def patch_azure_py(root: Path) -> None:
+    path = root / "src/elastic_blast/azure.py"
+    _replace_once_unless_present(
+        path,
+        (
+            "        # Deploy finalizer\n"
+            "        if self.auto_shutdown:\n"
+            "            self._submit_finalizer_job()\n"
+        ),
+        (
+            "        # Deploy finalizer. In partitioned/sharded mode this is also the\n"
+            "        # result-merger and terminal marker writer, not just an "
+            "auto-shutdown hook.\n"
+            "        self._submit_finalizer_job()\n"
+        ),
+        "result-merger and terminal marker writer",
+        allow_absent=True,
+    )
+    _replace_once_unless_present(
+        path,
+        (
+            "            'ELB_DB_PARTITIONS': str(cfg.blast.db_partitions) "
+            "if cfg.blast.db_partitions > 0 else '0',\n"
+            "            'ELB_BLAST_PROGRAM': cfg.blast.program,\n"
+        ),
+        (
+            "            'ELB_DB_PARTITIONS': str(cfg.blast.db_partitions) "
+            "if cfg.blast.db_partitions > 0 else '0',\n"
+            "            'ELB_BLAST_PROGRAM': cfg.blast.program,\n"
+            "            'ELB_BLAST_OPTIONS': cfg.blast.options,\n"
+        ),
+        "'ELB_BLAST_OPTIONS': cfg.blast.options",
+    )
+    _replace_once_unless_present(
+        path,
+        (
+            "        subs = {\n"
+            "            'ELB_DOCKER_IMAGE': cfg.azure.elb_docker_image,\n"
+            "            'ELB_RESULTS': self._results_path(),\n"
+        ),
+        (
+            "        subs = {\n"
+            "            'ELB_DOCKER_IMAGE': cfg.azure.elb_docker_image,\n"
+            "            'ELB_FINALIZER_DOCKER_IMAGE': cfg.azure.cjs_docker_image,\n"
+            "            'ELB_RESULTS': self._results_path(),\n"
+        ),
+        "'ELB_FINALIZER_DOCKER_IMAGE': cfg.azure.cjs_docker_image",
+    )
+
+
+def patch_azure_cli_glue(root: Path) -> None:
+    path = root / "src/elastic_blast/azure_cli_glue.py"
+    _replace_once_unless_present(
+        path,
+        (
+            "    # Phase 3: success -> structured ACCEPTED.\n"
+            "    if json_mode and rc == 0:\n"
+        ),
+        (
+            "    # Phase 3: success -> structured ACCEPTED.\n"
+            "    if json_mode and rc == 0:\n"
+            "        # Dashboard JSON submit has its own log/state collectors.\n"
+            "        # Avoid running ElasticBLAST's post-submit cleanup hook here,\n"
+            "        # because it can keep the submit process open while K8s work\n"
+            "        # is already running or even completed.\n"
+            "        clean_up_stack.clear()\n"
+        ),
+        "Dashboard JSON submit has its own log/state collectors",
+    )
+
+def _azure_traits_paths(root: Path) -> list[Path]:
+    paths = [root / "src/elastic_blast/azure_traits.py"]
+    for pattern in (
+        "venv/lib/python*/site-packages/elastic_blast/azure_traits.py",
+        ".venv/lib/python*/site-packages/elastic_blast/azure_traits.py",
+    ):
+        paths.extend(root.glob(pattern))
+    return sorted({path for path in paths if path.exists()})
+
+
+def patch_azure_traits(root: Path) -> None:
+    machine_entries = (
+        "    # D/E-series v7 AMD (dashboard availability fallback)\n"
+        "    'Standard_D2as_v7': {'cpu': 2, 'memory': 8},\n"
+        "    'Standard_D4as_v7': {'cpu': 4, 'memory': 16},\n"
+        "    'Standard_E16as_v7': {'cpu': 16, 'memory': 128},\n"
+        "    'Standard_E32as_v7': {'cpu': 32, 'memory': 256},\n"
+        "    'Standard_E48as_v7': {'cpu': 48, 'memory': 384},\n"
+    )
+    price_entries = (
+        "    # D/E-series v7 AMD (dashboard availability fallback)\n"
+        "    'Standard_D2as_v7': 0.096,\n"
+        "    'Standard_D4as_v7': 0.192,\n"
+        "    'Standard_E16as_v7': 1.008,\n"
+        "    'Standard_E32as_v7': 2.016,\n"
+        "    'Standard_E48as_v7': 3.024,\n"
+    )
+    for path in _azure_traits_paths(root):
+        _replace_once_unless_present(
+            path,
+            "    'Standard_D8s_v3': {'cpu': 8, 'memory': 32},  # 8 vCPU, 32 GB RAM\n",
+            (
+                "    'Standard_D8s_v3': {'cpu': 8, 'memory': 32},  # 8 vCPU, 32 GB RAM\n"
+                f"{machine_entries}"
+            ),
+            "'Standard_E32as_v7': {'cpu': 32, 'memory': 256}",
+        )
+        _replace_once_unless_present(
+            path,
+            "    'Standard_D64s_v3': 3.072,\n",
+            "    'Standard_D64s_v3': 3.072,\n" f"{price_entries}",
+            "'Standard_E32as_v7': 2.016",
+            allow_absent=True,
+        )
+
+
+def patch_finalizer_template(root: Path) -> None:
+    path = root / "src/elastic_blast/templates/elb-finalizer-aks.yaml.template"
+    _replace_once_unless_present(
+        path,
+        "        image: ${ELB_DOCKER_IMAGE}\n",
+        "        image: ${ELB_FINALIZER_DOCKER_IMAGE}\n",
+        "image: ${ELB_FINALIZER_DOCKER_IMAGE}",
+    )
+    _replace_once_unless_present(
+        path,
+        (
+            "        - name: ELB_BLAST_PROGRAM\n"
+            '          value: "${ELB_BLAST_PROGRAM}"\n'
+            "        - name: BLAST_ELB_JOB_ID\n"
+        ),
+        (
+            "        - name: ELB_BLAST_PROGRAM\n"
+            '          value: "${ELB_BLAST_PROGRAM}"\n'
+            "        - name: ELB_BLAST_OPTIONS\n"
+            '          value: "${ELB_BLAST_OPTIONS}"\n'
+            "        - name: BLAST_ELB_JOB_ID\n"
+        ),
+        "name: ELB_BLAST_OPTIONS",
+    )
+    _replace_once_unless_present(
+        path,
+        "      restartPolicy: Never\n  # The finalizer writes terminal SUCCESS/FAILURE markers",
+        (
+            "      restartPolicy: Never\n"
+            "      tolerations:\n"
+            "      - key: workload\n"
+            "        operator: Equal\n"
+            "        value: blast\n"
+            "        effect: NoSchedule\n"
+            "      - key: CriticalAddonsOnly\n"
+            "        operator: Exists\n"
+            "        effect: NoSchedule\n"
+            "  # The finalizer writes terminal SUCCESS/FAILURE markers"
+        ),
+        "key: CriticalAddonsOnly",
+    )
+
+
+def patch_finalizer_script(root: Path, merge_script_source: Path) -> None:
+    path = root / "src/elastic_blast/templates/scripts/elb-finalizer-aks.sh"
+    merge_script_target = path.parent / "merge-sharded-results.sh"
+    merge_script_target.write_text(merge_script_source.read_text())
+
+    _replace_once_unless_present(
+        path,
+        (
+            'MARKER_DIR="${ELB_RESULTS}/${ELB_METADATA_DIR}"\n'
+            "if azcopy login --identity >/dev/null 2>&1; then\n"
+            '    if azcopy list "${MARKER_DIR}/SUCCESS.txt" '
+            ">/dev/null 2>&1; then\n"
+            '        if [ "${ELB_DB_PARTITIONS:-0}" -gt 0 ]; then\n'
+            '            if azcopy list "${ELB_RESULTS}/merged_results.out.gz" '
+            ">/dev/null 2>&1 && \\\n"
+            '               azcopy list "${ELB_RESULTS}/merge-report.json" '
+            ">/dev/null 2>&1; then\n"
+            '                echo "SUCCESS.txt and merge artifacts already '
+            'present; skipping finalizer"\n'
+            "                exit 0\n"
+            "            fi\n"
+            '            echo "SUCCESS.txt already present but merge artifacts '
+            'are missing; continuing merge"\n'
+            "        else\n"
+            '            echo "SUCCESS.txt already present at ${MARKER_DIR}; '
+            'skipping finalizer"\n'
+            "            exit 0\n"
+            "        fi\n"
+            "    fi\n"
+            '    if azcopy list "${MARKER_DIR}/FAILURE.txt" '
+            ">/dev/null 2>&1; then\n"
+            '        echo "FAILURE.txt already present at ${MARKER_DIR}; '
+            'skipping finalizer"\n'
+            "        exit 0\n"
+            "    fi\n"
+            "fi\n"
+        ),
+        (
+            'MARKER_DIR="${ELB_RESULTS}/${ELB_METADATA_DIR}"\n'
+            "blob_exists() {\n"
+            "    local output\n"
+            '    output=$(azcopy list "$1" 2>/dev/null || true)\n'
+            "    printf '%s\\n' \"$output\" | grep -Ev '^(INFO:|$)' >/dev/null\n"
+            "}\n"
+            "if azcopy login --identity >/dev/null 2>&1; then\n"
+            '    if blob_exists "${MARKER_DIR}/SUCCESS.txt"; then\n'
+            '        if [ "${ELB_DB_PARTITIONS:-0}" -gt 0 ]; then\n'
+            '            if blob_exists "${ELB_RESULTS}/merged_results.out.gz" && \\\n'
+            '               blob_exists "${ELB_RESULTS}/merge-report.json"; then\n'
+            '                echo "SUCCESS.txt and merge artifacts already '
+            'present; skipping finalizer"\n'
+            "                exit 0\n"
+            "            fi\n"
+            '            echo "SUCCESS.txt already present but merge artifacts '
+            'are missing; continuing merge"\n'
+            "        else\n"
+            '            echo "SUCCESS.txt already present at ${MARKER_DIR}; '
+            'skipping finalizer"\n'
+            "            exit 0\n"
+            "        fi\n"
+            "    fi\n"
+            '    if blob_exists "${MARKER_DIR}/FAILURE.txt"; then\n'
+            '        echo "FAILURE.txt already present at ${MARKER_DIR}; '
+            'skipping finalizer"\n'
+            "        exit 0\n"
+            "    fi\n"
+            "fi\n"
+        ),
+        "blob_exists()",
+    )
+    _replace_once_unless_present(
+        path,
+        (
+            '            if ! azcopy cp "${SHARD_DIR}/*.out.gz" "$LOCAL_DIR/" '
+            '--log-level=ERROR 2>/dev/null; then\n'
+        ),
+        (
+            '            if ! azcopy cp "${SHARD_DIR}/*" "$LOCAL_DIR/" '
+            '--include-pattern "*.out.gz" --log-level=ERROR 2>/dev/null; then\n'
+        ),
+        '--include-pattern "*.out.gz"',
+    )
+    _replace_once_unless_present(
+        path,
+        (
+            '        TOTAL_ROWS=$(wc -l < "$MERGE_INPUT" 2>/dev/null || echo 0)\n'
+            '        echo "Downloaded $SHARD_COUNT shard files, $TOTAL_ROWS tabular rows"\n\n'
+            '        if ! /scripts/merge-sharded-results.sh \\\n'
+        ),
+        (
+            '        TOTAL_ROWS=$(wc -l < "$MERGE_INPUT" 2>/dev/null || echo 0)\n'
+            '        echo "Downloaded $SHARD_COUNT shard files, $TOTAL_ROWS tabular rows"\n\n'
+            '        ORACLE_FILE="$MERGE_DIR/tie-order-oracle.txt"\n'
+            '        ORACLE_SEARCH_BASES="$ELB_RESULTS"\n'
+            '        ORACLE_PARENT_RESULTS="${ELB_RESULTS%/job-*}"\n'
+            '        if [ "$ORACLE_PARENT_RESULTS" != "$ELB_RESULTS" ]; then\n'
+            '            ORACLE_SEARCH_BASES="$ORACLE_SEARCH_BASES $ORACLE_PARENT_RESULTS"\n'
+            '        fi\n'
+            '        for ORACLE_BASE in $ORACLE_SEARCH_BASES; do\n'
+            '            [ -n "${ELB_TIE_ORDER_FILE:-}" ] && break\n'
+            '            ORACLE_BLOB="${ORACLE_BASE}/${ELB_METADATA_DIR}/tie-order-oracle.txt"\n'
+            '            if blob_exists "$ORACLE_BLOB"; then\n'
+            '                if azcopy cp "$ORACLE_BLOB" "$ORACLE_FILE" '
+            '--log-level=ERROR 2>/dev/null; then\n'
+            '                    export ELB_TIE_ORDER_FILE="$ORACLE_FILE"\n'
+            '                    export ELB_TIE_ORDER_BASE="$ORACLE_BASE"\n'
+            '                    echo "Using tie-order oracle from ${ORACLE_BLOB}"\n'
+            '                else\n'
+            '                    echo "WARNING: tie-order oracle exists but could not be '
+            'downloaded: ${ORACLE_BLOB}"\n'
+            '                fi\n'
+            '            fi\n'
+            '        done\n\n'
+            '        if [ -z "${ELB_TIE_ORDER_FILE:-}" ]; then\n'
+            '            for ORACLE_BASE in $ORACLE_SEARCH_BASES; do\n'
+            '                [ -n "${ELB_TIE_ORDER_FILE:-}" ] && break\n'
+            '                ORACLE_URLS_BLOB="${ORACLE_BASE}/${ELB_METADATA_DIR}/'
+            'tie-order-oracle-urls.txt"\n'
+            '                if blob_exists "$ORACLE_URLS_BLOB"; then\n'
+            '                    ORACLE_URLS_FILE="$MERGE_DIR/tie-order-oracle-urls.txt"\n'
+            '                    ORACLE_PART_DIR="$MERGE_DIR/tie-order-oracle-parts"\n'
+            '                    mkdir -p "$ORACLE_PART_DIR"\n'
+            '                    if azcopy cp "$ORACLE_URLS_BLOB" "$ORACLE_URLS_FILE" '
+            '--log-level=ERROR 2>/dev/null; then\n'
+            '                        idx=0\n'
+            '                        while IFS= read -r part_url; do\n'
+            '                            [ -z "$part_url" ] && continue\n'
+            '                            part_file=$(printf "%s/part-%06d.txt" '
+            '"$ORACLE_PART_DIR" "$idx")\n'
+            '                            if ! azcopy cp "$part_url" "$part_file" '
+            '--log-level=ERROR 2>/dev/null; then\n'
+            '                                echo "WARNING: tie-order oracle part could not '
+            'be downloaded: ${part_url}"\n'
+            '                                rm -f "$part_file"\n'
+            '                            fi\n'
+            '                            idx=$((idx + 1))\n'
+            '                        done < "$ORACLE_URLS_FILE"\n'
+            '                        if find "$ORACLE_PART_DIR" -type f '
+            '-name "part-*.txt" | grep -q .; then\n'
+            '                            find "$ORACLE_PART_DIR" -type f '
+            '-name "part-*.txt" | sort | xargs cat > "$ORACLE_FILE"\n'
+            '                            export ELB_TIE_ORDER_FILE="$ORACLE_FILE"\n'
+            '                            export ELB_TIE_ORDER_BASE="$ORACLE_BASE"\n'
+            '                            echo "Using DB-order tie oracle parts from '
+            '${ORACLE_URLS_BLOB}"\n'
+            '                        fi\n'
+            '                    fi\n'
+            '                fi\n'
+            '            done\n'
+            '        fi\n'
+            '        if [ -n "${ELB_TIE_ORDER_FILE:-}" ]; then\n'
+            '            ORACLE_STRICT_BLOB="${ELB_TIE_ORDER_BASE:-$ELB_RESULTS}/'
+            '${ELB_METADATA_DIR}/'
+            'tie-order-oracle-strict.txt"\n'
+            '            if blob_exists "$ORACLE_STRICT_BLOB"; then\n'
+            '                export ELB_TIE_ORDER_STRICT="1"\n'
+            '            fi\n'
+            '        fi\n\n'
+            '        if ! /scripts/merge-sharded-results.sh \\\n'
+        ),
+        "ELB_TIE_ORDER_FILE",
+    )
+
+    text = path.read_text()
+    if (
+        "MERGE_OUTFMT=$(python3" in text
+        and '"$MERGE_INPUT" "$MERGE_OUTPUT" "$MERGE_REPORT"' in text
+    ):
+        return
+    if '"$MAX_HITS" "$MERGE_INPUT" "$MERGE_OUTPUT"' in text:
+        raise RuntimeError(
+            "elastic-blast-azure finalizer has the legacy tabular merge patch; "
+            "update the cloned runtime to the XML-aware finalizer before building"
+        )
+
+    raise RuntimeError(
+        "elastic-blast-azure finalizer is not XML-aware; update the cloned runtime "
+        "before building the dashboard terminal image"
+    )
+
+
+_HARDENED_INIT_DB_SHARD_AKS_SCRIPT = r"""
+#!/bin/bash
+set -euo pipefail
+
+echo "BASH version ${BASH_VERSION}"
+echo "Shard download: idx=${ELB_SHARD_IDX} prefix=${ELB_PARTITION_PREFIX} db=${ELB_DB}"
+
+if [ -n "${STARTUP_DELAY:-}" ]; then
+    echo "Waiting ${STARTUP_DELAY}s for workspace initialization"
+    sleep "${STARTUP_DELAY}"
+fi
+
+cd "${ELB_BLASTDB_DIR:-/blast/blastdb}"
+
+start=$(date +%s)
+log_runtime() {
+    local ts
+    ts=$(date +'%F %T')
+    printf '%s RUNTIME %s %f seconds\n' "$ts" "$1" "$2"
+}
+
+azcopy login --identity || { echo "ERROR: azcopy login failed"; exit 1; }
+export AZCOPY_CONCURRENCY_VALUE=${AZCOPY_CONCURRENCY_VALUE:-16}
+export AZCOPY_BUFFER_GB=${AZCOPY_BUFFER_GB:-2}
+
+retry_azcopy() {
+    local max_attempts=3 attempt=1 wait_sec=5
+    while [ "$attempt" -le "$max_attempts" ]; do
+        if azcopy "$@"; then return 0; fi
+        echo "azcopy attempt ${attempt}/${max_attempts} failed, retrying in ${wait_sec}s..."
+        sleep "$wait_sec"
+        wait_sec=$((wait_sec * 2))
+        attempt=$((attempt + 1))
+    done
+    echo "ERROR: azcopy failed after ${max_attempts} attempts"
+    return 1
+}
+
+SHARD_URL="${ELB_PARTITION_PREFIX}${ELB_SHARD_IDX}/"
+MANIFEST_URL="${SHARD_URL}${ELB_DB}.manifest"
+NAL_URL="${SHARD_URL}${ELB_DB}.nal"
+echo "Downloading manifest: ${MANIFEST_URL}"
+retry_azcopy cp "${MANIFEST_URL}" /tmp/manifest.txt --log-level=ERROR || {
+    echo "ERROR: manifest download failed"
+    exit 1
+}
+retry_azcopy cp "${NAL_URL}" "./${ELB_DB}.nal" --log-level=ERROR || true
+VOLUMES=$(cat /tmp/manifest.txt)
+echo "Volumes: ${VOLUMES}"
+
+DB_BASE_URL=$(echo "${ELB_PARTITION_PREFIX}" | sed 's|/[^/]*/[^/]*$|/|')
+ORIG_DB=$(echo "${ELB_DB}" | sed 's/_shard_[0-9]*$//')
+DB_URL="${DB_BASE_URL}${ORIG_DB}/"
+echo "DB base URL: ${DB_URL}"
+
+EXPECTED_SOURCE_VERSION="${ELB_DB_SOURCE_VERSION:-}"
+if [ -z "$EXPECTED_SOURCE_VERSION" ]; then
+    METADATA_URL="${DB_BASE_URL}${ORIG_DB}-metadata.json"
+    echo "Resolving DB source version: ${METADATA_URL}"
+    if retry_azcopy cp "${METADATA_URL}" /tmp/db-metadata.json --log-level=ERROR; then
+        if command -v python3 >/dev/null 2>&1; then
+            EXPECTED_SOURCE_VERSION=$(python3 -c '
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    print(str(json.load(handle).get("source_version") or ""))
+' /tmp/db-metadata.json 2>/dev/null || true)
+        else
+            EXPECTED_SOURCE_VERSION=$(sed -n \
+                's/.*"source_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+                /tmp/db-metadata.json | head -1)
+        fi
+        if [ -n "$EXPECTED_SOURCE_VERSION" ]; then
+            echo "DB source version: ${EXPECTED_SOURCE_VERSION}"
+        else
+            echo "WARNING: DB metadata did not contain source_version"
+        fi
+    else
+        echo "WARNING: DB metadata source-version lookup failed;" \
+            "cache freshness marker will not be checked"
+    fi
+fi
+
+write_volpaths() {
+    local volpaths=""
+    for volume in $VOLUMES; do
+        [ -n "$volpaths" ] && volpaths="$volpaths "
+        volpaths="${volpaths}$(pwd)/${volume}"
+    done
+    echo "VOLPATHS=${volpaths}" > /tmp/shard_volpaths.txt
+    echo "Volume paths: ${volpaths}"
+}
+
+if find . -maxdepth 1 -name '.azDownload-*' | grep -q .; then
+    echo "CLEANUP partial downloads"
+    find . -maxdepth 1 -name '.azDownload-*' -exec rm -rf {} +
+fi
+
+payload_ext="nsq"
+if [ "${ELB_DB_MOL_TYPE:-nucl}" = "prot" ]; then
+    payload_ext="psq"
+fi
+missing_volume="0"
+if [ -f .download-complete ]; then
+    for volume in $VOLUMES; do
+        if [ ! -s "${volume}.${payload_ext}" ]; then
+            missing_volume="1"
+            echo "CACHE_INCOMPLETE missing ${volume}.${payload_ext}"
+        fi
+    done
+    if [ "$missing_volume" != "0" ]; then
+        rm -f .download-complete
+    fi
+fi
+
+if [ -f .download-complete ] && [ -n "$EXPECTED_SOURCE_VERSION" ]; then
+    if [ ! -f .download-source-version ]; then
+        echo "CACHE_STALE missing source-version marker"
+        rm -f .download-complete
+    elif [ "$(cat .download-source-version)" != "$EXPECTED_SOURCE_VERSION" ]; then
+        echo "CACHE_STALE source-version mismatch"
+        rm -f .download-complete
+    fi
+fi
+
+if [ -f .download-complete ]; then
+    echo "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}"
+    write_volpaths
+    exit 0
+fi
+
+PATTERN=""
+for VOL in $VOLUMES; do
+    [ -n "$PATTERN" ] && PATTERN="${PATTERN};"
+    PATTERN="${PATTERN}${VOL}.*"
+done
+PATTERN="${PATTERN};taxdb.btd;taxdb.bti;taxonomy4blast.sqlite3;${ORIG_DB}.ndb;${ORIG_DB}.ntf;${ORIG_DB}.nto"
+echo "Downloading with pattern: ${PATTERN}"
+
+retry_azcopy cp "${DB_URL}*" . \
+    --include-pattern "${PATTERN}" \
+    --block-size-mb=256 \
+    --log-level=WARNING
+
+find . -maxdepth 1 -name '.azDownload-*' -exec rm -rf {} +
+
+end=$(date +%s)
+log_runtime "download-shard-${ELB_SHARD_IDX}" $((end - start))
+
+payload_count=$(find . -maxdepth 1 -name "*.${payload_ext}" ! -name '.azDownload-*' | wc -l)
+echo "DB files downloaded: ${payload_count} .${payload_ext} files"
+echo "Total size: $(du -sh . 2>/dev/null | cut -f1)"
+if [ "$payload_count" = "0" ]; then
+    echo "ERROR: no ${payload_ext} volume files downloaded"
+    exit 1
+fi
+if [ ! -s taxdb.btd ] || [ ! -s taxdb.bti ]; then
+    echo "TAXDB_SKIP taxdb files not present in DB prefix"
+fi
+
+write_volpaths
+printf '%s' ok > .download-complete
+if [ -n "$EXPECTED_SOURCE_VERSION" ]; then
+    printf '%s' "$EXPECTED_SOURCE_VERSION" > .download-source-version
+fi
+
+pkill -f azcopy 2>/dev/null || true
+rm -rf /root/.azcopy 2>/dev/null || true
+""".strip()
+
+
+def _init_shard_script_paths(root: Path) -> list[Path]:
+    source_path = root / "src/elastic_blast/templates/scripts/init-db-shard-aks.sh"
+    paths = [source_path]
+    for pattern in (
+        "venv/lib/python*/site-packages/elastic_blast/templates/scripts/init-db-shard-aks.sh",
+        ".venv/lib/python*/site-packages/elastic_blast/templates/scripts/init-db-shard-aks.sh",
+    ):
+        paths.extend(root.glob(pattern))
+    return sorted({path for path in paths if path.exists()})
+
+
+def patch_init_shard_script(root: Path) -> None:
+    paths = _init_shard_script_paths(root)
+    if not paths:
+        raise RuntimeError(f"init-db-shard-aks.sh not found under {root}")
+    for path in paths:
+        path.write_text(_HARDENED_INIT_DB_SHARD_AKS_SCRIPT + "\n")
+
+
+def patch_aks_workload_tolerations(root: Path) -> None:
+    templates = {
+        "blast-batch-job-aks.yaml.template": "OnFailure",
+        "blast-batch-job-local-ssd-aks.yaml.template": "OnFailure",
+        "blast-batch-job-shard-ssd-aks.yaml.template": "OnFailure",
+        "job-init-pv-aks.yaml.template": "Never",
+        "job-init-pv-partitioned-aks.yaml.template": "Never",
+        "job-init-local-ssd-aks.yaml.template": "Never",
+        "job-init-ssd-shard-aks.yaml.template": "Never",
+        "job-submit-jobs-aks.yaml.template": "Never",
+        "vmtouch-daemonset-aks.yaml.template": "Always",
+    }
+    tolerations = """      tolerations:
+      - key: workload
+        operator: Equal
+        value: blast
+        effect: NoSchedule
+"""
+    node_selector = """      nodeSelector:
+        workload: blast
+"""
+    for name, restart_policy in templates.items():
+        path = root / "src/elastic_blast/templates" / name
+        text = path.read_text()
+        if "key: workload" not in text:
+            old = f"      restartPolicy: {restart_policy}\n"
+            new = f"      restartPolicy: {restart_policy}\n{tolerations}"
+            _replace_once(path, old, new)
+            text = path.read_text()
+        if "nodeSelector:\n        workload: blast" not in text:
+            insert_at = text.index(tolerations) + len(tolerations)
+            text = text[:insert_at] + node_selector + text[insert_at:]
+            path.write_text(text)
+
+
+def patch_unique_init_ssd_job_names(root: Path) -> None:
+    templates = [
+        "job-init-local-ssd-aks.yaml.template",
+        "job-init-ssd-shard-aks.yaml.template",
+    ]
+    for name in templates:
+        path = root / "src/elastic_blast/templates" / name
+        _replace_once_unless_present(
+            path,
+            "  name: init-ssd-${NODE_ORDINAL}\n",
+            "  name: init-ssd-${BLAST_ELB_JOB_ID_SHORT}-${NODE_ORDINAL}\n",
+            "name: init-ssd-${BLAST_ELB_JOB_ID_SHORT}-${NODE_ORDINAL}",
+        )
+
+
+def patch_create_workspace_daemonset_tolerations(root: Path) -> None:
+    # The create-workspace DaemonSet (kube-system) bind-mounts a hostPath and
+    # creates /workspace on every node so the init-ssd Jobs can later mount it.
+    # Upstream ships it without tolerations, so it cannot land on the blast pool
+    # nodes (taint workload=blast:NoSchedule). When the init-ssd Job is then
+    # scheduled on a blast node, kubelet fails to bind-mount /workspace and the
+    # pod sticks in CreateContainerConfigError with
+    # "stat /workspace: no such file or directory". Add the matching toleration
+    # so the DaemonSet runs on the blast pool too.
+    templates = [
+        "job-init-local-ssd-aks.yaml.template",
+        "job-init-ssd-shard-aks.yaml.template",
+    ]
+    old = (
+        "          type: DirectoryOrCreate\n"
+        "      nodeSelector:\n"
+        "        kubernetes.io/os: linux\n"
+    )
+    new = (
+        "          type: DirectoryOrCreate\n"
+        "      tolerations:\n"
+        "      - key: workload\n"
+        "        operator: Equal\n"
+        "        value: blast\n"
+        "        effect: NoSchedule\n"
+        "      nodeSelector:\n"
+        "        kubernetes.io/os: linux\n"
+    )
+    marker = (
+        "      tolerations:\n"
+        "      - key: workload\n"
+        "        operator: Equal\n"
+        "        value: blast\n"
+        "        effect: NoSchedule\n"
+        "      nodeSelector:\n"
+        "        kubernetes.io/os: linux\n"
+    )
+    for name in templates:
+        path = root / "src/elastic_blast/templates" / name
+        _replace_once_unless_present(path, old, new, marker)
+
+
+def patch_init_job_wait_filters(root: Path) -> None:
+    path = root / "src/elastic_blast/kubernetes.py"
+    _replace_once_unless_present(
+        path,
+        (
+            "            cmd = f'kubectl --context={cfg.appstate.k8s_ctx} "
+            "get jobs -o jsonpath=' \\\n"
+        ),
+        (
+            "            cmd = f'kubectl --context={cfg.appstate.k8s_ctx} "
+            "get jobs -l elb-job-id={cfg.azure.elb_job_id} -o jsonpath=' \\\n"
+        ),
+        "get jobs -l elb-job-id={cfg.azure.elb_job_id} -o jsonpath=",
+    )
+    _replace_once_unless_present(
+        path,
+        (
+            "            cmd = f'kubectl --context={cfg.appstate.k8s_ctx} "
+            "get jobs -l app=setup -o jsonpath=' \\\n"
+        ),
+        (
+            "            cmd = f'kubectl --context={cfg.appstate.k8s_ctx} "
+            "get jobs -l app=setup,elb-job-id={cfg.azure.elb_job_id} "
+            "-o jsonpath=' \\\n"
+        ),
+        "get jobs -l app=setup,elb-job-id={cfg.azure.elb_job_id} -o jsonpath=",
+    )
+    _replace_all_unless_present(
+        path,
+        "cmd = f'kubectl --context={cfg.appstate.k8s_ctx} delete jobs -l app=setup'",
+        (
+            "cmd = f'kubectl --context={cfg.appstate.k8s_ctx} "
+            "delete jobs -l app=setup,elb-job-id={cfg.azure.elb_job_id}'"
+        ),
+        "delete jobs -l app=setup,elb-job-id={cfg.azure.elb_job_id}",
+    )
+
+
+def main() -> int:
+    if len(sys.argv) not in {2, 3}:
+        print(
+            "usage: patch_elastic_blast.py /path/to/elastic-blast-azure [merge-script]",
+            file=sys.stderr,
+        )
+        return 2
+    root = Path(sys.argv[1]).resolve()
+    merge_script_source = (
+        Path(sys.argv[2]).resolve()
+        if len(sys.argv) == 3
+        else Path(__file__).with_name("merge-sharded-results.sh")
+    )
+    if not (root / "src/elastic_blast").is_dir():
+        print(f"not an elastic-blast-azure source tree: {root}", file=sys.stderr)
+        return 2
+    if not merge_script_source.is_file():
+        print(f"merge script not found: {merge_script_source}", file=sys.stderr)
+        return 2
+
+    patch_azure_py(root)
+    patch_azure_cli_glue(root)
+    patch_azure_traits(root)
+    patch_finalizer_template(root)
+    patch_finalizer_script(root, merge_script_source)
+    patch_init_shard_script(root)
+    patch_aks_workload_tolerations(root)
+    patch_unique_init_ssd_job_names(root)
+    patch_create_workspace_daemonset_tolerations(root)
+    patch_init_job_wait_filters(root)
+    print("patched elastic-blast-azure finalizer for sharded result merge")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

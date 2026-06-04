@@ -38,6 +38,11 @@ from starlette.background import BackgroundTask
 
 from util import run_cancellable, safe_exec
 
+try:
+    import eta as _eta
+except Exception:  # pragma: no cover - ETA overlay is optional
+    _eta = None
+
 # ── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("elb-openapi")
@@ -1163,8 +1168,24 @@ def _update_job(job_id: str, **updates: Any) -> dict[str, Any] | None:
         data = dict(current)
         data.update(updates)
         data["updated_at"] = _now_iso()
-        _jobs[job_id] = data
+        _eta_snapshot = None
+        if (
+            _eta is not None
+            and _eta.enabled()
+            and updates.get("status") == "completed"
+            and not current.get("eta_recorded")
+        ):
+            data["eta_recorded"] = True
+            _jobs[job_id] = data
+            _eta_snapshot = [dict(v) for v in _jobs.values()]
+        else:
+            _jobs[job_id] = data
     _save_job_cm(job_id, data)
+    if _eta_snapshot is not None:
+        try:
+            _eta.record_sample(data, _eta_snapshot)
+        except Exception:
+            pass
     return data
 
 
@@ -2245,6 +2266,38 @@ def _last_json(stdout: str) -> dict[str, Any] | None:
     return None
 
 
+def _discover_elb_job_id_from_submit_output(job_id: str, stdout: str) -> str:
+    if not stdout:
+        return ""
+    patterns = (
+        rf"/results/{re.escape(job_id)}/(?P<elb_job_id>job-[A-Za-z0-9_-]+)/metadata/",
+        r"\b(?P<elb_job_id>job-[0-9a-f]{32})\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, stdout)
+        if match:
+            return match.group("elb_job_id")
+    return ""
+
+
+def _effective_elb_job_id(job_info: dict[str, Any]) -> str:
+    job_id = str(job_info.get("job_id") or "")
+    current = str(job_info.get("elb_job_id") or "")
+    if current.startswith("job-"):
+        return current
+    discovered = _discover_elb_job_id_from_submit_output(
+        job_id,
+        "\n".join(
+            str(job_info.get(key) or "")
+            for key in ("stdout_tail", "stderr_tail")
+        ),
+    )
+    if discovered:
+        _update_job(job_id, elb_job_id=discovered)
+        return discovered
+    return current or job_id
+
+
 def _ensure_elb_scripts_configmap() -> None:
     required_scripts = {
         "blast-run-aks.sh",
@@ -2320,7 +2373,11 @@ def _run_submit_bg(job_id: str) -> None:
             job_id,
             status=status,
             phase="submitted" if status == "running" else status,
-            elb_job_id=payload.get("correlation_id") or job_id,
+            elb_job_id=(
+                payload.get("correlation_id")
+                or _discover_elb_job_id_from_submit_output(job_id, result.stdout or "")
+                or job_id
+            ),
             submit_result=payload,
             stdout_tail=(result.stdout or "")[-2000:],
             stderr_tail=(result.stderr or "")[-2000:],
@@ -2341,18 +2398,23 @@ def _run_submit_bg(job_id: str) -> None:
         _dispatcher_once()
 
 
-def _job_marker_phase(results_url: str) -> str | None:
+def _job_marker_phase(results_url: str, elb_job_id: str = "") -> str | None:
     if not results_url:
         return None
-    try:
-        _azcopy_login()
-        proc = safe_exec(["azcopy", "ls", f"{results_url}/metadata/"], timeout=10)
-    except Exception:
-        return None
-    if "SUCCESS.txt" in proc.stdout:
-        return "completed"
-    if "FAILURE.txt" in proc.stdout:
-        return "failed"
+    base = results_url.rstrip("/")
+    candidates = [f"{base}/metadata/"]
+    if elb_job_id.startswith("job-"):
+        candidates.insert(0, f"{base}/{elb_job_id}/metadata/")
+    for marker_url in candidates:
+        try:
+            _azcopy_login()
+            proc = safe_exec(["azcopy", "ls", marker_url], timeout=10)
+        except Exception:
+            continue
+        if "SUCCESS.txt" in proc.stdout:
+            return "completed"
+        if "FAILURE.txt" in proc.stdout:
+            return "failed"
     return None
 
 
@@ -2365,18 +2427,6 @@ def _k8s_job_summary(elb_job_id: str) -> dict[str, Any]:
         return {**empty, "error": str(exc)[:200]}
 
     items = data.get("items", [])
-    if not items:
-        try:
-            proc = safe_exec(["kubectl", "get", "jobs", "-o", "json"], timeout=15)
-            fallback = json.loads(proc.stdout)
-            items = [
-                item
-                for item in fallback.get("items", [])
-                if item.get("metadata", {}).get("labels", {}).get("app") in {"blast", "submit", "finalizer"}
-            ]
-        except Exception:
-            items = []
-
     summary = dict(empty)
     for item in items:
         labels = item.get("metadata", {}).get("labels", {})
@@ -2402,18 +2452,6 @@ def _k8s_pod_stuck_reason(elb_job_id: str) -> str | None:
         return None
 
     items = data.get("items", [])
-    if not items:
-        try:
-            proc = safe_exec(["kubectl", "get", "pods", "-o", "json"], timeout=15)
-            fallback = json.loads(proc.stdout)
-            items = [
-                item
-                for item in fallback.get("items", [])
-                if item.get("metadata", {}).get("labels", {}).get("app") in {"blast", "submit", "finalizer"}
-            ]
-        except Exception:
-            items = []
-
     now = time.time()
     for item in items:
         meta = item.get("metadata", {})
@@ -2449,7 +2487,8 @@ def _refresh_job_status(job_id: str) -> dict[str, Any] | None:
     if job.get("status") in _TERMINAL_STATES or job.get("status") == "queued":
         return job
 
-    marker = _job_marker_phase(job.get("results", ""))
+    elb_job_id = _effective_elb_job_id(job)
+    marker = _job_marker_phase(job.get("results", ""), elb_job_id)
     if marker == "failed":
         return _update_job(job_id, status="failed", phase="failed", last_progress_at=_now_iso())
     if marker == "completed":
@@ -2493,7 +2532,7 @@ def _refresh_job_status(job_id: str) -> dict[str, Any] | None:
             last_progress_at=_now_iso(),
         )
 
-    elb_job_id = job.get("elb_job_id") or job_id
+    elb_job_id = _effective_elb_job_id(job)
     summary = _k8s_job_summary(elb_job_id)
     stuck_reason = _k8s_pod_stuck_reason(elb_job_id)
     previous_summary = job.get("k8s_summary")
@@ -2661,6 +2700,18 @@ def _external_job_payload(job_info: dict[str, Any]) -> dict[str, Any]:
         "external_correlation_id": job_info.get("external_correlation_id", ""),
     }
     summary = job_info.get("k8s_summary") if isinstance(job_info.get("k8s_summary"), dict) else {}
+    effective_elb_job_id = _effective_elb_job_id(job_info)
+    if effective_elb_job_id.startswith("job-") and job_info.get("elb_job_id") != effective_elb_job_id:
+        fresh_summary = _k8s_job_summary(effective_elb_job_id)
+        updated = _update_job(
+            job_info["job_id"],
+            elb_job_id=effective_elb_job_id,
+            k8s_summary=fresh_summary,
+            last_progress_at=_now_iso(),
+        )
+        if updated:
+            job_info = updated
+        summary = fresh_summary
     if summary:
         payload["execution"] = {
             "shard_count": int(summary.get("total", 0) or 0),
@@ -2681,8 +2732,20 @@ def _external_job_payload(job_info: dict[str, Any]) -> dict[str, Any]:
         payload["run_seconds"] = run_seconds
     if public_status == "queued":
         payload["queue_position"] = _queued_position(job_info["job_id"])
+        if _eta is not None and _eta.enabled():
+            with _jobs_lock:
+                _eta_jobs = [dict(v) for v in _jobs.values()]
+            _eta_out = _eta.compute_eta(job_info, _eta_jobs, MAX_ACTIVE_SUBMISSIONS)
+            if _eta_out:
+                payload["eta"] = _eta_out
     elif public_status == "running":
         payload["progress_pct"] = _progress_pct(job_info)
+        if _eta is not None and _eta.enabled():
+            with _jobs_lock:
+                _eta_jobs = [dict(v) for v in _jobs.values()]
+            _eta_out = _eta.compute_eta(job_info, _eta_jobs, MAX_ACTIVE_SUBMISSIONS)
+            if _eta_out:
+                payload["eta"] = _eta_out
     elif public_status == "success":
         payload["completed_at"] = job_info.get("completed_at") or job_info.get("updated_at", "")
         files = _list_result_files(job_info)
@@ -2822,6 +2885,10 @@ async def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] 
     config["cluster"]["machine-type"] = MACHINE_TYPE
     config["cluster"]["num-nodes"] = str(NUM_NODES)
     config["blast"]["program"] = req.program
+    # Dashboard policy: OpenAPI submissions use AKS node-local SSD,
+    # not the historical shared PV/PVC path.
+    config["cluster"]["exp-use-local-ssd"] = "true"
+    config["cluster"]["reuse"] = "true"
     config["blast"]["db"] = db_url
     config["blast"]["queries"] = queries_url
     config["blast"]["results"] = results_url
@@ -2829,16 +2896,45 @@ async def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] 
     if req.batch_len is not None:
         config["blast"]["batch-len"] = str(req.batch_len)
 
+    # Dashboard concurrency lever (default-OFF): ELB_OPENAPI_NUM_CPUS pins the
+    # elastic-blast [cluster] num-cpus. elastic-blast derives the shard pod CPU
+    # limit (= num-cpus) and request (= num-cpus - 2) from it, so lowering this
+    # raises how many shard pods co-schedule per node (request is the binding
+    # constraint). Unset => elastic-blast keeps its profile default
+    # (threads_per_pod, currently 8 -> request 6 -> 2 jobs/node), i.e. unchanged
+    # behaviour. Search space / sharding / num-nodes are untouched, so NCBI
+    # parity (-searchsp) is independent of this knob.
+    _elb_num_cpus = os.environ.get("ELB_OPENAPI_NUM_CPUS", "").strip()
+    if _elb_num_cpus:
+        try:
+            _elb_num_cpus_val = int(_elb_num_cpus)
+        except ValueError:
+            _elb_num_cpus_val = 0
+        if _elb_num_cpus_val >= 1:
+            config["cluster"]["num-cpus"] = str(_elb_num_cpus_val)
+
+    db_name = _db_name_from_value(req.db)
+    profile = str(req.resource_profile or "").strip().lower()
+    if db_name == "core_nt" and profile in {"core_nt_precise", "precise", "core_nt_safe"}:
+        partitions = max(1, min(NUM_NODES, 10))
+        config["blast"]["db-partitions"] = str(partitions)
+        config["blast"]["db-partition-prefix"] = (
+            f"{_blob_base()}/blast-db/{partitions}shards/core_nt_shard_"
+        )
+        if "-searchsp" not in opts and "-dbsize" not in opts:
+            config["blast"]["options"] = f"{opts} -searchsp 32156241807668"
+
     from io import StringIO
     config_buf = StringIO()
     config.write(config_buf)
     config_text = config_buf.getvalue()
 
-    db_name = _db_name_from_value(req.db)
     blast_version = _blast_version_detail()
     db_version = _db_version_detail(db_name)
     job_data = {
         "job_id": job_id, "status": "queued", "mode": "B" if is_b else "A",
+        "query_seqs": (_eta.parse_query_features(req.query_fasta)[0] if (_eta is not None and _eta.enabled() and is_b) else 0),
+        "query_bases": (_eta.parse_query_features(req.query_fasta)[1] if (_eta is not None and _eta.enabled() and is_b) else 0),
         "created_at": _now_iso(), "queued_at": _now_iso(),
         "priority": _normalise_priority(req.priority),
         "idempotency_key": req.idempotency_key or "",
@@ -2910,7 +3006,7 @@ async def get_job_status(job_id: str):
     if job_info.get("status") not in _TERMINAL_STATES and job_info.get("status") != "queued":
         job_info = _refresh_job_status(job_id) or job_info
 
-    return {
+    _status_payload: dict[str, Any] = {
         "job_id": job_id,
         "status": job_info.get("status", "unknown"),
         "phase": job_info.get("phase", job_info.get("status", "unknown")),
@@ -2924,6 +3020,13 @@ async def get_job_status(job_id: str):
         "error": job_info.get("error", ""),
         "kubernetes": {"summary": job_info.get("k8s_summary", {})},
     }
+    if _eta is not None and _eta.enabled() and job_info.get("status") in {"queued", "dispatching", "submitting", "running"}:
+        with _jobs_lock:
+            _eta_jobs = [dict(v) for v in _jobs.values()]
+        _eta_out = _eta.compute_eta(job_info, _eta_jobs, MAX_ACTIVE_SUBMISSIONS)
+        if _eta_out:
+            _status_payload["eta"] = _eta_out
+    return _status_payload
 
 # ── Jobs — Delete ──────────────────────────────────────────────────────────
 
