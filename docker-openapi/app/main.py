@@ -36,6 +36,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
+import submit_coordination as _coord
 from util import run_cancellable, safe_exec
 
 try:
@@ -2356,11 +2357,20 @@ def _run_submit_bg(job_id: str) -> None:
     try:
         _ensure_az_login()
         _ensure_elb_scripts_configmap()
-        result = run_cancellable(
-            ["elastic-blast", "submit", "--cfg", cfg_path],
-            timeout=None,
-            stop_event=cancel_event,
-        )
+        # Cross-path submit coordination (Gate A Lease + Gate B ceiling). Shared
+        # with the dashboard control plane so both paths honour the same
+        # concurrency ceiling. No-op (returns None) unless BLAST_COORD_BACKEND=k8s.
+        run_slot = _coord.acquire_run_slot(job_id, stop_event=cancel_event)
+        try:
+            result = run_cancellable(
+                ["elastic-blast", "submit", "--cfg", cfg_path],
+                timeout=None,
+                stop_event=cancel_event,
+            )
+        finally:
+            # Release Gate A as soon as the submit critical section is done; the
+            # job's own finalizer now counts toward Gate B for everyone else.
+            _coord.release_run_slot(run_slot)
         payload = _last_json(result.stdout or "") or {}
         details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
         if payload.get("decision") == "already_done" and details.get("terminal") == "SUCCESS":
@@ -2385,6 +2395,17 @@ def _run_submit_bg(job_id: str) -> None:
         )
         _webhook_notify(job_id, {"event": "submitted", "status": status})
         logger.info("Job %s submitted", job_id)
+    except _coord.SubmitSlotBusyTimeout as e:
+        # Lease busy / cluster at the concurrency ceiling past the wait budget.
+        # This is NOT a failure: requeue so the dispatcher retries on a later
+        # tick. The watchdog bounds total queued lifetime.
+        _update_job(
+            job_id,
+            status="queued",
+            phase="waiting_for_capacity",
+            last_progress_at=_now_iso(),
+        )
+        logger.info("Job %s requeued (capacity wait): %s", job_id, str(e)[:200])
     except Exception as e:
         if cancel_event.is_set():
             _update_job(job_id, status="cancelled", phase="cancelled", error=str(e)[:500])
