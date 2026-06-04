@@ -129,6 +129,15 @@ SUBMIT_STUCK_SECONDS = max(60, int(os.environ.get("ELB_OPENAPI_SUBMIT_STUCK_SECO
 PENDING_STUCK_SECONDS = max(300, int(os.environ.get("ELB_OPENAPI_PENDING_STUCK_SECONDS", "1800")))
 RUNNING_IDLE_SECONDS = max(300, int(os.environ.get("ELB_OPENAPI_RUNNING_IDLE_SECONDS", "10800")))
 FINALIZER_STUCK_SECONDS = max(300, int(os.environ.get("ELB_OPENAPI_FINALIZER_STUCK_SECONDS", "1800")))
+# Grace window for the SUCCESS marker to become consistent with the result
+# blob listing. The finalizer uploads every artifact before writing
+# metadata/SUCCESS.txt, so when the marker is visible the artifacts are already
+# durably stored; only the azcopy List that /jobs/{id}/results relies on can
+# briefly lag. Within this window a marker-complete job is held at "finalizing"
+# until the listing catches up (eliminating the completed→/results 404 race);
+# past the window the marker is trusted so a listing that never catches up
+# cannot wedge the job in a non-terminal state forever.
+RESULTS_VISIBILITY_GRACE_SECONDS = max(0, int(os.environ.get("ELB_OPENAPI_RESULTS_VISIBILITY_GRACE_SECONDS", "120")))
 BACKGROUND_DISABLED = os.environ.get("ELB_OPENAPI_DISABLE_BACKGROUND", "").lower() in {"1", "true", "yes"}
 
 _BLOB_URL_RE = re.compile(r"^https://[a-z0-9]+\.blob\.core\.windows\.net/[a-z0-9][-a-z0-9]*/.*$")
@@ -2441,8 +2450,48 @@ def _refresh_job_status(job_id: str) -> dict[str, Any] | None:
         return job
 
     marker = _job_marker_phase(job.get("results", ""))
-    if marker:
-        return _update_job(job_id, status=marker, phase=marker, last_progress_at=_now_iso())
+    if marker == "failed":
+        return _update_job(job_id, status="failed", phase="failed", last_progress_at=_now_iso())
+    if marker == "completed":
+        # The finalizer uploads every result artifact (shard ``batch_*.out.gz``
+        # and, in DB-partitioned runs, ``merged_results.out.gz``) *before* it
+        # writes the ``metadata/SUCCESS.txt`` marker. So when the marker is
+        # visible the artifacts are already durably stored — but the azcopy
+        # List that ``GET /jobs/{job_id}/results`` relies on can briefly lag
+        # behind the marker write. Gate ``completed`` on the same result
+        # listing the download path uses (mirroring the Kubernetes-summary
+        # branch below) so status never flips to ``completed`` while
+        # ``/results`` would still 404.
+        if _list_result_files(job):
+            return _update_job(
+                job_id,
+                status="completed",
+                phase="completed",
+                completed_at=_now_iso(),
+                last_progress_at=_now_iso(),
+            )
+        # Marker present but the listing has not caught up yet. Hold at
+        # ``finalizing`` and re-check on the next poll; this self-heals within
+        # seconds. Bound the hold by RESULTS_VISIBILITY_GRACE_SECONDS so a
+        # listing that never catches up cannot wedge a SUCCESS-marked job in a
+        # non-terminal state forever — past the grace window we trust the
+        # marker (the artifacts are durably written per the finalizer contract).
+        seen_at = job.get("success_marker_seen_at") or _now_iso()
+        if _age_seconds(seen_at) > RESULTS_VISIBILITY_GRACE_SECONDS:
+            return _update_job(
+                job_id,
+                status="completed",
+                phase="completed",
+                completed_at=_now_iso(),
+                last_progress_at=_now_iso(),
+            )
+        return _update_job(
+            job_id,
+            status="running",
+            phase="finalizing",
+            success_marker_seen_at=seen_at,
+            last_progress_at=_now_iso(),
+        )
 
     elb_job_id = job.get("elb_job_id") or job_id
     summary = _k8s_job_summary(elb_job_id)

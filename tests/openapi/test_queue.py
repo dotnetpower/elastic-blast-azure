@@ -192,6 +192,75 @@ def test_recovered_submitting_job_without_thread_is_requeued(openapi, monkeypatc
     assert openapi._jobs["aaaaaaaaaaaa"]["phase"] == "recovered"
 
 
+def _marker_job(openapi):
+    return openapi._ensure_job_defaults(
+        "aaaaaaaaaaaa",
+        {
+            "job_id": "aaaaaaaaaaaa",
+            "status": "running",
+            "phase": "running",
+            "results": "https://example.blob.core.windows.net/results/aaaaaaaaaaaa",
+        },
+    )
+
+
+def test_marker_completed_waits_for_result_listing(openapi, monkeypatch: pytest.MonkeyPatch):
+    # SUCCESS marker is present but the result blob listing has not caught up
+    # yet. Status must NOT flip to completed (otherwise a client polling status
+    # would call /results and get a 404 during the listing-visibility lag).
+    openapi._jobs["aaaaaaaaaaaa"] = _marker_job(openapi)
+    monkeypatch.setattr(openapi, "_job_marker_phase", lambda results_url: "completed")
+    monkeypatch.setattr(openapi, "_list_result_files", lambda job_info: [])
+
+    refreshed = openapi._refresh_job_status("aaaaaaaaaaaa")
+
+    assert refreshed["status"] == "running"
+    assert refreshed["phase"] == "finalizing"
+    assert refreshed.get("success_marker_seen_at")
+
+
+def test_marker_completed_completes_when_results_listable(openapi, monkeypatch: pytest.MonkeyPatch):
+    openapi._jobs["aaaaaaaaaaaa"] = _marker_job(openapi)
+    monkeypatch.setattr(openapi, "_job_marker_phase", lambda results_url: "completed")
+    monkeypatch.setattr(
+        openapi,
+        "_list_result_files",
+        lambda job_info: [{"file_id": "result-001", "filename": "batch_000.out.gz", "format": "blast_xml", "size_bytes": 10}],
+    )
+
+    refreshed = openapi._refresh_job_status("aaaaaaaaaaaa")
+
+    assert refreshed["status"] == "completed"
+    assert refreshed["phase"] == "completed"
+    assert refreshed.get("completed_at")
+
+
+def test_marker_completed_trusts_marker_after_grace(openapi, monkeypatch: pytest.MonkeyPatch):
+    # If the listing never catches up, the job must not wedge in a non-terminal
+    # state forever: past the grace window we trust the durable SUCCESS marker.
+    job = _marker_job(openapi)
+    job["success_marker_seen_at"] = "2000-01-01T00:00:00+00:00"
+    openapi._jobs["aaaaaaaaaaaa"] = job
+    monkeypatch.setattr(openapi, "_job_marker_phase", lambda results_url: "completed")
+    monkeypatch.setattr(openapi, "_list_result_files", lambda job_info: [])
+
+    refreshed = openapi._refresh_job_status("aaaaaaaaaaaa")
+
+    assert refreshed["status"] == "completed"
+    assert refreshed["phase"] == "completed"
+
+
+def test_marker_failed_is_terminal_without_result_listing(openapi, monkeypatch: pytest.MonkeyPatch):
+    openapi._jobs["aaaaaaaaaaaa"] = _marker_job(openapi)
+    monkeypatch.setattr(openapi, "_job_marker_phase", lambda results_url: "failed")
+    monkeypatch.setattr(openapi, "_list_result_files", lambda job_info: [])
+
+    refreshed = openapi._refresh_job_status("aaaaaaaaaaaa")
+
+    assert refreshed["status"] == "failed"
+    assert refreshed["phase"] == "failed"
+
+
 def test_submit_rejects_sas_query_in_blob_url(openapi):
     request = openapi.JobSubmitRequest(
         program="blastn",
