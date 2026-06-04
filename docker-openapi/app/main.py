@@ -2361,10 +2361,18 @@ def _run_submit_bg(job_id: str) -> None:
         # with the dashboard control plane so both paths honour the same
         # concurrency ceiling. No-op (returns None) unless BLAST_COORD_BACKEND=k8s.
         run_slot = _coord.acquire_run_slot(job_id, stop_event=cancel_event)
+        # When coordination holds Gate A, hard-cap the submit subprocess BELOW
+        # the Lease TTL so an overrunning submit is killed (failed) before the
+        # Lease can be reclaimed by another path — mirrors the dashboard's
+        # submit_exec_timeout < lease_ttl invariant. The disabled path keeps the
+        # legacy unbounded timeout.
+        submit_timeout = (
+            _coord.submit_exec_timeout_seconds() if run_slot is not None else None
+        )
         try:
             result = run_cancellable(
                 ["elastic-blast", "submit", "--cfg", cfg_path],
-                timeout=None,
+                timeout=submit_timeout,
                 stop_event=cancel_event,
             )
         finally:

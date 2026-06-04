@@ -50,6 +50,12 @@ Env knobs (identical names + defaults to ``elb-dashboard``):
     BLAST_FINALIZER_GRACE_SECONDS  300
     BLAST_CAPACITY_WAIT_MAX_SECONDS 1800
 
+Plus one OpenAPI-only knob (the dashboard caps its submit subprocess at a fixed
+600s; this service derives the cap from the TTL instead so long-submit operators
+only have to raise one number):
+    BLAST_OPENAPI_SUBMIT_EXEC_TIMEOUT_SECONDS  (default: lease_ttl - 120, and
+        MUST stay < lease_ttl or acquire fails closed)
+
 Deployment requirement: the OpenAPI pod's ServiceAccount must be able to
 ``get``/``create``/``update`` ``coordination.k8s.io`` Leases and ``list``
 ``batch`` Jobs in the ``default`` namespace. A 403 here is surfaced loudly
@@ -94,6 +100,15 @@ _DEFAULT_CAPACITY_WAIT_MAX_SECONDS = 1800
 
 # How often the capacity wait re-checks Gate A / Gate B while blocked.
 _SLOT_POLL_SECONDS = 5.0
+
+# Hard-cap the coordinated ``elastic-blast submit`` subprocess this far BELOW
+# the Lease TTL so an overrunning submit is killed (failed) before the Lease can
+# be reclaimed by another path — mirrors elb-dashboard's load-bearing
+# ``submit_exec_timeout < lease_ttl`` invariant (design §4.3). Without this cap
+# the OpenAPI submit was unbounded (``timeout=None``), so a submit longer than
+# ``ttl + skew`` would let another path take the Lease over and run a second
+# submit concurrently — the exact race Gate A exists to prevent.
+_DEFAULT_SUBMIT_EXEC_TTL_MARGIN_SECONDS = 120
 
 
 class SubmitSlotBusyTimeout(Exception):
@@ -162,6 +177,30 @@ def capacity_wait_max_seconds() -> int:
     return _int_env(
         "BLAST_CAPACITY_WAIT_MAX_SECONDS", _DEFAULT_CAPACITY_WAIT_MAX_SECONDS, minimum=0
     )
+
+
+def submit_exec_timeout_seconds() -> int:
+    """Hard wall-clock cap for the coordinated ``elastic-blast submit`` subprocess.
+
+    MUST stay strictly below :func:`lease_ttl_seconds` so an overrunning submit
+    is terminated (failed) before the Lease becomes reclaimable
+    (``renewTime + ttl + skew``); otherwise another path could take the Lease
+    over and run a second submit concurrently — the exact race Gate A prevents.
+
+    By default the cap follows the TTL down by
+    ``_DEFAULT_SUBMIT_EXEC_TTL_MARGIN_SECONDS`` (so raising
+    ``BLAST_SUBMIT_LEASE_TTL_SECONDS`` for long submits automatically widens the
+    cap too). An explicit ``BLAST_OPENAPI_SUBMIT_EXEC_TIMEOUT_SECONDS`` override
+    is honoured but validated against the TTL at acquire time (fail-closed).
+    """
+    explicit = os.environ.get("BLAST_OPENAPI_SUBMIT_EXEC_TIMEOUT_SECONDS")
+    if explicit is not None and explicit.strip():
+        try:
+            return max(1, int(explicit.strip()))
+        except (TypeError, ValueError):
+            pass
+    ttl = lease_ttl_seconds()
+    return max(1, ttl - _DEFAULT_SUBMIT_EXEC_TTL_MARGIN_SECONDS)
 
 
 def lease_name(namespace: str = _NAMESPACE) -> str:
@@ -526,6 +565,20 @@ def acquire_run_slot(
     skew = lease_clock_skew_seconds()
     ceiling = max_run_concurrency()
     budget = capacity_wait_max_seconds()
+
+    # Fail-closed config guard: the submit subprocess MUST be hard-capped below
+    # the Lease TTL (mirrors elb-dashboard's submit_exec_timeout < lease_ttl
+    # invariant). A misconfigured override that violates this re-opens the
+    # expiry-takeover → concurrent-submit race, so refuse to admit rather than
+    # silently run unprotected.
+    exec_timeout = submit_exec_timeout_seconds()
+    if exec_timeout >= ttl:
+        raise SubmitCoordinationError(
+            f"submit exec timeout {exec_timeout}s must be < lease TTL {ttl}s "
+            "(set BLAST_OPENAPI_SUBMIT_EXEC_TIMEOUT_SECONDS below "
+            "BLAST_SUBMIT_LEASE_TTL_SECONDS) — otherwise a long submit could "
+            "overrun the Lease and run concurrently with another path"
+        )
 
     import time as _time
 

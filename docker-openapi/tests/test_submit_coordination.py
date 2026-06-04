@@ -54,6 +54,42 @@ def test_contract_constants_and_defaults():
     assert holder.startswith("openapi-") and len(holder) > len("openapi-")
 
 
+# ── submit exec timeout (submit_exec_timeout < lease_ttl invariant) ─────────
+def test_submit_exec_timeout_default_follows_ttl(monkeypatch):
+    monkeypatch.delenv("BLAST_OPENAPI_SUBMIT_EXEC_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("BLAST_SUBMIT_LEASE_TTL_SECONDS", raising=False)
+    # Default TTL 900 → cap 900 - 120 = 780, strictly below the TTL.
+    assert sc.submit_exec_timeout_seconds() == 780
+    assert sc.submit_exec_timeout_seconds() < sc.lease_ttl_seconds()
+    # Raising the TTL widens the cap automatically.
+    monkeypatch.setenv("BLAST_SUBMIT_LEASE_TTL_SECONDS", "1200")
+    assert sc.submit_exec_timeout_seconds() == 1080
+    assert sc.submit_exec_timeout_seconds() < sc.lease_ttl_seconds()
+
+
+def test_submit_exec_timeout_explicit_override(monkeypatch):
+    monkeypatch.setenv("BLAST_OPENAPI_SUBMIT_EXEC_TIMEOUT_SECONDS", "500")
+    assert sc.submit_exec_timeout_seconds() == 500
+    # Garbage override falls back to the TTL-derived default.
+    monkeypatch.setenv("BLAST_OPENAPI_SUBMIT_EXEC_TIMEOUT_SECONDS", "not-a-number")
+    assert sc.submit_exec_timeout_seconds() == 780
+
+
+def test_acquire_fails_closed_when_exec_timeout_ge_ttl(monkeypatch):
+    # An override at/above the TTL re-opens the takeover race → refuse to admit.
+    monkeypatch.setenv("BLAST_SUBMIT_LEASE_TTL_SECONDS", "900")
+    monkeypatch.setenv("BLAST_OPENAPI_SUBMIT_EXEC_TIMEOUT_SECONDS", "900")
+    # kubectl must never be reached — the guard fires before any cluster call.
+    monkeypatch.setattr(
+        sc,
+        "_kubectl",
+        _route_kubectl({}),  # any verb → AssertionError if invoked
+    )
+    monkeypatch.setattr(sc, "count_active_blast_submissions", lambda *_a, **_k: 0)
+    with pytest.raises(sc.SubmitCoordinationError):
+        sc.acquire_run_slot("job-1")
+
+
 # ── _is_expired (fail-closed) ───────────────────────────────────────────────
 def test_is_expired_missing_renewtime_is_available():
     assert sc._is_expired({}, sc._now(), 30) is True

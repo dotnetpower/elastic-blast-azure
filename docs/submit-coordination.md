@@ -58,13 +58,17 @@ two-gate contract so they honour one global ceiling.
 | --- | --- | --- |
 | `BLAST_COORD_BACKEND` | unset (`redis`) | `k8s` enables coordination; anything else is a no-op. |
 | `BLAST_MAX_RUN_CONCURRENCY` | `3` | Gate B ceiling — max concurrent submits across both paths. |
-| `BLAST_LEASE_TTL_SECONDS` | `900` | Lease staleness threshold before reclaim. |
+| `BLAST_SUBMIT_LEASE_TTL_SECONDS` | `900` | Lease staleness threshold before reclaim. |
 | `BLAST_LEASE_CLOCK_SKEW_SECONDS` | `30` | Clock-skew allowance added to the TTL. |
 | `BLAST_FINALIZER_GRACE_SECONDS` | `300` | Age before a lone finalizer Job is treated as phantom. |
 | `BLAST_CAPACITY_WAIT_MAX_SECONDS` | `1800` | Max wait per acquire attempt before requeue. |
+| `BLAST_OPENAPI_SUBMIT_EXEC_TIMEOUT_SECONDS` | `lease_ttl − 120` | Hard cap on the coordinated `submit` subprocess. MUST stay `< lease_ttl` (fail-closed at acquire). OpenAPI-only. |
 
-These names and defaults are identical to the dashboard control plane so the two
-paths agree on the ceiling and the staleness windows.
+The first six names and defaults are identical to the dashboard control plane so
+the two paths agree on the ceiling and the staleness windows. The last one is
+OpenAPI-only — the dashboard pins its submit subprocess at a fixed 600s, while
+this service derives the cap from the TTL so long-submit operators raise a single
+number (`BLAST_SUBMIT_LEASE_TTL_SECONDS`) and the exec cap follows.
 
 ## Required RBAC (LOAD-BEARING)
 
@@ -101,21 +105,34 @@ shared ceiling against the live Job count). **Only after** this is live should
 the dashboard be flipped to `BLAST_COORD_BACKEND=k8s`. Flipping the dashboard
 first opens a transient window where neither path sees the other's lock.
 
-## Known limitation — long submits and the Lease TTL
+## Long submits and the Lease TTL — the `submit_exec_timeout < lease_ttl` invariant
 
 Gate A is held for the duration of the `elastic-blast submit` call and released
 immediately after, with **no renewal heartbeat** — this matches the dashboard
 contract exactly (`api/services/blast/k8s_gate.py` releases in its `finally`).
-If a single `elastic-blast submit` runs longer than
+Without a bound, a single `elastic-blast submit` running longer than
 `BLAST_SUBMIT_LEASE_TTL_SECONDS + BLAST_LEASE_CLOCK_SKEW_SECONDS` (default
-900 + 30 = 930s), the Lease is considered stale and another path may take it
-over while the first submit is still creating objects. Gate B (the live
-finalizer-Job count) still bounds the steady-state concurrency, but the brief
-object-creation critical section is no longer mutually exclusive in that case.
+900 + 30 = 930s) would let the Lease be reclaimed by another path while the
+first submit is still creating objects — defeating Gate A's mutual exclusion.
 
-This is a **shared property of both repos**, so it is intentionally NOT patched
-unilaterally here (adding a heartbeat to only one path would diverge the
-contract). Mitigation today: set `BLAST_SUBMIT_LEASE_TTL_SECONDS` comfortably
-above the worst-case `submit` wall time. A renewal heartbeat, if added, must
-land in both repos together.
+The dashboard closes this with a **load-bearing ordering invariant**
+(`docs/research/blast-submit-coordination.md` §4.3): its submit subprocess is
+hard-capped (600s) strictly below the Lease TTL (900s), so an overrunning submit
+is killed (failed) *before* the Lease can be reclaimed. This service enforces
+the same invariant:
+
+* When coordination holds Gate A, the `submit` subprocess is run with a finite
+  `timeout` from `submit_exec_timeout_seconds()` (default `lease_ttl − 120`,
+  always `< lease_ttl`). An overrun raises and fails the job before the
+  `renewTime + ttl + skew` reclaim point — never a silent concurrent submit.
+* `acquire_run_slot()` **fails closed** if a misconfigured
+  `BLAST_OPENAPI_SUBMIT_EXEC_TIMEOUT_SECONDS` is `>= lease_ttl`, refusing to
+  admit rather than running unprotected.
+* The coordination-disabled path (`BLAST_COORD_BACKEND != k8s`) keeps the legacy
+  unbounded `timeout=None`, so non-coordinated deployments are unaffected.
+
+For genuinely long submits, raise `BLAST_SUBMIT_LEASE_TTL_SECONDS`: the exec cap
+follows it up automatically and the invariant holds by construction. A renewal
+heartbeat (an alternative to capping) remains out of scope for v1 and, if added,
+must land in both repos together to keep the contract aligned.
 
