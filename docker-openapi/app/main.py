@@ -2448,7 +2448,24 @@ def _job_marker_phase(results_url: str, elb_job_id: str = "") -> str | None:
 
 
 def _k8s_job_summary(elb_job_id: str) -> dict[str, Any]:
-    empty = {"total": 0, "succeeded": 0, "failed": 0, "active": 0, "submit_failed": 0, "finalizer_active": 0}
+    # ``failed`` / ``submit_failed`` count *pod* retry attempts: Kubernetes
+    # increments a Job's ``.status.failed`` on every failed pod, including
+    # transient failures it is still retrying within ``backoffLimit``. Using
+    # those raw counts to declare the run dead misreports an in-flight retry as
+    # ``blast_failed``. The ``*_terminal`` counters below only fire when the Job
+    # itself carries a ``Failed`` condition (``backoffLimit`` exhausted — the
+    # Job can no longer succeed), so phase decisions can distinguish "a pod
+    # failed once and is being retried" from "the Job has permanently failed".
+    empty = {
+        "total": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "active": 0,
+        "submit_failed": 0,
+        "finalizer_active": 0,
+        "failed_terminal": 0,
+        "submit_failed_terminal": 0,
+    }
     try:
         proc = safe_exec(["kubectl", "get", "jobs", "-l", f"elb-job-id={elb_job_id}", "-o", "json"], timeout=15)
         data = json.loads(proc.stdout)
@@ -2461,13 +2478,23 @@ def _k8s_job_summary(elb_job_id: str) -> dict[str, Any]:
         labels = item.get("metadata", {}).get("labels", {})
         app_label = labels.get("app", "")
         status = item.get("status", {})
+        conditions = {
+            c.get("type"): c.get("status")
+            for c in status.get("conditions", [])
+            if isinstance(c, dict)
+        }
+        job_failed_terminal = conditions.get("Failed") == "True"
         if app_label == "blast":
             summary["total"] += 1
             summary["succeeded"] += status.get("succeeded", 0) or 0
             summary["failed"] += status.get("failed", 0) or 0
             summary["active"] += status.get("active", 0) or 0
+            if job_failed_terminal:
+                summary["failed_terminal"] += 1
         elif app_label == "submit":
             summary["submit_failed"] += status.get("failed", 0) or 0
+            if job_failed_terminal:
+                summary["submit_failed_terminal"] += 1
         elif app_label == "finalizer":
             summary["finalizer_active"] += status.get("active", 0) or 0
     return summary
@@ -2574,9 +2601,9 @@ def _refresh_job_status(job_id: str) -> dict[str, Any] | None:
         refreshed = _update_job(job_id, **updates)
         _cancel_job(job_id, stuck_reason, terminal_status="failed")
         return refreshed
-    if summary.get("submit_failed"):
+    if summary.get("submit_failed_terminal"):
         updates.update({"status": "failed", "phase": "submit_failed", "error": "submit job failed before creating BLAST jobs"})
-    elif summary.get("failed"):
+    elif summary.get("failed_terminal"):
         updates.update({"status": "failed", "phase": "blast_failed", "error": "one or more BLAST jobs failed"})
     elif summary.get("total", 0) > 0:
         if summary.get("succeeded", 0) >= summary.get("total", 0) and summary.get("total", 0) > 0:
@@ -2585,8 +2612,16 @@ def _refresh_job_status(job_id: str) -> dict[str, Any] | None:
             else:
                 updates.update({"status": "running", "phase": "finalizing"})
         elif summary.get("active", 0) > 0:
+            # A pod that failed transiently (counted in ``failed``) but is still
+            # being retried within ``backoffLimit`` keeps ``active`` > 0. Treat
+            # the job as running, not failed — only a terminal ``Failed`` Job
+            # condition (``failed_terminal`` above) flips to ``blast_failed``.
             updates.update({"status": "running", "phase": "running"})
         else:
+            # No pod is active and not every shard has succeeded yet, but no Job
+            # carries a terminal ``Failed`` condition — Kubernetes is between
+            # retry attempts (a transient pod failure is bumping ``failed``).
+            # Hold at ``pending`` and re-poll instead of declaring the run dead.
             updates.update({"status": "running", "phase": "pending"})
     else:
         if _list_result_files(job):
