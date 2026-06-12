@@ -192,9 +192,89 @@ def oracle_sort_key(order, accession, fallback):
     return (0, rank)
 
 
-def tabular_subject_accession(line):
+def tabular_subject_accession(line, subject_idx=1):
     cols = line.split("\t")
-    return cols[1] if len(cols) > 1 else ""
+    return cols[subject_idx] if len(cols) > subject_idx else ""
+
+
+# Field-aware tabular column resolution. The shard merge historically assumed
+# the BLAST `std` column order (qseqid=0, sseqid=1, evalue=10, bitscore=11). An
+# extended/reordered outfmt such as
+# `-outfmt "7 sseqid staxids sstrand pident evalue bitscore ..."` (the layout
+# that surfaces subject taxids/names) breaks every one of those fixed positions,
+# so the group/rank/oracle columns are resolved BY NAME from the outfmt
+# specifier instead. A plain `6`/`7` or a `std`-prefixed layout resolves back to
+# the exact historical positions, so existing runs are byte-identical.
+_STD_TABULAR_FIELDS = [
+    "qseqid", "sseqid", "pident", "length", "mismatch", "gapopen",
+    "qstart", "qend", "sstart", "send", "evalue", "bitscore",
+]
+# Query / subject identity codes that can serve as the per-query group key and
+# the tie-order oracle accession respectively (BLAST+ accepts several aliases).
+_QUERY_FIELD_CODES = {"qseqid", "qacc", "qaccver", "qgi"}
+_SUBJECT_FIELD_CODES = {"sseqid", "sacc", "saccver", "sgi"}
+
+
+def expand_outfmt_fields(spec):
+    """Return the ordered list of tabular column field codes for an outfmt spec.
+
+    `spec` is the full `-outfmt` value (with or without the leading numeric
+    code), e.g. "7 std staxids" or "sseqid staxids evalue bitscore". An empty
+    spec (plain `-outfmt 6`/`7`) resolves to the standard 12 columns. The `std`
+    token expands in place to those 12 codes, matching BLAST+ semantics.
+    """
+    tokens = (spec or "").strip().strip("'\"").split()
+    if tokens and tokens[0].isdigit():
+        tokens = tokens[1:]
+    if not tokens:
+        return list(_STD_TABULAR_FIELDS)
+    fields = []
+    for tok in tokens:
+        if tok == "std":
+            fields.extend(_STD_TABULAR_FIELDS)
+        else:
+            fields.append(tok.lower())
+    return fields
+
+
+def resolve_tabular_columns(spec, warnings):
+    """Resolve group/rank/oracle column indices BY NAME from a tabular outfmt.
+
+    Returns ``(qseqid_idx, evalue_idx, bitscore_idx, subject_idx)`` where the
+    query and subject indices may be ``None``. Raises ``ValueError`` when evalue
+    or bitscore is absent (the merge cannot re-rank shard hits without them). A
+    missing query column means the caller merges every hit as a single query
+    group (correct only for single-query searches); a missing subject column
+    disables the tie-order oracle / deterministic accession tie-break.
+    """
+    fields = expand_outfmt_fields(spec)
+
+    def first_index(codes):
+        for i, field in enumerate(fields):
+            if field in codes:
+                return i
+        return None
+
+    qseqid_idx = first_index(_QUERY_FIELD_CODES)
+    evalue_idx = first_index({"evalue"})
+    bitscore_idx = first_index({"bitscore"})
+    subject_idx = first_index(_SUBJECT_FIELD_CODES)
+    if evalue_idx is None or bitscore_idx is None:
+        raise ValueError(
+            "sharded tabular merge requires evalue and bitscore columns in the "
+            f"-outfmt specifier; resolved fields={fields}"
+        )
+    if qseqid_idx is None:
+        warnings.append(
+            "outfmt has no query column; all hits are merged as a single query "
+            "group (correct only for single-query searches)"
+        )
+    if subject_idx is None:
+        warnings.append(
+            "outfmt has no subject accession column; the tie-order oracle and "
+            "deterministic accession tie-break are disabled"
+        )
+    return qseqid_idx, evalue_idx, bitscore_idx, subject_idx
 
 
 def xml_subject_accession(hit):
@@ -248,41 +328,116 @@ def parse_outfmt(options_text):
     return outfmt.strip().split(maxsplit=1)[0] or "6"
 
 
-def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, max_hits, warnings):
+def parse_outfmt_spec(options_text):
+    """Return the FULL `-outfmt` value (numeric code + field codes), or "".
+
+    Unlike :func:`parse_outfmt` (which returns only the leading code so the
+    dispatcher can pick xml vs tabular), this keeps the entire specifier so the
+    tabular merge can resolve its group/rank/oracle columns by field name.
+
+    The canonical wire format is UNQUOTED — quotes break the raw YAML
+    substitution elastic-blast uses to inject ``ELB_BLAST_OPTIONS``. So a
+    multi-token specifier arrives as separate ``shlex`` tokens
+    (``-outfmt 7 sseqid staxids``) and is rejoined here by collecting every
+    token after ``-outfmt`` up to the next ``-flag`` (BLAST format field codes
+    never start with ``-``). A quoted input (``-outfmt "7 sseqid"``) already
+    arrives as one token and is handled by the same loop, so both forms resolve
+    to the full specifier.
+    """
+    try:
+        tokens = shlex.split(options_text or "")
+    except ValueError:
+        return ""
+    spec = ""
+    i = 0
+    n = len(tokens)
+    while i < n:
+        token = tokens[i]
+        if token == "-outfmt" and i + 1 < n:
+            parts = []
+            j = i + 1
+            while j < n and not tokens[j].startswith("-"):
+                parts.append(tokens[j])
+                j += 1
+            spec = " ".join(parts)
+            i = j
+            continue
+        if token.startswith("-outfmt="):
+            spec = token.split("=", 1)[1]
+        i += 1
+    return spec.strip()
+
+
+def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, max_hits, warnings, outfmt="6", outfmt_spec=""):
     oracle_path, tie_order, oracle_unique_accessions, oracle_accessions = load_tie_order_oracle(warnings)
     strict_oracle = bool(tie_order) and strict_oracle_enabled()
     if strict_oracle:
         warnings.append("Strict tie-order oracle is enabled; non-oracle hits are excluded")
+    # Resolve the group / rank / oracle columns BY NAME from the outfmt
+    # specifier (handles reordered + extended layouts like
+    # `7 sseqid staxids ... evalue bitscore ...`). For a plain or `std`-prefixed
+    # layout these resolve back to the historical positions (qseqid=0,
+    # sseqid=1, evalue=10, bitscore=11), so existing runs are byte-identical.
+    qseqid_idx, evalue_idx, bitscore_idx, subject_idx = resolve_tabular_columns(
+        outfmt_spec, warnings
+    )
+    # A subject accession column is required for the tie-order oracle and the
+    # deterministic accession tie-break; without it, neither can run.
+    if subject_idx is None:
+        strict_oracle = False
+        tie_order = {}
+    oracle_subject_idx = subject_idx if subject_idx is not None else 1
+    # Lowest column count a data row must have for every resolved index to be
+    # addressable (mirrors the historical `< 12` guard for the std layout).
+    min_required_cols = max(
+        idx for idx in (qseqid_idx, evalue_idx, bitscore_idx, subject_idx) if idx is not None
+    ) + 1
     query_hits = defaultdict(list)
     unsupported_rows = 0
     total_input_rows = 0
     ordinal = 0
+    # Capture the authoritative `# Fields:` header BLAST itself wrote into the
+    # shard outputs (outfmt 7 only). Reusing it verbatim makes the merged
+    # output self-describing for EXTENDED / reordered layouts — the merge
+    # re-ranks by the resolved evalue/bitscore positions and re-emits the full
+    # row, so trailing columns (staxids, sstrand, qseq, sseq, …) are preserved;
+    # this keeps the header in sync with them. Plain outfmt 6 input carries no
+    # comment lines, so `captured_fields` stays None and the standard 12-field
+    # fallback below applies (unchanged behaviour).
+    captured_fields = None
 
     input_path = Path(input_tsv)
     if input_path.exists():
         with input_path.open() as handle:
             for raw_line in handle:
                 line = raw_line.rstrip("\n")
-                if not line or line.startswith("#"):
+                if not line:
+                    continue
+                if line.startswith("#"):
+                    if captured_fields is None and line.startswith("# Fields:"):
+                        candidate = line[len("# Fields:") :].strip()
+                        if candidate:
+                            captured_fields = candidate
                     continue
                 total_input_rows += 1
                 cols = line.split("\t")
-                if len(cols) < 12:
+                if len(cols) < min_required_cols:
                     unsupported_rows += 1
                     continue
                 try:
-                    evalue = float(cols[10])
-                    bitscore = float(cols[11])
+                    evalue = float(cols[evalue_idx])
+                    bitscore = float(cols[bitscore_idx])
                 except ValueError:
                     unsupported_rows += 1
                     continue
-                query_hits[cols[0]].append((evalue, -bitscore, ordinal, line))
+                group_key = cols[qseqid_idx] if qseqid_idx is not None else ""
+                query_hits[group_key].append((evalue, -bitscore, ordinal, line))
                 ordinal += 1
 
     if unsupported_rows:
         warnings.append("Some rows were skipped because they were not outfmt 6 compatible")
 
-    fields = (
+    fields = captured_fields or (
         "query acc.ver, subject acc.ver, % identity, alignment length, mismatches, "
         "gap opens, q. start, q. end, s. start, s. end, evalue, bit score"
     )
@@ -301,7 +456,7 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
             hits = query_hits[query_id]
             if strict_oracle:
                 observed_keys = observed_accession_keys(
-                    tabular_subject_accession(hit[3]) for hit in hits
+                    tabular_subject_accession(hit[3], oracle_subject_idx) for hit in hits
                 )
                 missing_accessions = oracle_missing_accessions(oracle_accessions, observed_keys)
                 if missing_accessions:
@@ -315,7 +470,7 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
                 hits = [
                     hit
                     for hit in hits
-                    if oracle_sort_key(tie_order, tabular_subject_accession(hit[3]), hit[2])[0] == 0
+                    if oracle_sort_key(tie_order, tabular_subject_accession(hit[3], oracle_subject_idx), hit[2])[0] == 0
                 ]
             pair_counts = Counter((hit[0], hit[1]) for hit in hits)
             tie_break_count += sum(count - 1 for count in pair_counts.values() if count > 1)
@@ -325,7 +480,7 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
                     hit[0],
                     hit[1],
                     tie_break_sort_component(
-                        tie_order, tabular_subject_accession(hit[3]), hit[2]
+                        tie_order, tabular_subject_accession(hit[3], oracle_subject_idx), hit[2]
                     ),
                     hit[2],
                 ),
@@ -390,8 +545,15 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
         )
 
     report = {
-        "outfmt": 6,
+        "outfmt": int(str(outfmt).strip().split(maxsplit=1)[0]) if str(outfmt).strip() else 6,
         "format": "blast_tabular",
+        "fields": fields,
+        "resolved_columns": {
+            "qseqid": qseqid_idx,
+            "evalue": evalue_idx,
+            "bitscore": bitscore_idx,
+            "subject": subject_idx,
+        },
         "max_target_seqs": max_hits,
         "queries": len(query_hits),
         "total_input_hits": total_input_rows,
@@ -722,10 +884,18 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
 input_tsv, output_gz, report_json, num_shards, blast_program, blast_options = sys.argv[1:]
 max_hits, warnings = parse_max_target_seqs(blast_options)
 outfmt = parse_outfmt(blast_options)
+outfmt_spec = parse_outfmt_spec(blast_options)
 if outfmt == "5":
     total_hits, query_count = merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
-elif outfmt == "6":
-    total_hits, query_count = merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, max_hits, warnings)
+elif outfmt in ("6", "7"):
+    # outfmt 6/7 share the same tabular data rows (7 only adds comment lines,
+    # which the merge skips and re-emits). The merge resolves its group/rank/
+    # oracle columns by NAME from the full specifier, so reordered + extended
+    # layouts (e.g. `7 sseqid staxids ... evalue bitscore ...`) merge correctly.
+    total_hits, query_count = merge_tabular(
+        input_tsv, output_gz, report_json, num_shards, blast_program, max_hits, warnings,
+        outfmt=outfmt, outfmt_spec=outfmt_spec,
+    )
 else:
     raise ValueError(f"Unsupported sharded merge outfmt: {outfmt}")
 print(

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E501
 """Patch the vendored elastic-blast-azure clone for dashboard sharded runs.
 
 Responsibility: Patch the vendored elastic-blast-azure clone for dashboard sharded runs
@@ -97,6 +98,49 @@ def patch_azure_py(root: Path) -> None:
             "            'ELB_RESULTS': self._results_path(),\n"
         ),
         "'ELB_FINALIZER_DOCKER_IMAGE': cfg.azure.cjs_docker_image",
+    )
+
+
+def patch_partitioned_outfmt_gate(root: Path) -> None:
+    """Allow ``-outfmt 7`` for partitioned (sharded) BLAST runs.
+
+    Upstream ``elb_config.py`` rejects every partitioned outfmt other than 5,
+    6, or ``6 std...``. outfmt 7 is the same 12-column tabular layout as 6 with
+    added comment lines, which the dashboard's shard merge already skips and
+    re-emits, so 7 merges correctly through the tabular path. Widen the gate so
+    the dashboard's New Search ``outfmt 7`` selection (and the OpenAPI plane,
+    which copies this patch into its build context) can run sharded.
+    """
+    path = root / "src/elastic_blast/elb_config.py"
+    _replace_once_unless_present(
+        path,
+        (
+            "            if (\n"
+            "                outfmt_code not in {'5', '6'}\n"
+            "                or (outfmt_code == '5' and outfmt_extended)\n"
+            "                or (outfmt_code == '6' and outfmt_extended and not "
+            "outfmt_extended.startswith('std'))\n"
+            "            ):\n"
+            "                errors.append(\n"
+            "                    'Partitioned BLAST requires outfmt 5 without extended fields, '\n"
+            "                    'outfmt 6, or \"6 std...\"; '\n"
+            "                    f'{outfmt} is not supported for merge')\n"
+        ),
+        (
+            "            if (\n"
+            "                outfmt_code not in {'5', '6', '7'}\n"
+            "                or (outfmt_code == '5' and outfmt_extended)\n"
+            "                or (outfmt_code == '6' and outfmt_extended and not "
+            "outfmt_extended.startswith('std'))\n"
+            "                or (outfmt_code == '7' and outfmt_extended and not "
+            "outfmt_extended.startswith('std'))\n"
+            "            ):\n"
+            "                errors.append(\n"
+            "                    'Partitioned BLAST requires outfmt 5 without extended fields, '\n"
+            "                    'outfmt 6, outfmt 7, or \"6 std...\"/\"7 std...\"; '\n"
+            "                    f'{outfmt} is not supported for merge')\n"
+        ),
+        "outfmt_code not in {'5', '6', '7'}",
     )
 
 
@@ -581,6 +625,196 @@ def patch_init_shard_script(root: Path) -> None:
         path.write_text(_HARDENED_INIT_DB_SHARD_AKS_SCRIPT + "\n")
 
 
+# ---------------------------------------------------------------------------
+# blast-run-aks.sh: inject a vmtouch step immediately before the blastn
+# invocation.
+#
+# The upstream AKS variant of `blast-run-aks.sh` (unlike the NCBI reference
+# `splitq_download_db_search`) skips vmtouch entirely. That left every BLAST
+# search pod paying the full mmap-fault cost from cold SSD on the first
+# query — and the separate warmup-Job vmtouch step that this dashboard used
+# to ship was a 1-second noop on already-cached pages with no mmap holder
+# (see docs/features_change/2026-06/2026-06-06-warmup-drop-fake-vmtouch.md).
+#
+# Restoring vmtouch *inside* the search pod fixes both:
+#  * the pages it touches stay resident under memory pressure because the
+#    `blastn` process that follows holds an active mmap on the same files
+#    (the kernel deprioritises eviction of pages with active mappings);
+#  * the work is colocated with `blastn` on the same node by elastic-blast's
+#    own `nodeSelector: { ordinal: ${ELB_SHARD_IDX} }` pin, so the vmtouch
+#    cost is paid exactly once per shard per pod and applies to the right
+#    files.
+#
+# The patch is idempotent (guarded by the literal `ELB vmtouch warm step`
+# marker) so re-running `patch_elastic_blast.py` against an already-patched
+# tree is a no-op, matching the rest of this file's contract.
+# ---------------------------------------------------------------------------
+
+_BLAST_RUN_AKS_VMTOUCH_ANCHOR = 'start=$(date +%s)\necho "run start'
+_BLAST_RUN_AKS_VMTOUCH_BLOCK = r"""# ELB vmtouch warm step (added by patch_elastic_blast.py).
+# Touches the DB shard volume files into the page cache before BLAST starts so
+# the first mmap fault path is RAM-resident. `blastn` then holds those pages
+# under an active mapping for the duration of the search, which keeps the
+# kernel from reclaiming them. ELB_VMTOUCH_DISABLE=1 skips the step.
+if [ "${ELB_VMTOUCH_DISABLE:-0}" != "1" ] && command -v vmtouch >/dev/null 2>&1; then
+    if command -v blastdb_path >/dev/null 2>&1; then
+        vm_start=$(date +%s)
+        # vmtouch -m caps the per-FILE size it will touch (it skips any single
+        # volume file larger than this), not a cumulative cache budget. BLAST
+        # DB volumes are typically GB-scale per file so 60% of MemAvailable
+        # leaves any realistic volume well under the cap while still acting
+        # as a safety rail for a pathologically large single file.
+        elb_vmtouch_awk='/MemAvailable/ {printf "%dG", int($2/1024/1024*0.6)}'
+        ELB_VMTOUCH_MEM=${ELB_VMTOUCH_MEM:-$(awk "$elb_vmtouch_awk" /proc/meminfo)}
+        echo "vmtouch warm: db=${ELB_DB} mol=${ELB_DB_MOL_TYPE} budget=${ELB_VMTOUCH_MEM}"
+        # Touch volumes serially with -t (read into cache, no daemon, no
+        # mlock). The next `blastn` mmap reference is what actually keeps
+        # the pages resident.
+        blastdb_path -dbtype "$ELB_DB_MOL_TYPE" -db "$ELB_DB" -getvolumespath 2>/dev/null \
+            | tr ' ' '\n' \
+            | xargs -r -n1 vmtouch -tqm "$ELB_VMTOUCH_MEM" || true
+        vm_end=$(date +%s)
+        # Emit the runtime line BOTH on stdout (pod log) and into the
+        # $BLAST_RUNTIME file so it ships to Blob via the existing
+        # results-export-aks.sh `BLAST_RUNTIME-${JOB_NUM}.out` upload. That
+        # lets the SPA later surface per-shard vmtouch timing without
+        # plumbing a new artefact path.
+        vm_db_label="vmtouch-${ELB_DB//\//-}"
+        vm_runtime_line=$(printf 'RUNTIME %s %f seconds' "$vm_db_label" $((vm_end - vm_start)))
+        echo "$vm_runtime_line"
+        echo "$vm_runtime_line" >> "$BLAST_RUNTIME"
+    fi
+fi
+
+"""
+
+
+def _blast_run_aks_script_paths(root: Path) -> list[Path]:
+    source_path = root / "src/elastic_blast/templates/scripts/blast-run-aks.sh"
+    paths = [source_path]
+    for pattern in (
+        "venv/lib/python*/site-packages/elastic_blast/templates/scripts/blast-run-aks.sh",
+        ".venv/lib/python*/site-packages/elastic_blast/templates/scripts/blast-run-aks.sh",
+    ):
+        paths.extend(root.glob(pattern))
+    return sorted({path for path in paths if path.exists()})
+
+
+def patch_blast_run_aks_script(root: Path) -> None:
+    paths = _blast_run_aks_script_paths(root)
+    if not paths:
+        raise RuntimeError(f"blast-run-aks.sh not found under {root}")
+    for path in paths:
+        _replace_once_unless_present(
+            path,
+            _BLAST_RUN_AKS_VMTOUCH_ANCHOR,
+            _BLAST_RUN_AKS_VMTOUCH_BLOCK + _BLAST_RUN_AKS_VMTOUCH_ANCHOR,
+            "ELB vmtouch warm step",
+        )
+        patch_blast_run_aks_outfmt_argv(path)
+
+
+# ---------------------------------------------------------------------------
+# blast-run-aks.sh: pass BLAST options as a quote-safe argv array so a
+# multi-token `-outfmt` specifier (e.g. `-outfmt 7 std staxids sstrand qseq
+# sseq`, needed to surface subject taxids/names) reaches `blastn` as a SINGLE
+# argument instead of being word-split into stray positional args.
+#
+# The canonical wire format is UNQUOTED — quotes break the raw YAML
+# substitution elastic-blast uses to inject ELB_BLAST_OPTIONS into the pod env,
+# so we cannot rely on shell quotes to group the specifier. Instead we rebuild
+# an argv array from ELB_BLAST_OPTIONS, rejoining every token after `-outfmt`
+# up to the next `-flag` (BLAST format field codes never start with `-`, and
+# every other BLAST option takes a single-token value — only `-outfmt` is
+# multi-token). For a single-token `-outfmt 5` (every job today) the array is
+# byte-identical to the previous unquoted `$ELB_BLAST_OPTIONS` word-splitting,
+# so existing runs are unchanged; only a multi-token specifier behaves
+# differently (correctly grouped). No `eval`, no quotes — deterministic and
+# unit-testable in isolation.
+# ---------------------------------------------------------------------------
+
+_BLAST_RUN_AKS_ARGV_ANCHOR = (
+    '# shellcheck disable=SC2086\n'
+    'TIME="$DATE_NOW run start $JOB_NUM $ELB_BLAST_PROGRAM $ELB_DB %e %U %S %P" \\\n'
+)
+_BLAST_RUN_AKS_ARGV_BLOCK = r"""# ELB outfmt argv rebuild (added by patch_elastic_blast.py).
+# Rejoin a multi-token -outfmt specifier into a single argv element so it
+# survives to blastn intact. Byte-identical to plain word-splitting for the
+# single-token -outfmt every current job uses.
+#
+# Hardening: split ELB_BLAST_OPTIONS with glob DISABLED (set -f) and a known
+# IFS so a stray glob metacharacter in the options can never expand a BLAST
+# flag into matching filenames (the previous unquoted `$ELB_BLAST_OPTIONS`
+# expansion did glob — this is strictly safer for the no-glob inputs BLAST
+# options actually carry). The original noglob state is restored afterwards.
+ELB_BLAST_ARGV=()
+_elb_had_noglob=0
+case "$-" in *f*) _elb_had_noglob=1 ;; esac
+_elb_saved_ifs="$IFS"
+set -f
+IFS=$' \t\n'
+# shellcheck disable=SC2206
+_elb_opt_tokens=( $ELB_BLAST_OPTIONS )
+IFS="$_elb_saved_ifs"
+[ "$_elb_had_noglob" -eq 1 ] || set +f
+_elb_i=0
+while [ "$_elb_i" -lt "${#_elb_opt_tokens[@]}" ]; do
+    _elb_tok="${_elb_opt_tokens[$_elb_i]}"
+    if [ "$_elb_tok" = "-outfmt" ]; then
+        ELB_BLAST_ARGV+=( "-outfmt" )
+        _elb_i=$((_elb_i + 1))
+        _elb_spec=""
+        _elb_have_spec=0
+        while [ "$_elb_i" -lt "${#_elb_opt_tokens[@]}" ] && [ "${_elb_opt_tokens[$_elb_i]:0:1}" != "-" ]; do
+            if [ "$_elb_have_spec" -eq 0 ]; then
+                _elb_spec="${_elb_opt_tokens[$_elb_i]}"
+                _elb_have_spec=1
+            else
+                _elb_spec="$_elb_spec ${_elb_opt_tokens[$_elb_i]}"
+            fi
+            _elb_i=$((_elb_i + 1))
+        done
+        if [ "$_elb_have_spec" -eq 1 ]; then
+            ELB_BLAST_ARGV+=( "$_elb_spec" )
+        fi
+    else
+        ELB_BLAST_ARGV+=( "$_elb_tok" )
+        _elb_i=$((_elb_i + 1))
+    fi
+done
+
+"""
+
+
+def patch_blast_run_aks_outfmt_argv(path: Path) -> None:
+    """Rebuild BLAST options into a quote-safe argv array (multi-token outfmt).
+
+    Skips gracefully when the TIME= invocation anchor is absent (e.g. a partial
+    test stub or a layout this patch does not recognise), and raises only when
+    the anchor is present but the invocation line has drifted — so a real
+    upstream change cannot silently leave the rebuilt array unused.
+    """
+    text = path.read_text()
+    if "ELB outfmt argv rebuild" in text:
+        return
+    if _BLAST_RUN_AKS_ARGV_ANCHOR not in text:
+        return
+    invocation_old = '-num_threads "$ELB_NUM_CPUS" \\\n$ELB_BLAST_OPTIONS \\\n2>"$ERROR_FILE"'
+    invocation_new = '-num_threads "$ELB_NUM_CPUS" \\\n"${ELB_BLAST_ARGV[@]}" \\\n2>"$ERROR_FILE"'
+    if invocation_old not in text:
+        raise RuntimeError(
+            "blast-run-aks.sh has the argv anchor but the blastn invocation line "
+            "drifted; update patch_blast_run_aks_outfmt_argv before building"
+        )
+    text = text.replace(
+        _BLAST_RUN_AKS_ARGV_ANCHOR,
+        _BLAST_RUN_AKS_ARGV_BLOCK + _BLAST_RUN_AKS_ARGV_ANCHOR,
+        1,
+    )
+    text = text.replace(invocation_old, invocation_new, 1)
+    path.write_text(text)
+
+
 def patch_aks_workload_tolerations(root: Path) -> None:
     templates = {
         "blast-batch-job-aks.yaml.template": "OnFailure",
@@ -732,11 +966,13 @@ def main() -> int:
         return 2
 
     patch_azure_py(root)
+    patch_partitioned_outfmt_gate(root)
     patch_azure_cli_glue(root)
     patch_azure_traits(root)
     patch_finalizer_template(root)
     patch_finalizer_script(root, merge_script_source)
     patch_init_shard_script(root)
+    patch_blast_run_aks_script(root)
     patch_aks_workload_tolerations(root)
     patch_unique_init_ssd_job_names(root)
     patch_create_workspace_daemonset_tolerations(root)
