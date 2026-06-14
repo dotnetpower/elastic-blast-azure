@@ -102,14 +102,19 @@ def patch_azure_py(root: Path) -> None:
 
 
 def patch_partitioned_outfmt_gate(root: Path) -> None:
-    """Allow ``-outfmt 7`` for partitioned (sharded) BLAST runs.
+    """Allow tabular ``-outfmt 6``/``7`` (incl. extended layouts) for sharding.
 
     Upstream ``elb_config.py`` rejects every partitioned outfmt other than 5,
-    6, or ``6 std...``. outfmt 7 is the same 12-column tabular layout as 6 with
-    added comment lines, which the dashboard's shard merge already skips and
-    re-emits, so 7 merges correctly through the tabular path. Widen the gate so
-    the dashboard's New Search ``outfmt 7`` selection (and the OpenAPI plane,
-    which copies this patch into its build context) can run sharded.
+    6, or ``6 std...``. The dashboard shard merge
+    (``merge-sharded-results.sh``) is field-aware: it resolves its group/rank/
+    oracle columns BY NAME from the full ``-outfmt`` specifier and re-emits its
+    own comment header, so any tabular ``6``/``7`` layout merges correctly as
+    long as it carries ``evalue`` + ``bitscore`` (the merge fail-closes
+    otherwise with a clear error). Widen the gate so the dashboard's New Search
+    taxonomy toggle and a hand-written extended layout
+    (e.g. ``7 qseqid sseqid staxids sstrand pident evalue bitscore``) can run
+    sharded on both the internal and OpenAPI execution planes. outfmt 5 still
+    rejects extended fields (the XML path has no field-list concept).
     """
     path = root / "src/elastic_blast/elb_config.py"
     _replace_once_unless_present(
@@ -130,14 +135,10 @@ def patch_partitioned_outfmt_gate(root: Path) -> None:
             "            if (\n"
             "                outfmt_code not in {'5', '6', '7'}\n"
             "                or (outfmt_code == '5' and outfmt_extended)\n"
-            "                or (outfmt_code == '6' and outfmt_extended and not "
-            "outfmt_extended.startswith('std'))\n"
-            "                or (outfmt_code == '7' and outfmt_extended and not "
-            "outfmt_extended.startswith('std'))\n"
             "            ):\n"
             "                errors.append(\n"
             "                    'Partitioned BLAST requires outfmt 5 without extended fields, '\n"
-            "                    'outfmt 6, outfmt 7, or \"6 std...\"/\"7 std...\"; '\n"
+            "                    'or tabular outfmt 6/7 (optionally with an extended field list); '\n"
             "                    f'{outfmt} is not supported for merge')\n"
         ),
         "outfmt_code not in {'5', '6', '7'}",
@@ -334,6 +335,30 @@ def patch_finalizer_script(root: Path, merge_script_source: Path) -> None:
             '--include-pattern "*.out.gz" --log-level=ERROR 2>/dev/null; then\n'
         ),
         '--include-pattern "*.out.gz"',
+    )
+    # Preserve the per-shard ``# Fields:`` comment line when concatenating
+    # shard outputs into MERGE_INPUT. Upstream strips every comment with
+    # ``awk '!/^#/'``, which means the authoritative outfmt 7 field list
+    # (``... bit score, subject tax ids, subject sci names``) never reaches
+    # merge-sharded-results.sh. The merge then falls back to the standard
+    # 12-field header even though the data rows carry the extended staxids /
+    # sscinames columns, so the results parser — which derives columns from
+    # the ``# Fields:`` line — silently drops them and the dashboard shows an
+    # empty Scientific Name. Keeping every ``# Fields:`` line (the merge
+    # captures the first and ignores the rest) makes the merged header match
+    # the extended data rows. Plain outfmt 6 input carries no comment lines,
+    # so this is a no-op for the standard layout.
+    _replace_once_unless_present(
+        path,
+        (
+            "                    if ! zcat \"$f\" | awk '!/^#/' "
+            '>> "$MERGE_INPUT"; then\n'
+        ),
+        (
+            "                    if ! zcat \"$f\" | awk '/^# Fields:/ || !/^#/' "
+            '>> "$MERGE_INPUT"; then\n'
+        ),
+        "awk '/^# Fields:/ || !/^#/'",
     )
     _replace_once_unless_present(
         path,
