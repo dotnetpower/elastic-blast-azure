@@ -75,7 +75,7 @@ if not API_TOKEN and not ALLOW_UNAUTHENTICATED:
         "ELB_OPENAPI_ALLOW_UNAUTHENTICATED is not set. All authenticated "
         "endpoints will return 503 until one of these env vars is provided."
     )
-VERSION = "3.7.5"
+VERSION = "3.7.6"
 
 # /v1/ready hard time budget. The endpoint exists so external callers can
 # pre-flight whether a POST /v1/jobs is likely to succeed without paying the
@@ -432,6 +432,18 @@ def _db_name_from_value(value: str) -> str:
     return value.strip().strip("/").split("/")[-1] or "unknown"
 
 
+# BLAST+ version pinned by the ElasticBLAST release this OpenAPI plane ships
+# alongside. The OpenAPI container does NOT install the BLAST+ binaries
+# (they only live on the in-cluster search pods), so the binary-probe branch
+# below always fails inside the deployed pod and the function used to fall
+# through to ``"unknown"``. That nullified blast_version in every dashboard
+# job payload until the result XML branch in ``_blast_version_from_result``
+# happened to fire -- which never does for ``-outfmt 6/7`` (tabular) runs.
+# Keep this in sync with the ``ELB_DOCKER_VERSION`` comment in
+# elastic-blast-azure src/elastic_blast/constants.py (currently 2.17.0).
+_BLAST_PLUS_PINNED_VERSION = "2.17.0+"
+
+
 @lru_cache(maxsize=1)
 def _blast_version_detail() -> dict[str, str]:
     env_version = os.environ.get("ELB_BLAST_VERSION", "").strip()
@@ -447,7 +459,16 @@ def _blast_version_detail() -> dict[str, str]:
             continue
     if env_version:
         return {"version": env_version, "detail": env_version, "source": "ELB_BLAST_VERSION"}
-    return {"version": "unknown", "detail": "", "source": "not_available"}
+    # Last-resort: the BLAST+ version pinned by this ElasticBLAST release.
+    # Better than "unknown" for the typical tabular-outfmt run where neither
+    # the binary nor the XML result file can supply the value. ``source`` makes
+    # the provenance visible so the dashboard / a curious operator can tell it
+    # apart from a probed value.
+    return {
+        "version": _BLAST_PLUS_PINNED_VERSION,
+        "detail": _BLAST_PLUS_PINNED_VERSION,
+        "source": "elastic_blast_release_pin",
+    }
 
 
 def _db_version_detail(db_name: str) -> dict[str, str]:
@@ -486,7 +507,12 @@ def _db_version_detail(db_name: str) -> dict[str, str]:
                     "number_of_sequences": str(metadata.get("number-of-sequences") or ""),
                     "number_of_letters": str(metadata.get("number-of-letters") or ""),
                 }
-                return {"version": effective_version, "detail": json.dumps(detail, sort_keys=True), "source": "blastdb_metadata"}
+                # Return ``detail`` as a nested object, NOT a JSON-encoded
+                # string. The dashboard surfaces this verbatim under
+                # ``payload.external.db_version_detail.detail``; serialising
+                # to a string here forced the SPA to render an escaped JSON
+                # blob in the job details panel instead of structured fields.
+                return {"version": effective_version, "detail": detail, "source": "blastdb_metadata"}
         except Exception as exc:
             logger.debug("DB version metadata unavailable for %s: %s", db_name, str(exc)[:200])
         finally:
@@ -2535,6 +2561,55 @@ def _k8s_pod_stuck_reason(elb_job_id: str) -> str | None:
     return None
 
 
+def _notify_terminal_transition(job_id: str, updates: dict[str, Any]) -> None:
+    """Best-effort webhook on natural running -> terminal flips.
+
+    ``_refresh_job_status`` only reaches this point after the early-out for
+    already-terminal/queued jobs, so any ``status`` in ``_TERMINAL_STATES``
+    sitting in ``updates`` is a true running->terminal transition that the
+    dashboard would otherwise only learn about via its own poll cadence. The
+    submit/cancel paths already notify on their own terminal events; this
+    closes the gap for the most common case (natural completion) and for
+    K8s-derived failure detection (``stuck_reason`` is handled by
+    ``_cancel_job`` which already notifies). Failures here are swallowed --
+    the webhook is best-effort and must never block status persistence.
+    """
+    new_status = str(updates.get("status") or "")
+    if new_status not in _TERMINAL_STATES:
+        return
+    payload: dict[str, Any] = {"event": new_status, "status": new_status}
+    error = updates.get("error")
+    if error:
+        payload["error"] = str(error)[:200]
+    try:
+        _webhook_notify(job_id, payload)
+    except Exception:
+        pass
+
+
+def _snapshot_k8s_summary_for_terminal(
+    job: dict[str, Any], elb_job_id: str
+) -> dict[str, Any] | None:
+    """Return a fresh k8s job summary to attach to a terminal-flip update.
+
+    The marker-driven completion paths used to skip the kubectl call entirely,
+    so a job that flipped to ``completed`` via the success marker landed in
+    the dashboard with ``execution.shard_count = 0`` and
+    ``shards_succeeded = 0`` (issue #18) because the execution counters in
+    ``_external_job_payload`` are populated from ``k8s_summary``. Snapshot it
+    one last time on the terminal transition so the recorded summary reflects
+    the final fan-out. Returns ``None`` if the kubectl call failed AND the
+    existing summary is usable -- never overwrite a real summary with an
+    error stub.
+    """
+    snapshot = _k8s_job_summary(elb_job_id)
+    if snapshot.get("error"):
+        existing = job.get("k8s_summary") or {}
+        if isinstance(existing, dict) and existing.get("total"):
+            return None
+    return snapshot
+
+
 def _refresh_job_status(job_id: str) -> dict[str, Any] | None:
     with _jobs_lock:
         job = dict(_jobs.get(job_id, {}))
@@ -2546,7 +2621,17 @@ def _refresh_job_status(job_id: str) -> dict[str, Any] | None:
     elb_job_id = _effective_elb_job_id(job)
     marker = _job_marker_phase(job.get("results", ""), elb_job_id)
     if marker == "failed":
-        return _update_job(job_id, status="failed", phase="failed", last_progress_at=_now_iso())
+        updates: dict[str, Any] = {
+            "status": "failed",
+            "phase": "failed",
+            "last_progress_at": _now_iso(),
+        }
+        summary_snapshot = _snapshot_k8s_summary_for_terminal(job, elb_job_id)
+        if summary_snapshot is not None:
+            updates["k8s_summary"] = summary_snapshot
+        result = _update_job(job_id, **updates)
+        _notify_terminal_transition(job_id, updates)
+        return result
     if marker == "completed":
         # The finalizer uploads every result artifact (shard ``batch_*.out.gz``
         # and, in DB-partitioned runs, ``merged_results.out.gz``) *before* it
@@ -2558,13 +2643,22 @@ def _refresh_job_status(job_id: str) -> dict[str, Any] | None:
         # branch below) so status never flips to ``completed`` while
         # ``/results`` would still 404.
         if _list_result_files(job):
-            return _update_job(
-                job_id,
-                status="completed",
-                phase="completed",
-                completed_at=_now_iso(),
-                last_progress_at=_now_iso(),
-            )
+            updates = {
+                "status": "completed",
+                "phase": "completed",
+                "completed_at": _now_iso(),
+                "last_progress_at": _now_iso(),
+            }
+            # Snapshot the final K8s fan-out so the dashboard's
+            # ``execution.shard_count`` / ``shards_succeeded`` projection has
+            # the real numbers instead of the stale (often empty) value left
+            # over from the last polling pass before the marker landed.
+            summary_snapshot = _snapshot_k8s_summary_for_terminal(job, elb_job_id)
+            if summary_snapshot is not None:
+                updates["k8s_summary"] = summary_snapshot
+            result = _update_job(job_id, **updates)
+            _notify_terminal_transition(job_id, updates)
+            return result
         # Marker present but the listing has not caught up yet. Hold at
         # ``finalizing`` and re-check on the next poll; this self-heals within
         # seconds. Bound the hold by RESULTS_VISIBILITY_GRACE_SECONDS so a
@@ -2573,13 +2667,18 @@ def _refresh_job_status(job_id: str) -> dict[str, Any] | None:
         # marker (the artifacts are durably written per the finalizer contract).
         seen_at = job.get("success_marker_seen_at") or _now_iso()
         if _age_seconds(seen_at) > RESULTS_VISIBILITY_GRACE_SECONDS:
-            return _update_job(
-                job_id,
-                status="completed",
-                phase="completed",
-                completed_at=_now_iso(),
-                last_progress_at=_now_iso(),
-            )
+            updates = {
+                "status": "completed",
+                "phase": "completed",
+                "completed_at": _now_iso(),
+                "last_progress_at": _now_iso(),
+            }
+            summary_snapshot = _snapshot_k8s_summary_for_terminal(job, elb_job_id)
+            if summary_snapshot is not None:
+                updates["k8s_summary"] = summary_snapshot
+            result = _update_job(job_id, **updates)
+            _notify_terminal_transition(job_id, updates)
+            return result
         return _update_job(
             job_id,
             status="running",
@@ -2592,13 +2691,14 @@ def _refresh_job_status(job_id: str) -> dict[str, Any] | None:
     summary = _k8s_job_summary(elb_job_id)
     stuck_reason = _k8s_pod_stuck_reason(elb_job_id)
     previous_summary = job.get("k8s_summary")
-    updates: dict[str, Any] = {"k8s_summary": summary}
+    updates = {"k8s_summary": summary}
     if summary != previous_summary:
         updates["last_progress_at"] = _now_iso()
 
     if stuck_reason:
         updates.update({"status": "failed", "phase": "stuck_cancelled", "error": stuck_reason})
         refreshed = _update_job(job_id, **updates)
+        # ``_cancel_job`` already fires the failure webhook -- do not double-notify.
         _cancel_job(job_id, stuck_reason, terminal_status="failed")
         return refreshed
     if summary.get("submit_failed_terminal"):
@@ -2628,7 +2728,9 @@ def _refresh_job_status(job_id: str) -> dict[str, Any] | None:
             updates.update({"status": "completed", "phase": "completed", "completed_at": _now_iso()})
         else:
             updates.update({"phase": "submitting"})
-    return _update_job(job_id, **updates)
+    result = _update_job(job_id, **updates)
+    _notify_terminal_transition(job_id, updates)
+    return result
 
 
 def _cancel_job(job_id: str, reason: str, *, terminal_status: str = "cancelled") -> None:
@@ -2953,6 +3055,15 @@ async def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] 
     # not the historical shared PV/PVC path.
     config["cluster"]["exp-use-local-ssd"] = "true"
     config["cluster"]["reuse"] = "true"
+    # Skip re-staging warmed DB shards onto node-local SSD when the dashboard
+    # already ran an explicit warmup (app=elb-db-warmup) for this DB on the
+    # cluster. kubernetes.py:_dashboard_warmup_jobs_ready verifies every expected
+    # shard has a succeeded warmup job (and falls back to init-ssd otherwise), so
+    # this is safe to leave on unconditionally; the env lever is an escape hatch
+    # — set ELB_OPENAPI_SKIP_WARMED_SSD_INIT=0 to force the historical init-ssd
+    # staging path on every submit.
+    if os.environ.get("ELB_OPENAPI_SKIP_WARMED_SSD_INIT", "1").strip().lower() not in {"0", "false", "no"}:
+        config["cluster"]["exp-skip-warmed-ssd-init"] = "true"
     config["blast"]["db"] = db_url
     config["blast"]["queries"] = queries_url
     config["blast"]["results"] = results_url
