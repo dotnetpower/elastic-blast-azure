@@ -2211,8 +2211,18 @@ class JobSubmitRequest(BaseModel):
     **Mode B** (Inline FASTA): provide `query_fasta` + short `db` name.
     Server auto-uploads query to blob and resolves all URLs.
     Optionally filter by `taxid` + `is_inclusive`.
+
+    Any field a caller sends beyond this schema (e.g. `request_id`) is preserved
+    verbatim (bounded) under `passthrough` on the submit / status / result
+    payloads so an external caller can correlate. See `_sanitize_passthrough`.
     """
-    model_config = {"json_schema_extra": {"examples": [_MODE_A_EXAMPLE["value"], _MODE_B_EXAMPLE["value"], _MODE_B_TAXID_EXAMPLE["value"]]}}
+    model_config = {
+        # Keep unknown fields (e.g. a caller's request_id) instead of dropping
+        # them, so they can be echoed back on status/result. They are read via
+        # `model_extra` and bounded by `_sanitize_passthrough` before storage.
+        "extra": "allow",
+        "json_schema_extra": {"examples": [_MODE_A_EXAMPLE["value"], _MODE_B_EXAMPLE["value"], _MODE_B_TAXID_EXAMPLE["value"]]},
+    }
 
     program: str = Field("blastn", description="BLAST program (blastn, blastp, blastx, tblastn, etc.)", examples=["blastn", "blastp", "blastx"])
     db: str = Field(..., description="Full Blob URL (mode A) or short DB name like '16S_ribosomal_RNA' (mode B)", examples=["16S_ribosomal_RNA"])
@@ -2232,6 +2242,53 @@ class JobSubmitRequest(BaseModel):
     resource_profile: str = Field("standard", description="Server-side sizing policy label, e.g. standard or core_nt_safe.")
     submission_source: str = Field(_DEFAULT_EXTERNAL_SOURCE, description="Effective source of the submission: dashboard, external_api, terminal, or system.")
     external_correlation_id: Optional[str] = Field(None, max_length=128, description="Caller-side correlation id, e.g. dashboard job id.")
+
+# Bounds for caller-supplied pass-through fields. Job state is persisted in a K8s
+# ConfigMap (~1 MiB cap) and echoed on every status/result poll, so an oversized
+# or hostile producer must not be able to bloat either. Values are flattened to
+# JSON scalars / bounded strings so the payload stays small and flat.
+_PASSTHROUGH_MAX_KEYS = 32
+_PASSTHROUGH_MAX_KEY_LEN = 128
+_PASSTHROUGH_MAX_VALUE_LEN = 1024
+_PASSTHROUGH_MAX_TOTAL_BYTES = 16384
+
+
+def _sanitize_passthrough(extra: Any) -> dict[str, Any]:
+    """Bound + flatten the caller-supplied fields beyond the submit schema.
+
+    ``extra`` is ``JobSubmitRequest.model_extra`` — the dict of fields a caller
+    sent that the model does not declare (e.g. ``request_id``). They are kept so
+    the submit / status / result payloads can echo them back for correlation,
+    but bounded first: at most ``_PASSTHROUGH_MAX_KEYS`` keys, each key/value
+    length capped, complex (dict/list) values flattened to a bounded JSON string,
+    and a total-size budget. Returns ``{}`` when there is nothing usable, so a
+    job submitted without extra fields stores and echoes no ``passthrough`` key.
+    """
+    if not isinstance(extra, dict) or not extra:
+        return {}
+    out: dict[str, Any] = {}
+    total = 0
+    for raw_key, raw_value in extra.items():
+        if len(out) >= _PASSTHROUGH_MAX_KEYS:
+            break
+        key = str(raw_key).strip()[:_PASSTHROUGH_MAX_KEY_LEN]
+        if not key:
+            continue
+        if raw_value is None or isinstance(raw_value, (bool, int, float)):
+            value: Any = raw_value
+        elif isinstance(raw_value, str):
+            value = raw_value[:_PASSTHROUGH_MAX_VALUE_LEN]
+        else:
+            try:
+                value = json.dumps(raw_value, default=str)[:_PASSTHROUGH_MAX_VALUE_LEN]
+            except (TypeError, ValueError):
+                value = str(raw_value)[:_PASSTHROUGH_MAX_VALUE_LEN]
+        total += len(key) + len(str(value))
+        if total > _PASSTHROUGH_MAX_TOTAL_BYTES:
+            break
+        out[key] = value
+    return out
+
 
 # ── Jobs — Submit ──────────────────────────────────────────────────────────
 
@@ -2865,6 +2922,9 @@ def _external_job_payload(job_info: dict[str, Any]) -> dict[str, Any]:
         "submission_source": job_info.get("submission_source", _DEFAULT_EXTERNAL_SOURCE),
         "external_correlation_id": job_info.get("external_correlation_id", ""),
     }
+    _pt = job_info.get("passthrough")
+    if isinstance(_pt, dict) and _pt:
+        payload["passthrough"] = _pt
     summary = job_info.get("k8s_summary") if isinstance(job_info.get("k8s_summary"), dict) else {}
     effective_elb_job_id = _effective_elb_job_id(job_info)
     if effective_elb_job_id.startswith("job-") and job_info.get("elb_job_id") != effective_elb_job_id:
@@ -2988,13 +3048,16 @@ async def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] 
         raise HTTPException(400, f"Invalid program. Must be: {', '.join(sorted(_VALID_PROGRAMS))}")
     submission_source = _effective_submission_source(req.submission_source, x_elb_internal_token)
     external_correlation_id = _safe_detail_value(req.external_correlation_id)
+    # Caller-supplied fields beyond the schema (e.g. request_id) — preserved so
+    # they can be echoed on status/result for correlation. Bounded for safety.
+    passthrough = _sanitize_passthrough(getattr(req, "model_extra", None))
 
     if req.idempotency_key:
         job_id = _job_id_from_idempotency_key(f"{submission_source}:{req.idempotency_key}")
         with _jobs_lock:
             existing = _jobs.get(job_id)
         if existing:
-            return {
+            replay: dict[str, Any] = {
                 "job_id": job_id,
                 "status": existing.get("status", "unknown"),
                 "submission_source": existing.get("submission_source", submission_source),
@@ -3005,6 +3068,12 @@ async def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] 
                 "message": "Existing job returned for idempotency_key.",
                 "status_url": f"/v1/jobs/{job_id}/status",
             }
+            # Echo the ORIGINAL job's pass-through (a replay must return the
+            # same handle, not the replay caller's fields).
+            existing_passthrough = existing.get("passthrough")
+            if isinstance(existing_passthrough, dict) and existing_passthrough:
+                replay["passthrough"] = existing_passthrough
+            return replay
     else:
         job_id = uuid.uuid4().hex[:12]
     is_b = req.query_fasta is not None
@@ -3124,6 +3193,8 @@ async def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] 
         "blast_version_detail": blast_version,
         "results": results_url, "config_ini": config_text,
     }
+    if passthrough:
+        job_data["passthrough"] = passthrough
     _save_job(job_id, job_data, require_persist=True)
 
     dispatched = _dispatcher_once()
@@ -3132,7 +3203,7 @@ async def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] 
     with _jobs_lock:
         current_status = _jobs.get(job_id, {}).get("status")
     status = current_status or ("dispatching" if dispatched else "queued")
-    return {
+    response: dict[str, Any] = {
         "job_id": job_id,
         "status": status,
         "queue_position": position,
@@ -3147,6 +3218,9 @@ async def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] 
         "message": f"Poll GET /v1/jobs/{job_id}/status for progress.",
         "status_url": f"/v1/jobs/{job_id}/status",
     }
+    if passthrough:
+        response["passthrough"] = passthrough
+    return response
 
 # ── Jobs — List ────────────────────────────────────────────────────────────
 
@@ -3195,6 +3269,9 @@ async def get_job_status(job_id: str):
         "error": job_info.get("error", ""),
         "kubernetes": {"summary": job_info.get("k8s_summary", {})},
     }
+    _pt = job_info.get("passthrough")
+    if isinstance(_pt, dict) and _pt:
+        _status_payload["passthrough"] = _pt
     if _eta is not None and _eta.enabled() and job_info.get("status") in {"queued", "dispatching", "submitting", "running"}:
         with _jobs_lock:
             _eta_jobs = [dict(v) for v in _jobs.values()]
