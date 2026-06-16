@@ -3031,6 +3031,45 @@ def _safe_result_blob_path(value: str, fallback_filename: str) -> str:
     return blob_path
 
 
+@lru_cache(maxsize=None)
+def _elb_recognises_cluster_param(param_name: str) -> bool:
+    """Return True when the bundled elastic-blast accepts a ``[cluster]`` config param.
+
+    During a rolling OpenAPI image rebuild this app code (COPYed into the image)
+    can begin emitting a new optional ``[cluster]`` optimisation hint before the
+    bundled elastic-blast (pinned by the Dockerfile ``ELB_REF`` git clone) is
+    advanced to a revision that recognises it. elastic-blast's config validator
+    (``ElasticBlastConfig._validate_config_parser``) rejects ANY parameter not
+    present in its dataclass mappings with ``Unrecognized configuration
+    parameter "<name>" in section "cluster"`` — turning an optional hint into a
+    hard submit failure.
+
+    Mirror elastic-blast's own mapping (the same source the validator scans) so
+    we only write a param it will accept. On any import/introspection failure,
+    fail CLOSED (treat as unsupported) so a partially-installed or version-skewed
+    runtime can never hard-fail submit over an optional hint.
+    """
+    try:
+        from elastic_blast.constants import CFG_CLUSTER
+        from elastic_blast.elb_config import (
+            AZUREConfig,
+            BlastConfig,
+            ClusterConfig,
+            TimeoutsConfig,
+        )
+    except Exception:
+        return False
+    for cls in (AZUREConfig, BlastConfig, ClusterConfig, TimeoutsConfig):
+        for info in getattr(cls, "mapping", {}).values():
+            if (
+                info is not None
+                and info.section == CFG_CLUSTER
+                and info.param_name == param_name
+            ):
+                return True
+    return False
+
+
 @v1.post("/jobs", tags=["Jobs"], status_code=202, summary="Submit a BLAST search",
           openapi_extra={"requestBody": {"content": {"application/json": {"examples": {
               "mode_a": _MODE_A_EXAMPLE, "mode_b": _MODE_B_EXAMPLE, "mode_b_taxid": _MODE_B_TAXID_EXAMPLE,
@@ -3131,8 +3170,22 @@ async def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] 
     # this is safe to leave on unconditionally; the env lever is an escape hatch
     # — set ELB_OPENAPI_SKIP_WARMED_SSD_INIT=0 to force the historical init-ssd
     # staging path on every submit.
+    #
+    # Only emit the hint when the bundled elastic-blast actually recognises it:
+    # during a rolling rebuild this app code can run ahead of the pinned
+    # elastic-blast (ELB_REF), and writing an unrecognised param hard-fails the
+    # whole submit with "Unrecognized configuration parameter". See
+    # _elb_recognises_cluster_param.
     if os.environ.get("ELB_OPENAPI_SKIP_WARMED_SSD_INIT", "1").strip().lower() not in {"0", "false", "no"}:
-        config["cluster"]["exp-skip-warmed-ssd-init"] = "true"
+        if _elb_recognises_cluster_param("exp-skip-warmed-ssd-init"):
+            config["cluster"]["exp-skip-warmed-ssd-init"] = "true"
+        else:
+            logger.warning(
+                "bundled elastic-blast does not recognise "
+                "'exp-skip-warmed-ssd-init'; omitting the optional warmed-SSD-"
+                "init skip hint to avoid a hard submit failure (version skew — "
+                "rebuild elb-openapi with a newer ELB_REF to restore it)."
+            )
     config["blast"]["db"] = db_url
     config["blast"]["queries"] = queries_url
     config["blast"]["results"] = results_url
