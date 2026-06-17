@@ -157,6 +157,46 @@ def _capture_webhooks(monkeypatch, main) -> list[tuple[str, dict[str, Any]]]:
     return captured
 
 
+def test_external_job_payload_exposes_elb_job_id(main_module, monkeypatch):
+    """The public /v1/jobs payload exposes the elastic-blast ``job-<hash>`` id.
+
+    The dashboard only knows the OpenAPI ``job_id`` and cannot otherwise map an
+    external job to its in-cluster BLAST pods (labelled ``elb-job-id``), so
+    without this it can render the step timeline but never stream the raw pod
+    logs.
+    """
+    monkeypatch.setattr(main_module, "_progress_pct", lambda *_a, **_kw: 42)
+    monkeypatch.setattr(main_module, "_k8s_job_summary", lambda *_a, **_kw: {})
+    job_info = {
+        "job_id": "job-test",
+        "status": "running",
+        "elb_job_id": "job-deadbeefdeadbeefdeadbeefdeadbeef",
+        "created_at": "2026-06-17T00:00:00Z",
+        "program": "blastn",
+        "db": "core_nt",
+    }
+    payload = main_module._external_job_payload(job_info)
+    assert payload["elb_job_id"] == "job-deadbeefdeadbeefdeadbeefdeadbeef"
+
+
+def test_external_job_payload_omits_elb_job_id_when_unknown(main_module, monkeypatch):
+    """No ``elb_job_id`` key until a valid ``job-`` id has been discovered."""
+    monkeypatch.setattr(main_module, "_progress_pct", lambda *_a, **_kw: 42)
+    monkeypatch.setattr(main_module, "_k8s_job_summary", lambda *_a, **_kw: {})
+    monkeypatch.setattr(
+        main_module, "_discover_elb_job_id_from_submit_output", lambda *_a, **_kw: ""
+    )
+    job_info = {
+        "job_id": "job-test2",
+        "status": "running",
+        "created_at": "2026-06-17T00:00:00Z",
+        "program": "blastn",
+        "db": "core_nt",
+    }
+    payload = main_module._external_job_payload(job_info)
+    assert "elb_job_id" not in payload
+
+
 def test_marker_completion_fires_webhook_and_snapshots_summary(main_module, monkeypatch):
     """The dominant case: success marker landed, listing ready → completed.
 

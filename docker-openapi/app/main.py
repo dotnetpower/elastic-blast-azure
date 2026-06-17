@@ -2938,6 +2938,18 @@ def _external_job_payload(job_info: dict[str, Any]) -> dict[str, Any]:
         if updated:
             job_info = updated
         summary = fresh_summary
+    # Expose the elastic-blast job id (the ``job-<hash>`` stamped on the
+    # in-cluster k8s objects via the ``elb-job-id`` label / ``BLAST_ELB_JOB_ID``
+    # env). The dashboard only knows the OpenAPI ``job_id`` and cannot otherwise
+    # map an external job to its BLAST pods, so without this it can render the
+    # execution-step timeline but never stream the raw pod logs. Emit only a
+    # GENUINE discovered id: ``_effective_elb_job_id`` falls back to the OpenAPI
+    # ``job_id`` when none has been discovered yet, so guard on it differing from
+    # ``job_id`` to avoid handing the dashboard a non-existent pod selector.
+    if effective_elb_job_id.startswith("job-") and effective_elb_job_id != str(
+        job_info.get("job_id") or ""
+    ):
+        payload["elb_job_id"] = effective_elb_job_id
     if summary:
         payload["execution"] = {
             "shard_count": int(summary.get("total", 0) or 0),
@@ -3287,6 +3299,7 @@ async def list_jobs():
         {"job_id": jid, "status": i["status"], "mode": i.get("mode","A"),
          "created_at": i.get("created_at",""), "program": i.get("program",""),
          "cluster_name": i.get("cluster_name",""), "db": i.get("db",""),
+         "elb_job_id": i.get("elb_job_id",""),
          "priority": i.get("priority", _PRIORITY_LABELS["normal"]),
          "queue_position": _queued_position(jid)}
         for jid, i in items
