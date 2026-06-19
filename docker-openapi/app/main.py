@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from importlib.resources import files
 from pathlib import Path
-from threading import Event, Lock, Thread
+from threading import BoundedSemaphore, Event, Lock, Thread
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
@@ -129,6 +129,17 @@ READY_MASK_CLUSTER_NAME = os.environ.get(
 ).strip().lower() in {"1", "true", "yes"}
 
 MAX_ACTIVE_SUBMISSIONS = max(1, int(os.environ.get("ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS", "1")))
+# Cap concurrent azcopy subprocesses spawned by the submit path. submit_job /
+# external_submit run in FastAPI's threadpool (default 40 sync slots), and each
+# Mode-B submit spawns ~2 azcopy processes (FASTA upload + the *uncached* DB-
+# metadata fetch). Left unbounded, a ~50-submit burst could fan out to dozens of
+# concurrent azcopy processes and OOM the pod under its memory limit — the very
+# #54 failure re-created via a new path. A small semaphore keeps the submit path
+# many-x more parallel than the old serialized (single-event-loop) model while
+# bounding peak subprocess memory well under the limit; the admit cap still
+# governs how many jobs actually run.
+AZCOPY_CONCURRENCY = max(1, int(os.environ.get("ELB_OPENAPI_AZCOPY_CONCURRENCY", "8")))
+_azcopy_slots = BoundedSemaphore(AZCOPY_CONCURRENCY)
 DISPATCH_INTERVAL_SECONDS = max(1, int(os.environ.get("ELB_OPENAPI_DISPATCH_INTERVAL_SECONDS", "5")))
 WATCHDOG_INTERVAL_SECONDS = max(5, int(os.environ.get("ELB_OPENAPI_WATCHDOG_INTERVAL_SECONDS", "60")))
 SUBMIT_STUCK_SECONDS = max(60, int(os.environ.get("ELB_OPENAPI_SUBMIT_STUCK_SECONDS", "7200")))
@@ -487,7 +498,8 @@ def _db_version_detail(db_name: str) -> dict[str, str]:
         try:
             _azcopy_login()
             _cleanup_tmp(local_path)
-            safe_exec(["azcopy", "cp", metadata_url, local_path], timeout=60)
+            with _azcopy_slots:
+                safe_exec(["azcopy", "cp", metadata_url, local_path], timeout=60)
             with open(local_path, encoding="utf-8") as handle:
                 metadata = json.load(handle)
             files = metadata.get("files") if isinstance(metadata.get("files"), list) else []
@@ -2331,7 +2343,8 @@ def _upload_fasta(job_id: str, fasta: str) -> str:
     with open(local, "w") as f: f.write(fasta)
     try:
         _azcopy_login()
-        safe_exec(["azcopy", "cp", local, url], timeout=60)
+        with _azcopy_slots:
+            safe_exec(["azcopy", "cp", local, url], timeout=60)
     finally:
         _cleanup_tmp(local)
     return url

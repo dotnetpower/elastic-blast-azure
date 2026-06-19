@@ -47,3 +47,19 @@ def test_external_submit_is_not_a_coroutine_function() -> None:
         "external_submit must stay a plain def for the same reason as "
         "submit_job (its only delegate); see issue #54."
     )
+
+
+def test_azcopy_concurrency_is_bounded() -> None:
+    """The submit-path azcopy fan-out must stay bounded under a burst.
+
+    Running the submit handlers in the threadpool (the issue #54 fix) lets up to
+    ~40 submits run in parallel, each spawning ~2 azcopy subprocesses. The
+    ``_azcopy_slots`` semaphore caps concurrent azcopy so a burst cannot OOM the
+    pod under its memory limit. This guards against removing the bound.
+    """
+    import threading
+
+    assert isinstance(main._azcopy_slots, threading.BoundedSemaphore)
+    assert main.AZCOPY_CONCURRENCY >= 1
+    # Default must stay well under FastAPI's threadpool (40) so the bound is real.
+    assert main.AZCOPY_CONCURRENCY <= 32
