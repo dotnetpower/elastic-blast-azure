@@ -3086,7 +3086,18 @@ def _elb_recognises_cluster_param(param_name: str) -> bool:
           openapi_extra={"requestBody": {"content": {"application/json": {"examples": {
               "mode_a": _MODE_A_EXAMPLE, "mode_b": _MODE_B_EXAMPLE, "mode_b_taxid": _MODE_B_TAXID_EXAMPLE,
           }}}}})
-async def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] = Header(None, alias="X-ELB-Internal-Token")):
+# Deliberately a plain ``def`` (run in FastAPI's threadpool), NOT ``async def``:
+# the body does blocking I/O (FASTA upload via azcopy, ConfigMap persistence in
+# ``_save_job``, DB-version metadata fetch) with ZERO awaits. As an async handler
+# every submit blocked the single asyncio event loop for its whole duration,
+# which serialised the submit path (~9s/job observed) and — under a concurrent
+# 50-submit burst — starved the ``/healthz`` readiness probe so the pod flapped
+# to NotReady (dashboard issue #54). Running in the threadpool lets concurrent
+# submits proceed in parallel and keeps the event loop free for probes; the
+# server-side admit cap (ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS) still bounds how
+# many jobs actually dispatch. Mirrors the same rationale already applied to the
+# ``/jobs/{id}/status`` handler.
+def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] = Header(None, alias="X-ELB-Internal-Token")):
     """Submit a BLAST search job. Mode is auto-detected:
 
     - **Mode A** — if `queries` and `results` are provided as full Blob URLs
@@ -3490,7 +3501,10 @@ external_v1 = APIRouter(
 
 
 @external_v1.post("/submit", status_code=202, summary="Submit an external ElasticBLAST job")
-async def external_submit(req: ExternalSubmitRequest) -> dict[str, Any]:
+# Plain ``def`` for the same reason as ``submit_job`` (its only delegate): keep
+# the blocking submit path off the asyncio event loop so a concurrent burst does
+# not serialise or starve readiness (issue #54).
+def external_submit(req: ExternalSubmitRequest) -> dict[str, Any]:
     """Public submit contract for direct API callers.
 
     The external contract always uses inline FASTA and BLAST XML output
@@ -3518,7 +3532,7 @@ async def external_submit(req: ExternalSubmitRequest) -> dict[str, Any]:
         submission_source=_DEFAULT_EXTERNAL_SOURCE,
         external_correlation_id=_safe_detail_value(req.external_correlation_id),
     )
-    response = await submit_job(internal)
+    response = submit_job(internal)
     job_info = _get_job_or_404(response["job_id"])
     payload = _external_job_payload(job_info)
     payload["status"] = "queued" if payload["status"] == "running" and job_info.get("status") in {"dispatching", "submitting"} else payload["status"]
