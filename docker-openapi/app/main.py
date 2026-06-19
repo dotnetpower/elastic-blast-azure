@@ -11,6 +11,7 @@ import glob
 import gzip
 import hashlib
 import hmac
+import base64
 import json
 import logging
 import os
@@ -3313,21 +3314,74 @@ def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] = Head
 
 # ── Jobs — List ────────────────────────────────────────────────────────────
 
+# Opaque keyset cursor for /v1/jobs pagination: base64 of
+# "<created_at>\x1f<job_id>". The dashboard proxy folds this into its combined
+# page cursor (dotnetpower/elb-dashboard#51); callers that omit ``limit`` get the
+# full unpaginated list, so older clients are unaffected.
+def _encode_jobs_cursor(created_at: str, job_id: str) -> str:
+    raw = f"{created_at}\x1f{job_id}".encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def _decode_jobs_cursor(cursor: str) -> tuple[str, str] | None:
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+        created_at, job_id = raw.split("\x1f", 1)
+        return created_at, job_id
+    except Exception:
+        return None
+
+
 @v1.get("/jobs", tags=["Jobs"], summary="List all jobs")
-async def list_jobs():
-    """List all tracked BLAST jobs. State is persisted in K8s ConfigMaps."""
+async def list_jobs(
+    limit: Optional[int] = Query(
+        None, ge=1, le=500,
+        description="Max jobs to return, most-recent first. Omit for the full list.",
+    ),
+    cursor: Optional[str] = Query(
+        None, description="Opaque pagination cursor from a previous response's next_cursor.",
+    ),
+):
+    """List tracked BLAST jobs. State is persisted in K8s ConfigMaps.
+
+    Without ``limit`` the full list is returned in insertion order (unchanged
+    legacy behaviour). With ``limit`` the jobs are ordered most-recent first and
+    a ``next_cursor`` is returned for stable keyset pagination; an unparseable
+    ``cursor`` is ignored (degrades to the first page).
+    """
     _ensure_loaded()
     with _jobs_lock:
         items = list(_jobs.items())
-    return {"jobs": [
-        {"job_id": jid, "status": i["status"], "mode": i.get("mode","A"),
-         "created_at": i.get("created_at",""), "program": i.get("program",""),
-         "cluster_name": i.get("cluster_name",""), "db": i.get("db",""),
-         "elb_job_id": i.get("elb_job_id",""),
+    summaries = [
+        {"job_id": jid, "status": i["status"], "mode": i.get("mode", "A"),
+         "created_at": i.get("created_at", ""), "program": i.get("program", ""),
+         "cluster_name": i.get("cluster_name", ""), "db": i.get("db", ""),
+         "elb_job_id": i.get("elb_job_id", ""),
          "priority": i.get("priority", _PRIORITY_LABELS["normal"]),
          "queue_position": _queued_position(jid)}
         for jid, i in items
-    ], "count": len(items)}
+    ]
+    total = len(summaries)
+    if limit is None:
+        # Legacy unpaginated response (backward compatible). next_cursor /
+        # has_more are additive so existing parsers are unaffected.
+        return {"jobs": summaries, "count": total, "next_cursor": None, "has_more": False}
+    # Most-recent first; tie-break on job_id so the (created_at, job_id) keyset
+    # cursor is a total order with no page overlap or gaps.
+    summaries.sort(key=lambda s: (s["created_at"], s["job_id"]), reverse=True)
+    if cursor:
+        decoded = _decode_jobs_cursor(cursor)
+        if decoded is not None:
+            summaries = [
+                s for s in summaries if (s["created_at"], s["job_id"]) < decoded
+            ]
+    page = summaries[:limit]
+    has_more = len(summaries) > limit
+    next_cursor = (
+        _encode_jobs_cursor(page[-1]["created_at"], page[-1]["job_id"])
+        if has_more and page else None
+    )
+    return {"jobs": page, "count": total, "next_cursor": next_cursor, "has_more": has_more}
 
 # ── Jobs — Status ──────────────────────────────────────────────────────────
 
