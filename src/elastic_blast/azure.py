@@ -1104,6 +1104,19 @@ class ElasticBlastAzure(ElasticBlast):
         cpu_req = min(cpu_req, cfg.cluster.num_cpus - 2)
         cpu_req = max(1, cpu_req)
 
+        # Auto-delete completed BLAST Jobs (and their pods) after a bounded
+        # TTL so finished work does not accumulate and hold node
+        # ephemeral-storage indefinitely (dashboard issue #54 finding #2: a
+        # load test left ~100 Succeeded pods that had to be deleted by hand to
+        # relieve DiskPressure). The OpenAPI service derives terminal status
+        # from the Storage SUCCESS.txt marker and persists it, so deleting the
+        # k8s Job after completion does not affect status or result retrieval.
+        # Override with ELB_JOB_TTL_SECONDS; a non-numeric value falls back to
+        # the default.
+        ttl_seconds = os.getenv('ELB_JOB_TTL_SECONDS', '1800')
+        if not ttl_seconds.isdigit():
+            ttl_seconds = '1800'
+
         return {
             'ELB_BLAST_PROGRAM': program,
             'ELB_DB': db,
@@ -1112,6 +1125,7 @@ class ElasticBlastAzure(ElasticBlast):
             'ELB_MEM_LIMIT': str(cfg.cluster.mem_limit),
             'ELB_BLAST_OPTIONS': cfg.blast.options,
             'ELB_BLAST_TIMEOUT': str(cfg.timeouts.blast_k8s * 60),
+            'ELB_JOB_TTL_SECONDS': ttl_seconds,
             'ELB_RESULTS': results_path,
             'ELB_NUM_CPUS_REQ': str(cpu_req),
             'ELB_NUM_CPUS': str(cfg.cluster.num_cpus),

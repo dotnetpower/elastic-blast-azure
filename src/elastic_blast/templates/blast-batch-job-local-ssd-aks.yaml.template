@@ -121,3 +121,4 @@ spec:
       nodeSelector:
         workload: blast
   backoffLimit: 3
+  ttlSecondsAfterFinished: ${ELB_JOB_TTL_SECONDS}
