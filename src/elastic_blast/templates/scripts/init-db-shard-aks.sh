@@ -113,6 +113,18 @@ if [ -f .download-complete ]; then
     fi
 fi
 
+# Self-heal caches staged before the `.nos`/`.not` taxonomy filter index was
+# added to the download set. `.ntf`/`.nto` (OUTPUT) and `.nos`/`.not` (FILTER)
+# are siblings: a taxonomy-capable DB ships all four, a non-taxonomy DB ships
+# none. If `.ntf` is present but `.not`/`.nos` are absent, this cache predates
+# the fix and `-taxids`/`-negative_taxids` would abort with blastn exit 255;
+# invalidate so the corrected pattern re-stages them.
+if [ -f .download-complete ] && [ -s "${ORIG_DB}.ntf" ] \
+    && { [ ! -s "${ORIG_DB}.not" ] || [ ! -s "${ORIG_DB}.nos" ]; }; then
+    echo "CACHE_INCOMPLETE missing taxonomy filter index ${ORIG_DB}.not/.nos"
+    rm -f .download-complete
+fi
+
 if [ -f .download-complete ] && [ -n "$EXPECTED_SOURCE_VERSION" ]; then
     if [ ! -f .download-source-version ]; then
         echo "CACHE_STALE missing source-version marker"
