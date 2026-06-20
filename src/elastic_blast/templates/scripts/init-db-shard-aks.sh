@@ -134,7 +134,7 @@ for VOL in $VOLUMES; do
     [ -n "$PATTERN" ] && PATTERN="${PATTERN};"
     PATTERN="${PATTERN}${VOL}.*"
 done
-PATTERN="${PATTERN};taxdb.btd;taxdb.bti;taxonomy4blast.sqlite3;${ORIG_DB}.ndb;${ORIG_DB}.ntf;${ORIG_DB}.nto"
+PATTERN="${PATTERN};taxdb.btd;taxdb.bti;taxonomy4blast.sqlite3;${ORIG_DB}.ndb;${ORIG_DB}.ntf;${ORIG_DB}.nto;${ORIG_DB}.nos;${ORIG_DB}.not"
 echo "Downloading with pattern: ${PATTERN}"
 
 retry_azcopy cp "${DB_URL}*" . \
