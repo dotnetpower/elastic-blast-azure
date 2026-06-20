@@ -3413,6 +3413,13 @@ async def get_job_status(job_id: str):
         "error": job_info.get("error", ""),
         "kubernetes": {"summary": job_info.get("k8s_summary", {})},
     }
+    if _eta is not None and _eta.enabled() and job_info.get("status") in {"queued", "dispatching", "submitting", "running"}:
+        with _jobs_lock:
+            _eta_jobs = [dict(v) for v in _jobs.values()]
+        _eta_out = _eta.compute_eta(job_info, _eta_jobs, MAX_ACTIVE_SUBMISSIONS)
+        if _eta_out:
+            _status_payload["eta"] = _eta_out
+    return _status_payload
     _pt = job_info.get("passthrough")
     if isinstance(_pt, dict) and _pt:
         _status_payload["passthrough"] = _pt

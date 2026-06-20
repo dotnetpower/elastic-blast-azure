@@ -575,6 +575,20 @@ if [ -f .download-complete ]; then
     fi
 fi
 
+# Self-heal caches staged before the `.nos`/`.not` taxonomy filter index was
+# added to the download set. The DB-level OUTPUT taxonomy files `${ORIG_DB}.ntf`
+# /`.nto` and the FILTER index `${ORIG_DB}.nos`/`.not` are siblings: a
+# taxonomy-capable DB (core_nt) ships all four, a non-taxonomy DB ships none. So
+# if `.ntf` is present locally but `.not`/`.nos` are not, this cache predates the
+# fix and any `-taxids`/`-negative_taxids` search would abort with blastn
+# exit 255 ("the file must exist: '<db>.not'"). Invalidate so the corrected
+# pattern below re-stages them. Non-taxonomy DBs (no local `.ntf`) are untouched.
+if [ -f .download-complete ] && [ -s "${ORIG_DB}.ntf" ] \
+    && { [ ! -s "${ORIG_DB}.not" ] || [ ! -s "${ORIG_DB}.nos" ]; }; then
+    echo "CACHE_INCOMPLETE missing taxonomy filter index ${ORIG_DB}.not/.nos"
+    rm -f .download-complete
+fi
+
 if [ -f .download-complete ] && [ -n "$EXPECTED_SOURCE_VERSION" ]; then
     if [ ! -f .download-source-version ]; then
         echo "CACHE_STALE missing source-version marker"
@@ -596,7 +610,13 @@ for VOL in $VOLUMES; do
     [ -n "$PATTERN" ] && PATTERN="${PATTERN};"
     PATTERN="${PATTERN}${VOL}.*"
 done
-PATTERN="${PATTERN};taxdb.btd;taxdb.bti;taxonomy4blast.sqlite3;${ORIG_DB}.ndb;${ORIG_DB}.ntf;${ORIG_DB}.nto"
+# DB-prefix taxonomy index files. `.ndb;.ntf;.nto` cover the `staxids`/`sscinames`
+# OUTPUT lookup, but the `-taxids`/`-negative_taxids` taxonomy FILTER additionally
+# memory-maps `${ORIG_DB}.nos` and `${ORIG_DB}.not` (the seqid->taxid index). Omitting
+# them makes blastn abort with exit 255 ("the file must exist: '<db>.not'") on any
+# sharded run that carries a taxon include/exclude filter, while non-filtered and
+# OUTPUT-only (outfmt 7 staxids) runs still succeed. Keep all five in the pattern.
+PATTERN="${PATTERN};taxdb.btd;taxdb.bti;taxonomy4blast.sqlite3;${ORIG_DB}.ndb;${ORIG_DB}.ntf;${ORIG_DB}.nto;${ORIG_DB}.nos;${ORIG_DB}.not"
 echo "Downloading with pattern: ${PATTERN}"
 
 retry_azcopy cp "${DB_URL}*" . \
