@@ -6,12 +6,12 @@ optionally forwards events to Control Plane via webhook.
 
 from __future__ import annotations
 
+import base64
 import configparser
 import glob
 import gzip
 import hashlib
 import hmac
-import base64
 import json
 import logging
 import os
