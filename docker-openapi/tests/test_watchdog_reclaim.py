@@ -154,3 +154,43 @@ def test_reclaim_helper_returns_false_when_submit_failed_present(main_module):
     main = main_module
     refreshed = {"job_id": "j", "attempt": 0, "k8s_summary": {"total": 0, "submit_failed": 1}}
     assert main._reclaim_dead_thread_job("j", refreshed) is False
+
+
+# ── startup reconcile shares the SAME bounded reclaim (#62 live-validation fix) ──
+
+
+def test_reconcile_requeues_dead_thread_under_budget(main_module, monkeypatch):
+    """Startup reconcile requeues a dead-thread zombie that is under budget."""
+    main = main_module
+    job_id = _register(main, attempt=1, summary={"total": 0, "submit_failed": 0})
+    monkeypatch.setattr(main, "_has_alive_thread", lambda _jid: False)
+    monkeypatch.setattr(main, "_refresh_job_status", lambda jid: dict(main._jobs[jid]))
+
+    main._reconcile_recovered_jobs()
+
+    assert main._jobs[job_id]["status"] == "queued"
+    assert main._jobs[job_id]["phase"] == "recovered"
+
+
+def test_reconcile_respects_retry_bound_and_fails(main_module, monkeypatch):
+    """Startup reconcile must NOT unconditionally requeue a job past its retry
+    budget — otherwise it resurrects a job the watchdog already failed and
+    re-wedges the dispatcher across restarts (the live-validated 2026-06-21 bug).
+    """
+    main = main_module
+    job_id = _register(main, attempt=3, summary={"total": 0, "submit_failed": 0})
+    monkeypatch.setattr(main, "_has_alive_thread", lambda _jid: False)
+    monkeypatch.setattr(main, "_refresh_job_status", lambda jid: dict(main._jobs[jid]))
+
+    seen: dict = {}
+
+    def _spy_cancel(jid, reason, *, terminal_status="cancelled"):
+        seen.update(jid=jid, terminal_status=terminal_status)
+        main._jobs[jid]["status"] = terminal_status
+
+    monkeypatch.setattr(main, "_cancel_job", _spy_cancel)
+
+    main._reconcile_recovered_jobs()
+
+    assert seen.get("terminal_status") == "failed"
+    assert main._jobs[job_id]["status"] == "failed"

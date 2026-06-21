@@ -38,25 +38,6 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 import submit_coordination as _coord
-from util import run_cancellable, safe_exec
-from schemas import (
-    DEFAULT_EXTERNAL_SOURCE as _DEFAULT_EXTERNAL_SOURCE,
-    BlastOptions,
-    DatabaseList,
-    DatabaseListItem,
-    DatabaseMetadata,
-    ExternalBlastOptions,
-    ExternalSubmitRequest,
-    JobSubmitRequest,
-    _MODE_A_EXAMPLE,
-    _MODE_B_EXAMPLE,
-    _MODE_B_TAXID_EXAMPLE,
-    _PASSTHROUGH_MAX_KEYS,
-    _PASSTHROUGH_MAX_KEY_LEN,
-    _PASSTHROUGH_MAX_TOTAL_BYTES,
-    _PASSTHROUGH_MAX_VALUE_LEN,
-    _sanitize_passthrough,
-)
 from helpers import (
     _age_seconds,
     _cache_trim,
@@ -79,6 +60,27 @@ from helpers import (
     _sanitize_job_id,
     _validate_short_blob_name,
 )
+from schemas import (
+    _MODE_A_EXAMPLE,
+    _MODE_B_EXAMPLE,
+    _MODE_B_TAXID_EXAMPLE,
+    _PASSTHROUGH_MAX_KEY_LEN,
+    _PASSTHROUGH_MAX_KEYS,
+    _PASSTHROUGH_MAX_TOTAL_BYTES,
+    _PASSTHROUGH_MAX_VALUE_LEN,
+    BlastOptions,
+    DatabaseList,
+    DatabaseListItem,
+    DatabaseMetadata,
+    ExternalBlastOptions,
+    ExternalSubmitRequest,
+    JobSubmitRequest,
+    _sanitize_passthrough,
+)
+from schemas import (
+    DEFAULT_EXTERNAL_SOURCE as _DEFAULT_EXTERNAL_SOURCE,
+)
+from util import run_cancellable, safe_exec
 
 try:
     import eta as _eta
@@ -1112,16 +1114,14 @@ def _reconcile_recovered_jobs() -> None:
     for job in recovered:
         job_id = job["job_id"]
         refreshed = _refresh_job_status(job_id) or job
-        summary = refreshed.get("k8s_summary") or {}
-        if refreshed.get("status") in {"dispatching", "submitting"} and not summary.get("total") and not summary.get("submit_failed"):
-            _update_job(
-                job_id,
-                status="queued",
-                phase="recovered",
-                queued_at=_now_iso(),
-                last_progress_at=_now_iso(),
-                error="",
-            )
+        if refreshed.get("status") in {"dispatching", "submitting"}:
+            # Delegate to the SAME bounded reclaim the watchdog uses (#62) so a
+            # job that keeps losing its thread across pod restarts is failed once
+            # its SUBMIT_MAX_RETRIES budget is spent instead of being requeued
+            # unconditionally here. An unbounded requeue in this startup pass
+            # would otherwise resurrect a job the watchdog already failed and
+            # re-wedge the dispatcher across restarts (live-validated 2026-06-21).
+            _reclaim_dead_thread_job(job_id, refreshed)
 
 
 def _save_job(job_id: str, data: dict[str, Any], *, require_persist: bool = False) -> dict[str, Any]:
