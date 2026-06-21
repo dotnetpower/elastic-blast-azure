@@ -39,6 +39,46 @@ from starlette.background import BackgroundTask
 
 import submit_coordination as _coord
 from util import run_cancellable, safe_exec
+from schemas import (
+    DEFAULT_EXTERNAL_SOURCE as _DEFAULT_EXTERNAL_SOURCE,
+    BlastOptions,
+    DatabaseList,
+    DatabaseListItem,
+    DatabaseMetadata,
+    ExternalBlastOptions,
+    ExternalSubmitRequest,
+    JobSubmitRequest,
+    _MODE_A_EXAMPLE,
+    _MODE_B_EXAMPLE,
+    _MODE_B_TAXID_EXAMPLE,
+    _PASSTHROUGH_MAX_KEYS,
+    _PASSTHROUGH_MAX_KEY_LEN,
+    _PASSTHROUGH_MAX_TOTAL_BYTES,
+    _PASSTHROUGH_MAX_VALUE_LEN,
+    _sanitize_passthrough,
+)
+from helpers import (
+    _age_seconds,
+    _cache_trim,
+    _cleanup_tmp,
+    _db_name_from_value,
+    _decode_jobs_cursor,
+    _duration_seconds,
+    _encode_jobs_cursor,
+    _job_id_from_idempotency_key,
+    _last_json,
+    _molecule_label,
+    _now_iso,
+    _parse_ts,
+    _redact_config,
+    _resolve_molecule_type,
+    _safe_detail_value,
+    _safe_label_value,
+    _safe_result_blob_path,
+    _safe_result_filename,
+    _sanitize_job_id,
+    _validate_short_blob_name,
+)
 
 try:
     import eta as _eta
@@ -147,6 +187,17 @@ SUBMIT_STUCK_SECONDS = max(60, int(os.environ.get("ELB_OPENAPI_SUBMIT_STUCK_SECO
 PENDING_STUCK_SECONDS = max(300, int(os.environ.get("ELB_OPENAPI_PENDING_STUCK_SECONDS", "1800")))
 RUNNING_IDLE_SECONDS = max(300, int(os.environ.get("ELB_OPENAPI_RUNNING_IDLE_SECONDS", "10800")))
 FINALIZER_STUCK_SECONDS = max(300, int(os.environ.get("ELB_OPENAPI_FINALIZER_STUCK_SECONDS", "1800")))
+# #62: a dispatching/submitting job whose in-process submit thread died (pod
+# restart / cluster stop mid-submit) must release its MAX_ACTIVE_SUBMISSIONS
+# slot within one watchdog tick, not after SUBMIT_STUCK_SECONDS (2h). Otherwise
+# a few post-restart zombies hold every slot and the dispatcher wedges
+# (throughput -> 0). RECLAIM_GRACE_SECONDS keeps the watchdog from racing a job
+# that was just claimed (status=dispatching) but whose submit thread has not
+# started yet; SUBMIT_MAX_RETRIES bounds the requeue loop so a job that keeps
+# losing its thread (cluster still flaky / cold-staging then stops again)
+# eventually fails instead of re-sticking the dispatcher forever.
+RECLAIM_GRACE_SECONDS = max(5, int(os.environ.get("ELB_OPENAPI_RECLAIM_GRACE_SECONDS", "45")))
+SUBMIT_MAX_RETRIES = max(1, int(os.environ.get("ELB_OPENAPI_SUBMIT_MAX_RETRIES", "3")))
 # Grace window for the SUCCESS marker to become consistent with the result
 # blob listing. The finalizer uploads every artifact before writing
 # metadata/SUCCESS.txt, so when the marker is visible the artifacts are already
@@ -167,7 +218,6 @@ _ACTIVE_STATES = {"dispatching", "submitting", "running"}
 _QUEUED_STATES = {"queued"}
 _PRIORITY_LABELS = {"low": 25, "normal": 50, "high": 75, "urgent": 100}
 _SUBMISSION_SOURCES = {"dashboard", "external_api", "terminal", "system"}
-_DEFAULT_EXTERNAL_SOURCE = "external_api"
 _RESULT_FILE_RE = re.compile(r"(?P<name>[^\s;]+\.(?:xml|out)(?:\.gz)?)", re.IGNORECASE)
 
 _TOOL_PATH = "/opt/venv/bin"
@@ -357,39 +407,6 @@ def _cm_name(job_id: str) -> str:
     return f"{_CM_PREFIX}{job_id}"
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _parse_ts(value: Any) -> float:
-    if not value:
-        return 0.0
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
-    except Exception:
-        return 0.0
-
-
-def _duration_seconds(start: Any, end: Any | None = None) -> int | None:
-    start_ts = _parse_ts(start)
-    if start_ts <= 0:
-        return None
-    end_ts = _parse_ts(end) if end else time.time()
-    if end_ts <= 0:
-        return None
-    return max(0, int(end_ts - start_ts))
-
-
-def _age_seconds(value: Any) -> float:
-    ts = _parse_ts(value)
-    return max(0.0, time.time() - ts) if ts else 0.0
-
-
-def _safe_label_value(value: Any, default: str = "unknown") -> str:
-    raw = re.sub(r"[^a-z0-9_.-]", "-", str(value or default).lower()).strip(".-_")
-    return (raw or default)[:63]
-
-
 def _normalise_priority(priority: int | str | None) -> int:
     if isinstance(priority, str):
         label = priority.strip().lower()
@@ -418,30 +435,6 @@ def _effective_submission_source(value: str | None, internal_token: str | None) 
     if not INTERNAL_TOKEN or not internal_token or not hmac.compare_digest(internal_token, INTERNAL_TOKEN):
         raise HTTPException(403, "trusted submission_source requires internal authentication")
     return source
-
-
-def _safe_detail_value(value: str | None, *, max_len: int = 128) -> str:
-    raw = str(value or "").strip()
-    if len(raw) > max_len:
-        raise HTTPException(400, f"value must be at most {max_len} characters")
-    if re.search(r"[\x00-\x1f]", raw):
-        raise HTTPException(400, "value must not contain control characters")
-    return raw
-
-
-def _job_id_from_idempotency_key(key: str) -> str:
-    cleaned = key.strip()
-    if not cleaned or len(cleaned) > 256:
-        raise HTTPException(400, "idempotency_key must be 1-256 characters")
-    return hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:12]
-
-
-def _db_name_from_value(value: str) -> str:
-    parsed = urlparse(value)
-    if parsed.scheme == "https":
-        parts = [p for p in parsed.path.split("/") if p]
-        return parts[-1] if parts else "unknown"
-    return value.strip().strip("/").split("/")[-1] or "unknown"
 
 
 # BLAST+ version pinned by the ElasticBLAST release this OpenAPI plane ships
@@ -677,62 +670,6 @@ _db_negative_cache: "OrderedDict[tuple[str, str], float]" = OrderedDict()
 _db_list_cache: dict[str, dict[str, Any]] = {}
 _db_metadata_lock = Lock()
 _db_list_lock = Lock()
-
-
-def _cache_trim(cache: "OrderedDict[Any, Any]", limit: int) -> None:
-    """Trim ``cache`` down to ``limit`` entries, evicting the LRU end.
-
-    Callers must hold the cache's lock. ``OrderedDict.popitem(last=False)``
-    removes the least-recently-touched entry, so callers that promote on
-    hit via ``move_to_end`` get true access-LRU behaviour.
-    """
-    while len(cache) > limit:
-        cache.popitem(last=False)
-
-
-_MOLECULE_TYPE_MAP: dict[str, tuple[Literal["dna", "protein"], str]] = {
-    "nucl": ("dna", "mixed DNA"),
-    "nucleotide": ("dna", "mixed DNA"),
-    "nucleotides": ("dna", "mixed DNA"),
-    "dna": ("dna", "mixed DNA"),
-    "prot": ("protein", "protein"),
-    "protein": ("protein", "protein"),
-    "proteins": ("protein", "protein"),
-}
-
-
-def _resolve_molecule_type(
-    molecule_type_raw: str | None,
-) -> tuple[Literal["dna", "protein"], str]:
-    """Map a raw molecule token to ``(molecule_type, molecule_label)``.
-
-    Unknown tokens raise ``ValueError`` rather than silently falling
-    back to ``protein`` so a future NCBI molecule class surfaces as an
-    operator-visible 500 instead of a silently mislabelled response.
-    """
-    key = (molecule_type_raw or "").casefold()
-    if not key:
-        raise ValueError("empty molecule_type")
-    try:
-        return _MOLECULE_TYPE_MAP[key]
-    except KeyError as exc:
-        raise ValueError(f"unsupported molecule_type: {molecule_type_raw!r}") from exc
-
-
-def _molecule_label(molecule_type_raw: str | None) -> str:
-    """Friendly label for the BLAST molecule type (matches the dashboard).
-
-    Unknown values pass through unchanged. Use :func:`_resolve_molecule_type`
-    inside the v1 metadata path where unknown values should surface as an
-    error rather than a guess.
-    """
-    if not molecule_type_raw:
-        return ""
-    try:
-        _, label = _resolve_molecule_type(molecule_type_raw)
-    except ValueError:
-        return molecule_type_raw
-    return label
 
 
 class _MetadataFetchError(Exception):
@@ -1475,44 +1412,8 @@ def _validate_blob_url(url: str, field: str) -> None:
         raise ValueError(f"{field} contains path traversal or empty segments")
 
 
-def _validate_short_blob_name(value: str, field: str) -> None:
-    if not value or value.startswith("/") or ".." in value or "?" in value or "#" in value:
-        raise ValueError(f"{field} must be a safe blob path without query strings or traversal")
-
-def _sanitize_job_id(job_id: str) -> str:
-    cleaned = re.sub(r"[^a-f0-9]", "", job_id.lower())
-    if len(cleaned) < 6 or len(cleaned) > 12:
-        raise HTTPException(status_code=400, detail="Invalid job_id format")
-    return cleaned
-
 def _blob_base() -> str:
     return f"https://{STORAGE_ACCOUNT}.blob.core.windows.net"
-
-_CONFIG_SECRET_PARTS = (
-    "key", "secret", "token", "password", "passwd", "pwd",
-    "credential", "sas", "signature", "sig",
-    "connection_string", "connectionstring",
-)
-
-
-def _redact_config(cfg: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
-    """Mask any value whose key looks like a secret, in case the deployment
-    accidentally ships a stale ``elb-cfg.ini`` containing a storage account
-    key, SAS token, or other credential. The endpoint is auth-gated, but
-    operators may still legitimately copy the response into chat or tickets,
-    so leaking secrets through this surface is unacceptable.
-    """
-    redacted: dict[str, dict[str, str]] = {}
-    for section, items in cfg.items():
-        out: dict[str, str] = {}
-        for k, v in items.items():
-            lower_k = k.lower()
-            if any(part in lower_k for part in _CONFIG_SECRET_PARTS):
-                out[k] = "***REDACTED***"
-            else:
-                out[k] = v
-        redacted[section] = out
-    return redacted
 
 
 def _resolve_config() -> dict[str, dict[str, str]]:
@@ -1532,13 +1433,6 @@ def _resolve_config() -> dict[str, dict[str, str]]:
     config["cluster"]["num-nodes"] = str(NUM_NODES)
     if not config.has_section("blast"): config.add_section("blast")
     return {s: dict(config[s]) for s in config.sections()}
-
-def _cleanup_tmp(*paths: str) -> None:
-    for p in paths:
-        try:
-            if os.path.isdir(p): shutil.rmtree(p, ignore_errors=True)
-            elif os.path.isfile(p): os.remove(p)
-        except Exception: pass
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ROUTES
@@ -1993,73 +1887,6 @@ async def get_cluster():
 
 # ── Databases ──────────────────────────────────────────────────────────────
 
-class DatabaseListItem(BaseModel):
-    """Lightweight catalogue entry returned by ``GET /v1/databases``."""
-
-    name: str = Field(..., description="Database name as stored under the blast-db container.")
-
-
-class DatabaseList(BaseModel):
-    """Catalogue of prepared BLAST databases."""
-
-    databases: list[DatabaseListItem]
-    count: int = Field(..., ge=0)
-    container: str = Field("blast-db", description="Source container.")
-
-
-class DatabaseMetadata(BaseModel):
-    """Full metadata for a single BLAST database (v3.5.0 schema).
-
-    Breaking changes vs. the previous ``DatabaseMetadata`` payload:
-
-    - ``description`` was renamed to ``title`` (the source JSON's
-      ``description`` field is a one-line title, not a long blurb).
-    - ``version`` was renamed to ``snapshot`` to disambiguate the
-      NCBI-snapshot timestamp from the metadata-schema version. The
-      schema version is now ``metadata_schema_version`` (previously
-      ``metadata_version``).
-    - ``molecule_type`` now carries the lowercase natural value
-      (``dna`` / ``protein``) instead of the abbreviated
-      (``nucl`` / ``prot``). A new ``molecule_label`` field carries
-      the display label (``mixed DNA`` / ``protein``).
-    - New fields: ``container``, ``last_updated``, ``number_of_volumes``,
-      ``bytes_total``, ``bytes_to_cache``, ``cached_at``.
-    """
-
-    name: str
-    container: str = Field("blast-db", description="Source container.")
-    title: str = Field(
-        "", description="Short one-line title from the source metadata."
-    )
-    dbtype: str = Field(
-        "", description="Raw BLAST dbtype string (e.g. 'Nucleotide', 'Protein')."
-    )
-    molecule_type: Literal["dna", "protein"] = Field(
-        ..., description="Sequence molecule type (lowercase natural value)."
-    )
-    molecule_label: str = Field(
-        "", description="Display label for the molecule type (e.g. 'mixed DNA')."
-    )
-    snapshot: str = Field(
-        ..., description="NCBI snapshot timestamp embedded in the source file paths."
-    )
-    last_updated: Optional[str] = Field(
-        None, description="Source metadata's last-updated timestamp (ISO 8601)."
-    )
-    number_of_sequences: Optional[int] = None
-    number_of_letters: Optional[int] = None
-    number_of_volumes: Optional[int] = None
-    bytes_total: Optional[int] = None
-    bytes_to_cache: Optional[int] = None
-    metadata_schema_version: str = Field(
-        "", description="Schema version of the source metadata JSON."
-    )
-    cached_at: str = Field(
-        ...,
-        description="UTC timestamp (ISO 8601) when this payload was loaded into the server's in-process cache.",
-    )
-
-
 @v1.get(
     "/databases",
     tags=["Databases"],
@@ -2126,183 +1953,6 @@ def get_blast_database(db_name: str, response: StarletteResponse):
     response.headers["X-Cache"] = cache_status
     return meta
 
-# ── Jobs Models ────────────────────────────────────────────────────────────
-
-class BlastOptions(BaseModel):
-    """BLAST search parameters."""
-    evalue: Optional[float] = Field(None, description="E-value threshold. Server default if omitted.", examples=[0.05])
-    max_target_seqs: Optional[int] = Field(None, description="Maximum number of hits to return.", examples=[100])
-    outfmt: Optional[str] = Field(None, description="Output format string (default: '7').", examples=["7"])
-    extra: Optional[str] = Field(None, description="Additional BLAST CLI options as raw string.")
-
-
-class ExternalBlastOptions(BaseModel):
-    """External API BLAST options.
-
-    The external result pipeline requires BLAST XML (`outfmt=5`) because
-    `Hsp_hseq` is needed for FASTA generation.
-    """
-
-    outfmt: int = Field(5, description="Fixed to BLAST XML format 5")
-    word_size: int = Field(28, ge=1)
-    dust: bool = Field(True)
-    evalue: float = Field(10.0, gt=0)
-    max_target_seqs: int = Field(500, ge=1)
-
-
-class ExternalSubmitRequest(BaseModel):
-    query_fasta: str = Field(..., min_length=1)
-    db: str = Field(..., min_length=1)
-    program: str = Field("blastn")
-    taxid: Optional[int] = Field(None)
-    is_inclusive: Optional[bool] = Field(None)
-    options: ExternalBlastOptions = Field(default_factory=ExternalBlastOptions)
-    priority: int | str = Field(50)
-    batch_len: Optional[int] = Field(None, ge=1, le=1_000_000_000)
-    idempotency_key: Optional[str] = Field(None, min_length=1, max_length=256)
-    resource_profile: str = Field("standard")
-    submission_source: str = Field(_DEFAULT_EXTERNAL_SOURCE)
-    external_correlation_id: Optional[str] = Field(None, max_length=128)
-
-_MODE_A_EXAMPLE = {
-    "summary": "Mode A — Blob URL (advanced)",
-    "description": "Provide full Azure Blob Storage URLs for database, queries, and results.",
-    "value": {
-        "program": "blastn",
-        "db": "https://stgelb0509.blob.core.windows.net/blast-db/16S_ribosomal_RNA",
-        "queries": "https://stgelb0509.blob.core.windows.net/queries/sample.fa",
-        "results": "https://stgelb0509.blob.core.windows.net/results/run-001",
-        "options": "-evalue 0.01 -outfmt 7",
-    },
-}
-
-# Real E. coli K-12 MG1655 16S ribosomal RNA, partial (NCBI NR_024570.1, first ~540 bp).
-# Used by the Mode B examples so they actually hit the 16S_ribosomal_RNA database
-# (the previous synthetic "ATGC..." repeat against a bacterial 16S DB returned no hits).
-_SAMPLE_16S_FASTA = (
-    ">NR_024570.1 Escherichia coli str. K-12 substr. MG1655 16S ribosomal RNA, partial sequence\n"
-    "AAATTGAAGAGTTTGATCATGGCTCAGATTGAACGCTGGCGGCAGGCCTAACACATGCAA\n"
-    "GTCGAACGGTAACAGGAAGAAGCTTGCTTCTTTGCTGACGAGTGGCGGACGGGTGAGTAA\n"
-    "TGTCTGGGAAACTGCCTGATGGAGGGGGATAACTACTGGAAACGGTAGCTAATACCGCAT\n"
-    "AACGTCGCAAGACCAAAGAGGGGGACCTTCGGGCCTCTTGCCATCGGATGTGCCCAGATG\n"
-    "GGATTAGCTAGTAGGTGGGGTAACGGCTCACCTAGGCGACGATCCCTAGCTGGTCTGAGA\n"
-    "GGATGACCAGCCACACTGGAACTGAGACACGGTCCAGACTCCTACGGGAGGCAGCAGTGG\n"
-    "GGAATATTGCACAATGGGCGCAAGCCTGATGCAGCCATGCCGCGTGTATGAAGAAGGCCT\n"
-    "TCGGGTTGTAAAGTACTTTCAGCGGGGAGGAAGGGAGTAAAGTTAATACCTTTGCTCATT\n"
-    "GACGTTACCCGCAGAAGAAGCACCGGCTAACTCCGTGCCAGCAGCCGCGGTAATACGGAG\n"
-)
-
-_MODE_B_EXAMPLE = {
-    "summary": "Mode B — Inline FASTA (simple)",
-    "description": "Provide FASTA text inline. Server uploads query and resolves DB/results URLs automatically. Query is E. coli K-12 16S rRNA partial (NR_024570.1) against the 16S_ribosomal_RNA database. outfmt is 5 (BLAST XML) because the result pipeline requires it.",
-    "value": {
-        "program": "blastn",
-        "db": "16S_ribosomal_RNA",
-        "query_fasta": _SAMPLE_16S_FASTA,
-        "blast_options": {"evalue": 0.05, "max_target_seqs": 100, "outfmt": "5"},
-    },
-}
-
-_MODE_B_TAXID_EXAMPLE = {
-    "summary": "Mode B — with Taxonomy filter",
-    "description": "Filter BLAST results by organism taxonomy. is_inclusive=true searches within the taxid, false excludes it. Query is E. coli K-12 16S rRNA (NR_024570.1) filtered to taxid 562 (Escherichia coli). outfmt is 5 (BLAST XML) because the result pipeline requires it.",
-    "value": {
-        "program": "blastn",
-        "db": "16S_ribosomal_RNA",
-        "query_fasta": _SAMPLE_16S_FASTA,
-        "taxid": 562,
-        "is_inclusive": True,
-        "blast_options": {"evalue": 0.05, "max_target_seqs": 100, "outfmt": "5"},
-    },
-}
-
-class JobSubmitRequest(BaseModel):
-    """Unified BLAST job submission.
-
-    **Mode A** (Blob URL): provide `db`, `queries`, `results` as full Azure Blob URLs.
-
-    **Mode B** (Inline FASTA): provide `query_fasta` + short `db` name.
-    Server auto-uploads query to blob and resolves all URLs.
-    Optionally filter by `taxid` + `is_inclusive`.
-
-    Any field a caller sends beyond this schema (e.g. `request_id`) is preserved
-    verbatim (bounded) under `passthrough` on the submit / status / result
-    payloads so an external caller can correlate. See `_sanitize_passthrough`.
-    """
-    model_config = {
-        # Keep unknown fields (e.g. a caller's request_id) instead of dropping
-        # them, so they can be echoed back on status/result. They are read via
-        # `model_extra` and bounded by `_sanitize_passthrough` before storage.
-        "extra": "allow",
-        "json_schema_extra": {"examples": [_MODE_A_EXAMPLE["value"], _MODE_B_EXAMPLE["value"], _MODE_B_TAXID_EXAMPLE["value"]]},
-    }
-
-    program: str = Field("blastn", description="BLAST program (blastn, blastp, blastx, tblastn, etc.)", examples=["blastn", "blastp", "blastx"])
-    db: str = Field(..., description="Full Blob URL (mode A) or short DB name like '16S_ribosomal_RNA' (mode B)", examples=["16S_ribosomal_RNA"])
-    cluster_name: Optional[str] = Field(None, description="AKS cluster name. Uses server default if omitted.")
-    # Mode A
-    queries: Optional[str] = Field(None, description="Query sequences Blob URL (mode A only)")
-    results: Optional[str] = Field(None, description="Results destination Blob URL (mode A only)")
-    options: Optional[str] = Field(None, description="Raw BLAST CLI options string (mode A only)")
-    # Mode B
-    query_fasta: Optional[str] = Field(None, description="Inline FASTA text (mode B). Server auto-uploads to blob storage.")
-    taxid: Optional[int] = Field(None, description="NCBI Taxonomy ID for organism filtering", examples=[10244, 9606])
-    is_inclusive: Optional[bool] = Field(None, description="true: search within taxid only. false: exclude taxid. Ignored without taxid.")
-    blast_options: Optional[BlastOptions] = Field(None, description="Structured BLAST options (mode B). Easier than raw option string.")
-    priority: int | str = Field(50, description="Queue priority. Accepts 0-100 or low, normal, high, urgent. Running jobs are not preempted.")
-    batch_len: Optional[int] = Field(None, ge=1, le=1_000_000_000, description="Optional ElasticBLAST blast.batch-len override for query batching.")
-    idempotency_key: Optional[str] = Field(None, min_length=1, max_length=256, description="Stable caller key. Replays return the same job handle instead of creating duplicate work.")
-    resource_profile: str = Field("standard", description="Server-side sizing policy label, e.g. standard or core_nt_safe.")
-    submission_source: str = Field(_DEFAULT_EXTERNAL_SOURCE, description="Effective source of the submission: dashboard, external_api, terminal, or system.")
-    external_correlation_id: Optional[str] = Field(None, max_length=128, description="Caller-side correlation id, e.g. dashboard job id.")
-
-# Bounds for caller-supplied pass-through fields. Job state is persisted in a K8s
-# ConfigMap (~1 MiB cap) and echoed on every status/result poll, so an oversized
-# or hostile producer must not be able to bloat either. Values are flattened to
-# JSON scalars / bounded strings so the payload stays small and flat.
-_PASSTHROUGH_MAX_KEYS = 32
-_PASSTHROUGH_MAX_KEY_LEN = 128
-_PASSTHROUGH_MAX_VALUE_LEN = 1024
-_PASSTHROUGH_MAX_TOTAL_BYTES = 16384
-
-
-def _sanitize_passthrough(extra: Any) -> dict[str, Any]:
-    """Bound + flatten the caller-supplied fields beyond the submit schema.
-
-    ``extra`` is ``JobSubmitRequest.model_extra`` — the dict of fields a caller
-    sent that the model does not declare (e.g. ``request_id``). They are kept so
-    the submit / status / result payloads can echo them back for correlation,
-    but bounded first: at most ``_PASSTHROUGH_MAX_KEYS`` keys, each key/value
-    length capped, complex (dict/list) values flattened to a bounded JSON string,
-    and a total-size budget. Returns ``{}`` when there is nothing usable, so a
-    job submitted without extra fields stores and echoes no ``passthrough`` key.
-    """
-    if not isinstance(extra, dict) or not extra:
-        return {}
-    out: dict[str, Any] = {}
-    total = 0
-    for raw_key, raw_value in extra.items():
-        if len(out) >= _PASSTHROUGH_MAX_KEYS:
-            break
-        key = str(raw_key).strip()[:_PASSTHROUGH_MAX_KEY_LEN]
-        if not key:
-            continue
-        if raw_value is None or isinstance(raw_value, (bool, int, float)):
-            value: Any = raw_value
-        elif isinstance(raw_value, str):
-            value = raw_value[:_PASSTHROUGH_MAX_VALUE_LEN]
-        else:
-            try:
-                value = json.dumps(raw_value, default=str)[:_PASSTHROUGH_MAX_VALUE_LEN]
-            except (TypeError, ValueError):
-                value = str(raw_value)[:_PASSTHROUGH_MAX_VALUE_LEN]
-        total += len(key) + len(str(value))
-        if total > _PASSTHROUGH_MAX_TOTAL_BYTES:
-            break
-        out[key] = value
-    return out
-
-
 # ── Jobs — Submit ──────────────────────────────────────────────────────────
 
 def _build_options(opts: BlastOptions | None, taxid: int | None, inclusive: bool | None) -> str:
@@ -2349,19 +1999,6 @@ def _upload_fasta(job_id: str, fasta: str) -> str:
     finally:
         _cleanup_tmp(local)
     return url
-
-def _last_json(stdout: str) -> dict[str, Any] | None:
-    for line in reversed(stdout.splitlines()):
-        candidate = line.strip()
-        if not candidate.startswith("{") or not candidate.endswith("}"):
-            continue
-        try:
-            decoded = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(decoded, dict):
-            return decoded
-    return None
 
 
 def _discover_elb_job_id_from_submit_output(job_id: str, stdout: str) -> str:
@@ -2822,6 +2459,57 @@ def _cancel_job(job_id: str, reason: str, *, terminal_status: str = "cancelled")
     _webhook_notify(job_id, {"event": terminal_status, "error": reason[:200]})
 
 
+def _reclaim_dead_thread_job(job_id: str, refreshed: dict[str, Any]) -> bool:
+    """Reclaim a dispatching/submitting job whose submit thread is dead (#62).
+
+    A pod restart (e.g. the AKS cluster was stopped mid-submit) loses every
+    in-process submit thread, so a recovered job can sit in ``submitting``
+    forever, permanently holding one of the ``MAX_ACTIVE_SUBMISSIONS`` dispatch
+    slots and wedging the dispatcher (throughput -> 0). The watchdog calls this
+    every tick so the slot is reclaimed within ``WATCHDOG_INTERVAL_SECONDS``
+    instead of after ``SUBMIT_STUCK_SECONDS`` (2h).
+
+    Returns True when the slot was released (the job was requeued or failed),
+    False when the job is left untouched because its submit already created
+    BLAST k8s work -- re-submitting would duplicate jobs, so the normal status
+    refresh is left to carry it to running/terminal.
+
+    Bounded by ``SUBMIT_MAX_RETRIES``: a job that keeps losing its thread (the
+    cluster is still flaky and stops again) is requeued at most that many times,
+    then failed, so it cannot re-stick the dispatcher indefinitely. Mirrors the
+    startup-only :func:`_reconcile_recovered_jobs` requeue, adding the retry
+    bound and continuous (every-tick) operation.
+    """
+    summary = refreshed.get("k8s_summary") or {}
+    if summary.get("total") or summary.get("submit_failed"):
+        return False
+    attempt = int(refreshed.get("attempt", 0) or 0)
+    if attempt < SUBMIT_MAX_RETRIES:
+        _update_job(
+            job_id,
+            status="queued",
+            phase="recovered",
+            queued_at=_now_iso(),
+            last_progress_at=_now_iso(),
+            error="",
+        )
+        logger.info(
+            "watchdog reclaimed dead-thread job %s -> queued (attempt %d/%d)",
+            job_id, attempt, SUBMIT_MAX_RETRIES,
+        )
+    else:
+        _cancel_job(
+            job_id,
+            f"submit thread died with no BLAST jobs after {SUBMIT_MAX_RETRIES} attempts",
+            terminal_status="failed",
+        )
+        logger.error(
+            "watchdog failed dead-thread job %s after %d attempts (slot released)",
+            job_id, SUBMIT_MAX_RETRIES,
+        )
+    return True
+
+
 def _watchdog_once() -> None:
     _ensure_loaded()
     with _jobs_lock:
@@ -2833,6 +2521,19 @@ def _watchdog_once() -> None:
         phase = refreshed.get("phase", "")
         if status in _TERMINAL_STATES:
             continue
+        # #62: a dispatching/submitting job whose submit thread died (pod restart
+        # lost the in-process thread) holds a MAX_ACTIVE slot. Reclaim it within
+        # one tick rather than waiting SUBMIT_STUCK_SECONDS (2h). The started_at
+        # grace avoids racing a job that was just claimed but whose thread has
+        # not started yet; an alive thread (a legitimately cold-staging submit)
+        # is never touched.
+        if (
+            status in {"dispatching", "submitting"}
+            and not _has_alive_thread(job_id)
+            and _age_seconds(refreshed.get("started_at")) > RECLAIM_GRACE_SECONDS
+        ):
+            if _reclaim_dead_thread_job(job_id, refreshed):
+                continue
         if phase == "submitting" and _age_seconds(refreshed.get("started_at")) > SUBMIT_STUCK_SECONDS:
             _cancel_job(job_id, "submit produced no BLAST jobs before stuck timeout", terminal_status="failed")
         elif phase == "finalizing" and _age_seconds(refreshed.get("last_progress_at")) > FINALIZER_STUCK_SECONDS:
@@ -3037,24 +2738,6 @@ def _resolve_result_file(job_info: dict[str, Any], file_id: str) -> dict[str, An
         if item.get("file_id") == file_id:
             return item
     raise HTTPException(404, f"File {file_id} not found")
-
-
-def _safe_result_filename(value: str) -> str:
-    filename = str(value or "").strip()
-    if not re.match(r"^[A-Za-z0-9._-]{1,128}\.(?:xml|out)(?:\.gz)?$", filename, re.IGNORECASE):
-        raise HTTPException(400, "Invalid result filename")
-    return filename
-
-
-def _safe_result_blob_path(value: str, fallback_filename: str) -> str:
-    blob_path = str(value or fallback_filename).strip().lstrip("/")
-    if ".." in blob_path or "?" in blob_path or "#" in blob_path:
-        raise HTTPException(400, "Invalid result blob path")
-    if not re.match(r"^[A-Za-z0-9._/-]{1,512}\.(?:xml|out)(?:\.gz)?$", blob_path, re.IGNORECASE):
-        raise HTTPException(400, "Invalid result blob path")
-    if not blob_path.split("/")[-1].startswith("batch_"):
-        raise HTTPException(400, "Invalid result blob path")
-    return blob_path
 
 
 @lru_cache(maxsize=None)
@@ -3313,24 +2996,6 @@ def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] = Head
     return response
 
 # ── Jobs — List ────────────────────────────────────────────────────────────
-
-# Opaque keyset cursor for /v1/jobs pagination: base64 of
-# "<created_at>\x1f<job_id>". The dashboard proxy folds this into its combined
-# page cursor (dotnetpower/elb-dashboard#51); callers that omit ``limit`` get the
-# full unpaginated list, so older clients are unaffected.
-def _encode_jobs_cursor(created_at: str, job_id: str) -> str:
-    raw = f"{created_at}\x1f{job_id}".encode("utf-8")
-    return base64.urlsafe_b64encode(raw).decode("ascii")
-
-
-def _decode_jobs_cursor(cursor: str) -> tuple[str, str] | None:
-    try:
-        raw = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
-        created_at, job_id = raw.split("\x1f", 1)
-        return created_at, job_id
-    except Exception:
-        return None
-
 
 @v1.get("/jobs", tags=["Jobs"], summary="List all jobs")
 async def list_jobs(
