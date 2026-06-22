@@ -35,6 +35,30 @@
 set -xeuo pipefail
 shopt -s nullglob
 
+# Retry azcopy so a single transient failure (a throttled/again-auth blip under
+# concurrent submits) does not kill the container. Without this, one failed
+# `azcopy cp` (e.g. the batch_list.txt upload) aborts the import-query-batches
+# init container; k8s retries the whole pod, but the surrounding submit used to
+# treat that as fatal. Re-login between attempts in case the WORKLOAD token
+# went stale.
+retry_azcopy() {
+    local attempt=1
+    local max=5
+    while true; do
+        if azcopy "$@"; then
+            return 0
+        fi
+        if [ "$attempt" -ge "$max" ]; then
+            echo "ERROR: azcopy failed after ${max} attempts: $*" >&2
+            return 1
+        fi
+        echo "WARN: azcopy attempt ${attempt} failed; re-login + retry in $((attempt * 3))s: $*" >&2
+        sleep $((attempt * 3))
+        azcopy login --identity || true
+        attempt=$((attempt + 1))
+    done
+}
+
 k8s_job_limit=5000
 
 batch_len=5000000
@@ -84,7 +108,7 @@ elif [[ $output_bucket =~ ^https:// ]]; then
   azcopy login --identity
 
   if [ $copy_only -eq 1 ]; then
-    time azcopy cp "$output_bucket/query_batches/*" $local_output_dir --include-pattern "batch_*.fa"
+    time retry_azcopy cp "$output_bucket/query_batches/*" $local_output_dir --include-pattern "batch_*.fa"
   else
     time fasta_split.py $input -l $batch_len -o $local_output_dir -c $TMP
     num_batches=`find $local_output_dir -type f -name "batch_*.fa"|wc -l`
@@ -98,14 +122,14 @@ Please increase the batch-len parameter to at least $suggested_batch_len and rep
       rm msg
       exit 0
     else
-      time azcopy cp $TMP $output_bucket/metadata/query_length.txt
+      time retry_azcopy cp $TMP $output_bucket/metadata/query_length.txt
       if [ $split_to_cloud -eq 1 ]; then
-        azcopy cp "$local_output_dir/batch_*.fa" $output_bucket/query_batches/
+        retry_azcopy cp "$local_output_dir/batch_*.fa" $output_bucket/query_batches/
       fi
     fi
   fi
   find $local_output_dir -type f -name "batch_*.fa" | xargs -n1 basename > batch_list.txt
-  time azcopy cp batch_list.txt $output_bucket/metadata/batch_list.txt
+  time retry_azcopy cp batch_list.txt $output_bucket/metadata/batch_list.txt
   
 else
   if [ $copy_only -eq 1 ]; then

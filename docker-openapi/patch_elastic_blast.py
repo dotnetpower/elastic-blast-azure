@@ -1034,6 +1034,62 @@ def patch_init_job_retry_tolerance(root: Path) -> None:
         ),
         "failed_set = set(failed.split())",
     )
+    # Same retry-intolerance exists in the NON-sharded local-SSD init wait loop
+    # (initialize_local_ssd). The customer path is sharded, but fix it too so a
+    # single-DB local-SSD submit is equally resilient.
+    _replace_once_unless_present(
+        path,
+        (
+            "            if failed:\n"
+            "                proc = safe_exec(f'kubectl --context={cfg.appstate.k8s_ctx} logs -l app=setup')\n"
+            "                for line in handle_error(proc.stdout).split('\\n'):\n"
+            "                    logging.debug(line)\n"
+            "                raise RuntimeError(f'Local SSD initialization jobs failed: {failed}')\n"
+            "            if not active:\n"
+            "                logging.debug(f'Local SSD initialization jobs succeeded: {succeeded}')\n"
+            "                break\n"
+        ),
+        (
+            "            active_set = set(active.split())\n"
+            "            failed_set = set(failed.split())\n"
+            "            succeeded_set = set(succeeded.split())\n"
+            "            fatal = []\n"
+            "            for jn in sorted(failed_set - succeeded_set - active_set):\n"
+            "                try:\n"
+            "                    cond = safe_exec(\n"
+            "                        f'kubectl --context={cfg.appstate.k8s_ctx} get job {jn} '\n"
+            "                        '-o jsonpath={.status.conditions[*].type}')\n"
+            "                except Exception:\n"
+            "                    continue\n"
+            "                if 'Failed' in handle_error(cond.stdout).split():\n"
+            "                    fatal.append(jn)\n"
+            "            if fatal:\n"
+            "                proc = safe_exec(f'kubectl --context={cfg.appstate.k8s_ctx} logs -l app=setup')\n"
+            "                for line in handle_error(proc.stdout).split('\\n'):\n"
+            "                    logging.debug(line)\n"
+            "                names = ' '.join(fatal)\n"
+            "                raise RuntimeError(f'Local SSD initialization jobs failed: {names}')\n"
+            "            if not active_set and not (failed_set - succeeded_set):\n"
+            "                logging.debug(f'Local SSD initialization jobs succeeded: {succeeded}')\n"
+            "                break\n"
+        ),
+        "raise RuntimeError(f'Local SSD initialization jobs failed: {names}')",
+    )
+
+
+def patch_qs_docker_version(root: Path) -> None:
+    # Bump the query-split (qs) image tag so the cluster pulls a NEW tag. The
+    # init-ssd Job has no imagePullPolicy (=> IfNotPresent), so overwriting the
+    # old tag would not reliably reach cache-warm nodes; a fresh tag forces a
+    # clean pull. The new tag carries the import-query-batches azcopy retry
+    # hardening in docker-qs/run.sh.
+    path = root / "src/elastic_blast/constants.py"
+    _replace_once_unless_present(
+        path,
+        "ELB_QS_DOCKER_VERSION = '0.1.4'\n",
+        "ELB_QS_DOCKER_VERSION = '0.1.5'\n",
+        "ELB_QS_DOCKER_VERSION = '0.1.5'",
+    )
 
 
 def main() -> int:
@@ -1069,6 +1125,7 @@ def main() -> int:
     patch_create_workspace_daemonset_tolerations(root)
     patch_init_job_wait_filters(root)
     patch_init_job_retry_tolerance(root)
+    patch_qs_docker_version(root)
     print("patched elastic-blast-azure finalizer for sharded result merge")
     return 0
 

@@ -2154,7 +2154,7 @@ def _run_submit_bg(job_id: str) -> None:
             _webhook_notify(job_id, {"event": "cancelled", "error": str(e)[:200]})
             logger.warning("Job %s cancelled: %s", job_id, str(e)[:200])
         else:
-            _update_job(job_id, status="failed", phase="submit_failed", error=str(e)[:500])
+            _update_job(job_id, status="failed", phase="submit_failed", error=str(e)[:8000])
             _webhook_notify(job_id, {"event": "failed", "error": str(e)[:200]})
             logger.error("Job %s failed: %s", job_id, str(e)[:200])
     finally:
