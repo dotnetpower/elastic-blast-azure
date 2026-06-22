@@ -990,6 +990,52 @@ def patch_init_job_wait_filters(root: Path) -> None:
     )
 
 
+def patch_init_job_retry_tolerance(root: Path) -> None:
+    # The sharded local-SSD init wait loop aborts the WHOLE submit the instant
+    # any init Job shows .status.failed >= 1. But .status.failed is the FAILED-
+    # POD counter, and these init Jobs carry a backoffLimit: a transient pod
+    # failure (e.g. a throttled azcopy in import-query-batches) is retried by
+    # k8s and the Job ultimately SUCCEEDS. Concurrent submits make those
+    # transient failures common, so ~1-in-6 submits aborted even though every
+    # init Job eventually completed (live-confirmed: the Job ended
+    # backoffLimit=3 failed=1 succeeded=1 = Complete). Treat a Job as failed
+    # ONLY when its own `Failed` condition is set (backoffLimit exhausted), and
+    # finish only when nothing is active AND nothing is pending a retry.
+    path = root / "src/elastic_blast/kubernetes.py"
+    _replace_once_unless_present(
+        path,
+        (
+            "            if failed:\n"
+            "                raise RuntimeError(f'Shard init jobs failed: {failed}')\n"
+            "            if not active:\n"
+            "                logging.debug(f'Shard init jobs succeeded: {succeeded}')\n"
+            "                break\n"
+        ),
+        (
+            "            active_set = set(active.split())\n"
+            "            failed_set = set(failed.split())\n"
+            "            succeeded_set = set(succeeded.split())\n"
+            "            fatal = []\n"
+            "            for jn in sorted(failed_set - succeeded_set - active_set):\n"
+            "                try:\n"
+            "                    cond = safe_exec(\n"
+            "                        f'kubectl --context={cfg.appstate.k8s_ctx} get job {jn} '\n"
+            "                        '-o jsonpath={.status.conditions[*].type}')\n"
+            "                except Exception:\n"
+            "                    continue\n"
+            "                if 'Failed' in handle_error(cond.stdout).split():\n"
+            "                    fatal.append(jn)\n"
+            "            if fatal:\n"
+            "                names = ' '.join(fatal)\n"
+            "                raise RuntimeError(f'Shard init jobs failed: {names}')\n"
+            "            if not active_set and not (failed_set - succeeded_set):\n"
+            "                logging.debug(f'Shard init jobs succeeded: {succeeded}')\n"
+            "                break\n"
+        ),
+        "failed_set = set(failed.split())",
+    )
+
+
 def main() -> int:
     if len(sys.argv) not in {2, 3}:
         print(
@@ -1022,6 +1068,7 @@ def main() -> int:
     patch_unique_init_ssd_job_names(root)
     patch_create_workspace_daemonset_tolerations(root)
     patch_init_job_wait_filters(root)
+    patch_init_job_retry_tolerance(root)
     print("patched elastic-blast-azure finalizer for sharded result merge")
     return 0
 
