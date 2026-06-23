@@ -56,12 +56,24 @@ def test_valid_date_prefix_is_normalised(main_module):
         "https://evil.example/results",
         "2026/06",
         "2026/06/23/job-abc",
+        # Defense-in-depth: nonsensical (but date-shaped) buckets are rejected.
+        "9999/99/99",
+        "2026/13/01",
+        "2026/00/15",
+        "2026/06/32",
+        "2026/06/00",
     ],
 )
 def test_rejects_non_date_or_traversal(main_module, value):
     with pytest.raises(HTTPException) as exc:
         main_module._validate_results_prefix(value)
     assert exc.value.status_code == 400
+
+
+def test_accepts_boundary_dates(main_module):
+    # Month/day boundaries that ARE valid must pass.
+    for v in ("2026/01/01", "2026/12/31", "2026/02/29", "2026/06/30"):
+        assert main_module._validate_results_prefix(v) == f"{v}/"
 
 
 def test_results_url_uses_prefix_when_present(main_module):

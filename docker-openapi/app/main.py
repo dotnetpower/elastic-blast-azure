@@ -2779,7 +2779,7 @@ def _elb_recognises_cluster_param(param_name: str) -> bool:
     return False
 
 
-_RESULTS_PREFIX_RE = re.compile(r"^\d{4}/\d{2}/\d{2}/$")
+_RESULTS_PREFIX_RE = re.compile(r"^\d{4}/(0[1-9]|1[0-2])/(0[1-9]|[12]\d|3[01])/$")
 
 
 def _validate_results_prefix(value: Optional[str]) -> str:
@@ -2788,10 +2788,11 @@ def _validate_results_prefix(value: Optional[str]) -> str:
     The dashboard's date-tiered storage layout (elb-dashboard
     ``STORAGE_DATE_LAYOUT_ENABLED``) asks the sibling to write a Mode B job's
     results under ``results/<YYYY/MM/DD>/<job_id>/`` instead of the flat
-    ``results/<job_id>/``. Only an exact ``YYYY/MM/DD/`` shape is accepted so a
-    hostile / malformed value can never inject ``..`` traversal, an absolute
-    path, or extra segments that redirect writes outside the results container.
-    Empty / missing keeps the legacy flat layout, so old callers are unaffected.
+    ``results/<job_id>/``. Only an exact ``YYYY/MM/DD/`` shape with a real month
+    (01-12) and day (01-31) is accepted so a hostile / malformed value can never
+    inject ``..`` traversal, an absolute path, extra segments, or a nonsensical
+    bucket (e.g. ``9999/99/99``) that redirect / scatter writes. Empty / missing
+    keeps the legacy flat layout, so old callers are unaffected.
     """
     if not value:
         return ""
@@ -2800,6 +2801,9 @@ def _validate_results_prefix(value: Optional[str]) -> str:
         return ""
     v = f"{v}/"
     if not _RESULTS_PREFIX_RE.match(v):
+        # Log the rejection so a misbehaving caller is diagnosable; the value is
+        # caller-supplied and bounded, but truncate defensively before logging.
+        logger.warning("rejected results_prefix (not a YYYY/MM/DD/ date path): %r", str(value)[:64])
         raise HTTPException(400, "results_prefix must be an exact YYYY/MM/DD/ date path")
     return v
 
