@@ -2005,7 +2005,7 @@ def _discover_elb_job_id_from_submit_output(job_id: str, stdout: str) -> str:
     if not stdout:
         return ""
     patterns = (
-        rf"/results/{re.escape(job_id)}/(?P<elb_job_id>job-[A-Za-z0-9_-]+)/metadata/",
+        rf"/results/(?:\d{{4}}/\d{{2}}/\d{{2}}/)?{re.escape(job_id)}/(?P<elb_job_id>job-[A-Za-z0-9_-]+)/metadata/",
         r"\b(?P<elb_job_id>job-[0-9a-f]{32})\b",
     )
     for pattern in patterns:
@@ -2779,6 +2779,31 @@ def _elb_recognises_cluster_param(param_name: str) -> bool:
     return False
 
 
+_RESULTS_PREFIX_RE = re.compile(r"^\d{4}/\d{2}/\d{2}/$")
+
+
+def _validate_results_prefix(value: Optional[str]) -> str:
+    """Return a safe date-tiered results sub-prefix (``YYYY/MM/DD/``) or ``''``.
+
+    The dashboard's date-tiered storage layout (elb-dashboard
+    ``STORAGE_DATE_LAYOUT_ENABLED``) asks the sibling to write a Mode B job's
+    results under ``results/<YYYY/MM/DD>/<job_id>/`` instead of the flat
+    ``results/<job_id>/``. Only an exact ``YYYY/MM/DD/`` shape is accepted so a
+    hostile / malformed value can never inject ``..`` traversal, an absolute
+    path, or extra segments that redirect writes outside the results container.
+    Empty / missing keeps the legacy flat layout, so old callers are unaffected.
+    """
+    if not value:
+        return ""
+    v = str(value).strip().strip("/")
+    if not v:
+        return ""
+    v = f"{v}/"
+    if not _RESULTS_PREFIX_RE.match(v):
+        raise HTTPException(400, "results_prefix must be an exact YYYY/MM/DD/ date path")
+    return v
+
+
 @v1.post("/jobs", tags=["Jobs"], status_code=202, summary="Submit a BLAST search",
           openapi_extra={"requestBody": {"content": {"application/json": {"examples": {
               "mode_a": _MODE_A_EXAMPLE, "mode_b": _MODE_B_EXAMPLE, "mode_b_taxid": _MODE_B_TAXID_EXAMPLE,
@@ -2850,7 +2875,12 @@ def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] = Head
             try: _validate_short_blob_name(req.db, "db")
             except ValueError as e: raise HTTPException(400, str(e))
             db_url = f"{_blob_base()}/blast-db/{req.db}/{req.db}"
-        results_url = f"{_blob_base()}/results/{job_id}"
+        # Date-tiered results layout (dashboard STORAGE_DATE_LAYOUT_ENABLED):
+        # when the caller forwards a ``YYYY/MM/DD/`` prefix, write results under
+        # results/<prefix><job_id>/ so the blob layout matches the dashboard's
+        # native date tiering. Empty prefix => legacy flat results/<job_id>/.
+        _results_prefix = _validate_results_prefix(getattr(req, "results_prefix", None))
+        results_url = f"{_blob_base()}/results/{_results_prefix}{job_id}"
         opts = _build_options(req.blast_options, req.taxid, req.is_inclusive)
     else:
         if not req.queries or not req.results:

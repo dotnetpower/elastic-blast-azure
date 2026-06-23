@@ -206,6 +206,7 @@ class JobSubmitRequest(BaseModel):
     # Mode A
     queries: Optional[str] = Field(None, description="Query sequences Blob URL (mode A only)")
     results: Optional[str] = Field(None, description="Results destination Blob URL (mode A only)")
+    results_prefix: Optional[str] = Field(None, description="Optional date-tiered results sub-prefix 'YYYY/MM/DD/' (Mode B). Server writes results under results/<prefix><job_id>/ instead of the flat results/<job_id>/. Empty keeps the flat layout.", examples=["2026/06/23/"])
     options: Optional[str] = Field(None, description="Raw BLAST CLI options string (mode A only)")
     # Mode B
     query_fasta: Optional[str] = Field(None, description="Inline FASTA text (mode B). Server auto-uploads to blob storage.")
