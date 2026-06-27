@@ -91,3 +91,66 @@ def test_bad_cursor_degrades_to_first_page(main_module) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert [j["job_id"] for j in body["jobs"]] == ["job4", "job3"]
+
+
+def test_list_jobs_exposes_runtime_block(monkeypatch) -> None:
+    """``GET /v1/jobs`` must expose started_at + (elapsed/run/queue-wait)
+    seconds for every row, matching the detail handler. The dashboard's
+    BlastJobs list view reads these to skip the queue-wait portion when
+    computing the 'Elapsed' / 'Duration' badge; without them the badge falls
+    back to wall-clock from ``created_at`` and shows 20+ minutes for a job
+    whose actual BLAST run was 3-4 minutes (a queue-position artefact, not
+    runtime)."""
+    import importlib
+    monkeypatch.setenv("ELB_OPENAPI_API_TOKEN", "test-token")
+    monkeypatch.setenv("ELB_OPENAPI_DISABLE_BACKGROUND", "1")
+    import main  # noqa: PLC0415
+
+    importlib.reload(main)
+    # Terminal completed: started 30 s after enqueue, ran for 200 s.
+    completed = {
+        "job_id": "done",
+        "status": "completed",
+        "created_at": "2026-06-27T05:00:00Z",
+        "queued_at": "2026-06-27T05:00:00Z",
+        "started_at": "2026-06-27T05:00:30Z",
+        "updated_at": "2026-06-27T05:03:50Z",
+        "completed_at": "2026-06-27T05:03:50Z",
+    }
+    # Still queued: no started_at; run_seconds and queue_wait_seconds must be
+    # None so the dashboard does not render runtime against a job that has
+    # never executed.
+    queued = {
+        "job_id": "wait",
+        "status": "queued",
+        "created_at": "2026-06-27T05:05:00Z",
+        "queued_at": "2026-06-27T05:05:00Z",
+        "updated_at": "2026-06-27T05:05:01Z",
+    }
+    monkeypatch.setattr(main, "_jobs", {"done": completed, "wait": queued})
+    monkeypatch.setattr(main, "_cm_loaded", True)
+    client = TestClient(main.app)
+    resp = client.get("/v1/jobs", headers=_HEADERS)
+    assert resp.status_code == 200
+    by_id = {j["job_id"]: j for j in resp.json()["jobs"]}
+    done_row = by_id["done"]
+    assert done_row["started_at"] == "2026-06-27T05:00:30Z"
+    assert done_row["updated_at"] == "2026-06-27T05:03:50Z"
+    # queue_wait = started - queued = 30 s; run = updated - started = 200 s;
+    # elapsed = updated - created = 230 s. Mirrors detail.
+    assert done_row["queue_wait_seconds"] == 30
+    assert done_row["run_seconds"] == 200
+    assert done_row["elapsed_seconds"] == 230
+    wait_row = by_id["wait"]
+    assert wait_row["started_at"] == ""
+    # No started_at -> run_seconds + queue_wait_seconds report None
+    # (BlastJobs falls back to created_at for the "Queued for" timer).
+    assert wait_row["run_seconds"] is None
+    assert wait_row["queue_wait_seconds"] is None
+    # elapsed_seconds mirrors the detail handler: a non-terminal row leaves
+    # elapsed_end=None and _duration_seconds falls through to time.time(),
+    # so a still-queued row reports the live wall-clock since created_at.
+    # The SPA does not read this for the queued badge (it computes
+    # "Queued for" itself from created_at), so the value is informational.
+    assert isinstance(wait_row["elapsed_seconds"], int)
+    assert wait_row["elapsed_seconds"] >= 0

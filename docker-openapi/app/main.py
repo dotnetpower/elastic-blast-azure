@@ -2289,6 +2289,38 @@ def _notify_terminal_transition(job_id: str, updates: dict[str, Any]) -> None:
     error = updates.get("error")
     if error:
         payload["error"] = str(error)[:200]
+    # Attach the same derived runtime fields the /v1/jobs LIST surfaces so the
+    # dashboard's sibling-stats cache can be populated on the webhook fast path
+    # (instead of waiting for the next /v1/jobs sync tick to discover them).
+    # Mirrors the _runtime_block helper inside list_jobs (~L3061). Best-effort:
+    # a missing job snapshot must never block the webhook.
+    try:
+        with _jobs_lock:
+            job_snap = dict(_jobs.get(job_id, {}))
+        if job_snap:
+            merged = {**job_snap, **updates}
+            started_at = merged.get("started_at") or ""
+            terminal_at = (
+                merged.get("completed_at")
+                or merged.get("failed_at")
+                or merged.get("updated_at")
+            )
+            payload["started_at"] = started_at
+            payload["elapsed_seconds"] = _duration_seconds(
+                merged.get("created_at"), terminal_at
+            )
+            payload["queue_wait_seconds"] = (
+                _duration_seconds(merged.get("queued_at"), started_at)
+                if started_at
+                else None
+            )
+            payload["run_seconds"] = (
+                _duration_seconds(started_at, terminal_at) if started_at else None
+            )
+    except Exception:
+        # Stats are a nice-to-have on the webhook; the dashboard will fall back
+        # to the next list-sync to populate them if anything goes sideways here.
+        pass
     try:
         _webhook_notify(job_id, payload)
     except Exception:
@@ -3051,13 +3083,49 @@ async def list_jobs(
     _ensure_loaded()
     with _jobs_lock:
         items = list(_jobs.items())
+    # The list view feeds the dashboard's BlastJobs page; exposing started_at
+    # (and the derived elapsed/run/queue-wait seconds) lets the row's
+    # "Elapsed" / "Duration" timer skip the queue-wait portion instead of
+    # counting wall-clock from `created_at`. Mirrors the same computation the
+    # /v1/jobs/{id}/status detail handler does (see L2677-L2685) so list +
+    # detail agree byte-for-byte; the helper inlines it because we only need
+    # the three derived ints, not the full status payload.
+    def _runtime_block(i: dict[str, Any]) -> dict[str, Any]:
+        status = i.get("status", "")
+        terminal_at = (
+            i.get("completed_at")
+            or i.get("failed_at")
+            or i.get("updated_at")
+        )
+        elapsed_end = terminal_at if status in _TERMINAL_STATES else None
+        # `_duration_seconds(start, end=<falsy>)` falls back to `time.time()`,
+        # which silently turns an empty `started_at` into a wall-clock since
+        # `queued_at` — exactly the bug this whole block is meant to fix. Gate
+        # the queue-wait + run helpers on a populated `started_at` so a still-
+        # queued row reports None (the dashboard then keeps the "Queued for"
+        # timer counting against `created_at`).
+        started_at = i.get("started_at") or ""
+        return {
+            "started_at": started_at,
+            "updated_at": i.get("updated_at", ""),
+            "elapsed_seconds": _duration_seconds(i.get("created_at"), elapsed_end),
+            "queue_wait_seconds": (
+                _duration_seconds(i.get("queued_at"), started_at)
+                if started_at
+                else None
+            ),
+            "run_seconds": (
+                _duration_seconds(started_at, elapsed_end) if started_at else None
+            ),
+        }
     summaries = [
         {"job_id": jid, "status": i["status"], "mode": i.get("mode", "A"),
          "created_at": i.get("created_at", ""), "program": i.get("program", ""),
          "cluster_name": i.get("cluster_name", ""), "db": i.get("db", ""),
          "elb_job_id": i.get("elb_job_id", ""),
          "priority": i.get("priority", _PRIORITY_LABELS["normal"]),
-         "queue_position": _queued_position(jid)}
+         "queue_position": _queued_position(jid),
+         **_runtime_block(i)}
         for jid, i in items
     ]
     total = len(summaries)
