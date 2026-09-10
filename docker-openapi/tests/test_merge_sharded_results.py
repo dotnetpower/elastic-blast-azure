@@ -463,7 +463,7 @@ def test_sequence_diversity_rejects_missing_expected_shard(tmp_path: Path) -> No
     assert not (tmp_path / "merged.out.gz").exists()
 
 
-def test_sequence_diversity_merge_rejects_oversized_candidate_pool(
+def test_sequence_diversity_merge_accepts_pool_above_legacy_limit(
     tmp_path: Path,
 ) -> None:
     input_tsv = tmp_path / "hits.tsv"
@@ -490,8 +490,10 @@ def test_sequence_diversity_merge_rejects_oversized_candidate_pool(
         },
     )
 
-    assert proc.returncode != 0
-    assert "candidate pool cannot exceed 5000" in proc.stderr
+    assert proc.returncode == 0, proc.stderr
+    report = json.loads((tmp_path / "merge-report.json").read_text())
+    assert report["candidate_pool_size"] == 5_001
+    assert report["returned_sequence_groups"] == 1
 
 
 def test_sequence_diversity_large_pool_uses_disk_backed_bounded_memory(
@@ -503,7 +505,7 @@ def test_sequence_diversity_large_pool_uses_disk_backed_bounded_memory(
     sequence = "A" * 16_384
     with input_tsv.open("w") as handle:
         handle.write("# ELB source-shard:00\n")
-        for index in range(5_000):
+        for index in range(6_000):
             handle.write(_row(f"acc-{index:05d}", f"{sequence}{index:06d}") + "\n")
 
     memory_limit = 96 * 1024 * 1024
@@ -521,7 +523,7 @@ def test_sequence_diversity_large_pool_uses_disk_backed_bounded_memory(
             "1",
             "blastn",
             "-outfmt 6 qseqid saccver sseq qstart qend evalue bitscore score "
-            "-max_target_seqs 5000",
+            "-max_target_seqs 6000",
         ],
         check=False,
         capture_output=True,
@@ -530,16 +532,18 @@ def test_sequence_diversity_large_pool_uses_disk_backed_bounded_memory(
         env={
             **os.environ,
             "ELB_RESULT_SELECTION_POLICY": "sequence_diversity",
-            "ELB_REQUESTED_MAX_TARGET_SEQS": "100",
+            "ELB_REQUESTED_MAX_TARGET_SEQS": "6000",
             "ELB_SUCCEEDED_SHARDS": "1",
         },
     )
 
     assert proc.returncode == 0, proc.stderr
     report = json.loads(report_json.read_text())
-    assert report["observed_candidate_rows"] == 5_000
-    assert report["observed_sequence_groups"] == 5_000
-    assert report["returned_sequence_groups"] == 100
+    assert report["observed_candidate_rows"] == 6_000
+    assert report["observed_sequence_groups"] == 6_000
+    assert report["returned_sequence_groups"] == 6_000
+    assert len(report["sequence_group_counts"]) == 5_000
+    assert report["sequence_group_counts_truncated"] is True
 
 
 @pytest.mark.parametrize("num_shards", ["not-an-integer", "0", "1025"])

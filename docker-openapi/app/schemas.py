@@ -15,8 +15,6 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
-from result_selection import SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE
-
 # Default ``submission_source`` for externally submitted jobs. Lives here (a
 # plain literal, not an env-derived value) so the request models can default
 # to it without importing ``main`` — which would create an import cycle.
@@ -121,10 +119,7 @@ class BlastOptions(BaseModel):
     )
     candidate_pool_size: Optional[int] = Field(
         None,
-        json_schema_extra={
-            "minimum": 1,
-            "maximum": SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE,
-        },
+        json_schema_extra={"minimum": 1},
         description=(
             "Per-shard BLAST subject candidate cap for sequence_diversity. "
             "Rejected for other result-selection policies."

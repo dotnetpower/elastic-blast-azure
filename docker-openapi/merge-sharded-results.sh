@@ -35,7 +35,6 @@ BLAST_EVALUE_EPSILON = 1.0e-180
 WEB_BLAST_STATISTICS_MAX_BYTES = 16 * 1024
 SEQUENCE_IDENTITY_MODE = "aligned_sequence_query_span"
 SEQUENCE_IDENTITY_VERSION = 1
-SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE = 5_000
 SEQUENCE_GROUP_REPORT_LIMIT = 5_000
 SEQUENCE_SOURCE_MARKER = "# ELB source-shard:"
 
@@ -2008,11 +2007,6 @@ outfmt_spec = parse_outfmt_spec(blast_options)
 selection_policy = result_selection_policy()
 if selection_policy == "sequence_diversity" and outfmt not in ("6", "7"):
     raise ValueError("sequence_diversity supports only tabular BLAST outfmt 6 or 7")
-if (
-    selection_policy == "sequence_diversity"
-    and candidate_pool_size > SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE
-):
-    raise ValueError("sequence_diversity candidate pool cannot exceed 5000 per shard")
 if outfmt == "5":
     total_hits, query_count = merge_xml(
         input_tsv,

@@ -75,7 +75,7 @@ def test_sequence_diversity_rejects_unsupported_effective_outfmt(
     assert error.value.detail()["retryable"] is False
 
 
-@pytest.mark.parametrize("candidate_pool_size", [0, 1, 5001])
+@pytest.mark.parametrize("candidate_pool_size", [0, 1])
 def test_sequence_diversity_rejects_invalid_candidate_pool(
     candidate_pool_size: int,
 ) -> None:
@@ -88,3 +88,16 @@ def test_sequence_diversity_rejects_invalid_candidate_pool(
 
     assert error.value.code == "sequence_diversity_invalid_candidate_pool"
     assert error.value.detail()["retryable"] is False
+
+
+def test_sequence_diversity_accepts_pool_above_legacy_limit() -> None:
+    plan = prepare_sequence_diversity_options(
+        f"-outfmt {_required_outfmt()} -max_target_seqs 10000",
+        max_target_seqs=10_000,
+        candidate_pool_size=20_000,
+    )
+
+    assert plan.options.endswith("-max_target_seqs 20000")
+    assert plan.requested_sequence_groups == 10_000
+    assert plan.candidate_pool_size_requested_per_shard == 20_000
+    assert plan.candidate_pool_size_applied_per_shard == 20_000

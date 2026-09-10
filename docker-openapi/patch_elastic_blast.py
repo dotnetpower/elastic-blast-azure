@@ -718,6 +718,37 @@ def patch_requested_max_target_seqs(root: Path) -> None:
     _replace_once_unless_present(
         config_path,
         (
+            "        if self.result_selection_policy not in {\n"
+            "            'native_top_n', 'diversity_aware', 'sequence_diversity'\n"
+            "        }:\n"
+            "            errors.append(\n"
+            "                'result-selection-policy must be native_top_n, diversity_aware, '\n"
+            "                'or sequence_diversity'\n"
+            "            )\n"
+            "        if not 0 <= self.candidate_pool_size_requested <= 5000:\n"
+            "            errors.append(\n"
+            "                'candidate-pool-size-requested must be between 0 and 5000'\n"
+            "            )\n"
+        ),
+        (
+            "        if self.result_selection_policy not in {\n"
+            "            'native_top_n', 'diversity_aware', 'sequence_diversity'\n"
+            "        }:\n"
+            "            errors.append(\n"
+            "                'result-selection-policy must be native_top_n, diversity_aware, '\n"
+            "                'or sequence_diversity'\n"
+            "            )\n"
+            "        if self.candidate_pool_size_requested < 0:\n"
+            "            errors.append(\n"
+            "                'candidate-pool-size-requested must be non-negative'\n"
+            "            )\n"
+        ),
+        "candidate-pool-size-requested must be non-negative",
+        allow_absent=True,
+    )
+    _replace_once_unless_present(
+        config_path,
+        (
             "        if self.result_selection_policy not in {'native_top_n', 'diversity_aware'}:\n"
             "            errors.append(\n"
             "                'result-selection-policy must be native_top_n or diversity_aware'\n"
@@ -731,12 +762,12 @@ def patch_requested_max_target_seqs(root: Path) -> None:
             "                'result-selection-policy must be native_top_n, diversity_aware, '\n"
             "                'or sequence_diversity'\n"
             "            )\n"
-            "        if not 0 <= self.candidate_pool_size_requested <= 5000:\n"
+            "        if self.candidate_pool_size_requested < 0:\n"
             "            errors.append(\n"
-            "                'candidate-pool-size-requested must be between 0 and 5000'\n"
+            "                'candidate-pool-size-requested must be non-negative'\n"
             "            )\n"
         ),
-        "candidate-pool-size-requested must be between 0 and 5000",
+        "candidate-pool-size-requested must be non-negative",
     )
 
 

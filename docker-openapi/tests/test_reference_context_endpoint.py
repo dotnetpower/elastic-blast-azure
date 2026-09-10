@@ -410,16 +410,6 @@ def test_sequence_diversity_rejects_reference_context_with_typed_422(
             "sequence_diversity_missing_fields",
             ["sseq"],
         ),
-        (
-            {
-                "outfmt": "7 qseqid saccver sseq qstart qend evalue bitscore",
-                "max_target_seqs": 2,
-                "candidate_pool_size": 5001,
-                "result_selection_policy": "sequence_diversity",
-            },
-            "sequence_diversity_invalid_candidate_pool",
-            [],
-        ),
     ],
 )
 def test_sequence_diversity_rejects_invalid_request_before_side_effects(
@@ -464,7 +454,7 @@ def test_sequence_diversity_openapi_schema_exposes_enum_and_pool_bounds(
         "sequence_diversity",
     ]
     assert options["candidate_pool_size"]["minimum"] == 1
-    assert options["candidate_pool_size"]["maximum"] == 5000
+    assert "maximum" not in options["candidate_pool_size"]
 
 
 def test_sequence_diversity_http_validation_has_stable_error_shape(
@@ -554,9 +544,16 @@ def test_sequence_diversity_http_validation_has_stable_error_shape(
     }
 
 
+@pytest.mark.parametrize(
+    ("max_target_seqs", "candidate_pool_size", "applied_pool_size"),
+    [(3, None, 2_000), (10_000, 20_000, 20_000)],
+)
 def test_sequence_diversity_submit_separates_group_target_from_shard_pool(
     main_module,
     monkeypatch: pytest.MonkeyPatch,
+    max_target_seqs: int,
+    candidate_pool_size: int | None,
+    applied_pool_size: int,
 ) -> None:
     saved: dict[str, Any] = {}
     active = SimpleNamespace(
@@ -609,16 +606,19 @@ def test_sequence_diversity_submit_separates_group_target_from_shard_pool(
     )
     monkeypatch.setattr(main_module, "_dispatcher_once", lambda: False)
     monkeypatch.setattr(main_module, "_queued_position", lambda _job_id: 1)
+    blast_options: dict[str, Any] = {
+        "outfmt": "7 qseqid saccver sseq qstart qend evalue bitscore",
+        "max_target_seqs": max_target_seqs,
+        "result_selection_policy": "sequence_diversity",
+    }
+    if candidate_pool_size is not None:
+        blast_options["candidate_pool_size"] = candidate_pool_size
     request = main_module.JobSubmitRequest(
         program="blastn",
         db="core_nt",
         query_fasta=">q1\nACGT\n",
         resource_profile="core_nt_safe",
-        blast_options={
-            "outfmt": "7 qseqid saccver sseq qstart qend evalue bitscore",
-            "max_target_seqs": 3,
-            "result_selection_policy": "sequence_diversity",
-        },
+        blast_options=blast_options,
     )
 
     response = main_module.submit_job(request)
@@ -628,13 +628,15 @@ def test_sequence_diversity_submit_separates_group_target_from_shard_pool(
     job_data = saved["data"]
     config = configparser.ConfigParser()
     config.read_file(StringIO(job_data["config_ini"]))
-    assert "-max_target_seqs 2000" in config["blast"]["options"]
-    assert config["blast"]["requested-max-target-seqs"] == "3"
-    assert config["blast"]["candidate-pool-size-requested"] == "0"
+    assert f"-max_target_seqs {applied_pool_size}" in config["blast"]["options"]
+    assert config["blast"]["requested-max-target-seqs"] == str(max_target_seqs)
+    assert config["blast"]["candidate-pool-size-requested"] == str(
+        candidate_pool_size or 0
+    )
     assert config["blast"]["result-selection-policy"] == "sequence_diversity"
-    assert job_data["requested_sequence_groups"] == 3
-    assert job_data["candidate_pool_size_requested_per_shard"] is None
-    assert job_data["candidate_pool_size_applied_per_shard"] == 2000
+    assert job_data["requested_sequence_groups"] == max_target_seqs
+    assert job_data["candidate_pool_size_requested_per_shard"] == candidate_pool_size
+    assert job_data["candidate_pool_size_applied_per_shard"] == applied_pool_size
 
 
 def _sequence_idempotent_request(main_module, *, outfmt: str):

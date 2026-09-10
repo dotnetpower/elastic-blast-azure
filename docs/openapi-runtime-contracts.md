@@ -65,13 +65,17 @@ row for each selected accession.
 `blast_options.candidate_pool_size` is a positive integer used only by
 `sequence_diversity`. It is the per-shard BLAST subject cap, separate from the
 final per-query group count in `max_target_seqs`. The server default is `2000`
-and the hard maximum is `5000`, matching the existing bounded 5,000-candidate
-runtime path. Values below `max_target_seqs`, above `5000`, non-integers, and use
-with another policy are rejected instead of clamped.
+when omitted. There is no fixed server maximum: an explicit value remains a
+finite per-request bound and must be greater than or equal to
+`max_target_seqs`. Non-positive values, non-integers, and use with another
+policy are rejected instead of clamped. Larger pools proportionally increase
+BLAST output, storage, and merge work.
 
 The merger keeps row bodies in the input spool and ranking/signature metadata
 in a file-backed SQLite database. It does not collect the candidate pool or
-aligned sequences in an unbounded Python list.
+aligned sequences in an unbounded Python list. The per-group detail list in the
+merge report is capped at 5,000 entries and reports truncation explicitly; this
+observability bound does not truncate the canonical result or aggregate counts.
 
 ### Merge report
 
@@ -226,7 +230,7 @@ The source also includes the runtime guards used by the validated dashboard imag
 - reader/writer locking for shared database paths
 - finalizer deadlines and terminal failure projection
 - disk-backed shard-result merge and bounded oracle processing
-- disk-backed sequence-signature grouping with a 5,000-candidate per-shard cap
+- disk-backed sequence-signature grouping with an explicit per-request shard cap
 - a 1,024-entry ceiling for shard-layout volumes and merge shard counts
 
 The Dockerfile asserts that these contracts are present in source, system-Python, and Azure CLI virtual-environment copies before the image can complete its build.

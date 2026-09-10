@@ -42,7 +42,8 @@ HTTP 422, and writes one representative HSP per observed sequence signature to
 the canonical merged result. Existing `native_top_n`, `diversity_aware`, and
 `full` / `merged` / `xml` download behavior is unchanged. See the runtime
 contract for signature, count, candidate-pool, and downstream filtering
-semantics.
+semantics. The candidate pool defaults to `2000`; larger positive finite values
+are accepted without a fixed server maximum.
 
 kubectl create deployment elb-openapi --image=elbacr.azurecr.io/elb-openapi:0.2
 kubectl expose deployment elb-openapi --type=LoadBalancer --port=80 --target-port=8000
