@@ -22,7 +22,7 @@ RUN curl -LO "https://dl.k8s.io/release/v1.31.4/bin/linux/amd64/kubectl" && \
     chmod +x kubectl && \
     mv kubectl /usr/local/bin/kubectl
 
-ARG ELB_REF=7a471297
+ARG ELB_REF=744d79b
 
 RUN apt-get -y -m update && \
     apt-get install -y zip unzip curl git wget jq && \
@@ -33,6 +33,15 @@ RUN apt-get -y -m update && \
     git clone --filter=blob:none --no-checkout https://github.com/dotnetpower/elastic-blast-azure.git /tmp/elb-src && \
     git -C /tmp/elb-src checkout ${ELB_REF} && \
     python3 /tmp/patch_elastic_blast.py /tmp/elb-src /tmp/merge-sharded-results.sh && \
+    grep -q 'ttlSecondsAfterFinished:' /tmp/elb-src/src/elastic_blast/templates/blast-batch-job-aks.yaml.template && \
+    for template in job-init-ssd-shard-aks.yaml.template blast-batch-job-shard-ssd-aks.yaml.template elb-finalizer-aks.yaml.template; do grep -q 'elb-job-id: "${BLAST_ELB_JOB_ID}"' "/tmp/elb-src/src/elastic_blast/templates/${template}" || exit 1; done && \
+    grep -q 'def _wait_for_elb_init_jobs(' /tmp/elb-src/src/elastic_blast/kubernetes.py && \
+    grep -q 'ELB DB reader lock' /tmp/elb-src/src/elastic_blast/templates/scripts/blast-run-aks.sh && \
+    for template in blast-batch-job-local-ssd-aks.yaml.template blast-batch-job-shard-ssd-aks.yaml.template; do grep -q 'name: ELB_DB_READER_LOCK' "/tmp/elb-src/src/elastic_blast/templates/${template}" || exit 1; done && \
+    grep -q 'ELB DB writer lock' /tmp/elb-src/src/elastic_blast/templates/scripts/init-db-download-aks.sh && \
+    grep -q 'name: ELB_DB_WRITER_LOCK' /tmp/elb-src/src/elastic_blast/templates/job-init-local-ssd-aks.yaml.template && \
+    grep -q 'DISK_PREFLIGHT required_bytes=' /tmp/elb-src/src/elastic_blast/templates/scripts/init-db-shard-aks.sh && \
+    grep -Fq 'name: init-ssd-${BLAST_ELB_JOB_ID}-${NODE_ORDINAL}' /tmp/elb-src/src/elastic_blast/templates/job-init-ssd-shard-aks.yaml.template && \
     python3 -c "exec('from pathlib import Path\nblock = \"      tolerations:\\\\n      - key: workload\\\\n        operator: Equal\\\\n        value: blast\\\\n        effect: NoSchedule\\\\n\"\nd = Path(\"/tmp/elb-src/src/elastic_blast/templates\")\nfor p in d.glob(\"*-aks.yaml.template\"):\n    t = p.read_text()\n    if \"key: workload\" in t:\n        continue\n    t = t.replace(\"      restartPolicy:\", block + \"      restartPolicy:\")\n    t = t.replace(\"      nodeSelector:\\\\n        kubernetes.io/os: linux\", block + \"      nodeSelector:\\\\n        kubernetes.io/os: linux\")\n    p.write_text(t)')" && \
     pip3 install --no-cache-dir -r /tmp/elb-src/requirements/base.txt && \
         pip3 install --no-cache-dir \
@@ -42,6 +51,15 @@ RUN apt-get -y -m update && \
             azure-mgmt-storage==21.2.1 && \
     pip3 install --no-cache-dir --no-build-isolation /tmp/elb-src && \
     cp -a /tmp/elb-src/src/elastic_blast/templates/. /usr/local/lib/python3.11/site-packages/elastic_blast/templates/ && \
+    grep -q 'ttlSecondsAfterFinished:' /usr/local/lib/python3.11/site-packages/elastic_blast/templates/blast-batch-job-aks.yaml.template && \
+    for template in job-init-ssd-shard-aks.yaml.template blast-batch-job-shard-ssd-aks.yaml.template elb-finalizer-aks.yaml.template; do grep -q 'elb-job-id: "${BLAST_ELB_JOB_ID}"' "/usr/local/lib/python3.11/site-packages/elastic_blast/templates/${template}" || exit 1; done && \
+    grep -q 'def _wait_for_elb_init_jobs(' /usr/local/lib/python3.11/site-packages/elastic_blast/kubernetes.py && \
+    grep -q 'ELB DB reader lock' /usr/local/lib/python3.11/site-packages/elastic_blast/templates/scripts/blast-run-aks.sh && \
+    for template in blast-batch-job-local-ssd-aks.yaml.template blast-batch-job-shard-ssd-aks.yaml.template; do grep -q 'name: ELB_DB_READER_LOCK' "/usr/local/lib/python3.11/site-packages/elastic_blast/templates/${template}" || exit 1; done && \
+    grep -q 'ELB DB writer lock' /usr/local/lib/python3.11/site-packages/elastic_blast/templates/scripts/init-db-download-aks.sh && \
+    grep -q 'name: ELB_DB_WRITER_LOCK' /usr/local/lib/python3.11/site-packages/elastic_blast/templates/job-init-local-ssd-aks.yaml.template && \
+    grep -q 'DISK_PREFLIGHT required_bytes=' /usr/local/lib/python3.11/site-packages/elastic_blast/templates/scripts/init-db-shard-aks.sh && \
+    grep -Fq 'name: init-ssd-${BLAST_ELB_JOB_ID}-${NODE_ORDINAL}' /usr/local/lib/python3.11/site-packages/elastic_blast/templates/job-init-ssd-shard-aks.yaml.template && \
     install -m 0755 /tmp/elb-src/bin/elastic-blast /usr/local/bin/elastic-blast && \
     sed -i '1c#!/usr/local/bin/python3' /usr/local/bin/elastic-blast && \
     true && \
@@ -54,6 +72,15 @@ RUN python3 -m venv /opt/venv \
     && pip install --no-cache-dir azure-cli \
     && pip install --no-cache-dir --no-deps --no-build-isolation /tmp/elb-src \
     && cp -a /tmp/elb-src/src/elastic_blast/templates/. /opt/venv/lib/python3.11/site-packages/elastic_blast/templates/ \
+    && grep -q 'ttlSecondsAfterFinished:' /opt/venv/lib/python3.11/site-packages/elastic_blast/templates/blast-batch-job-aks.yaml.template \
+    && for template in job-init-ssd-shard-aks.yaml.template blast-batch-job-shard-ssd-aks.yaml.template elb-finalizer-aks.yaml.template; do grep -q 'elb-job-id: "${BLAST_ELB_JOB_ID}"' "/opt/venv/lib/python3.11/site-packages/elastic_blast/templates/${template}" || exit 1; done \
+    && grep -q 'def _wait_for_elb_init_jobs(' /opt/venv/lib/python3.11/site-packages/elastic_blast/kubernetes.py \
+    && grep -q 'ELB DB reader lock' /opt/venv/lib/python3.11/site-packages/elastic_blast/templates/scripts/blast-run-aks.sh \
+    && for template in blast-batch-job-local-ssd-aks.yaml.template blast-batch-job-shard-ssd-aks.yaml.template; do grep -q 'name: ELB_DB_READER_LOCK' "/opt/venv/lib/python3.11/site-packages/elastic_blast/templates/${template}" || exit 1; done \
+    && grep -q 'ELB DB writer lock' /opt/venv/lib/python3.11/site-packages/elastic_blast/templates/scripts/init-db-download-aks.sh \
+    && grep -q 'name: ELB_DB_WRITER_LOCK' /opt/venv/lib/python3.11/site-packages/elastic_blast/templates/job-init-local-ssd-aks.yaml.template \
+    && grep -q 'DISK_PREFLIGHT required_bytes=' /opt/venv/lib/python3.11/site-packages/elastic_blast/templates/scripts/init-db-shard-aks.sh \
+    && grep -Fq 'name: init-ssd-${BLAST_ELB_JOB_ID}-${NODE_ORDINAL}' /opt/venv/lib/python3.11/site-packages/elastic_blast/templates/job-init-ssd-shard-aks.yaml.template \
     && rm -rf /tmp/elb-src \
     && deactivate
 

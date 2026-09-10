@@ -110,7 +110,8 @@ def _safe_result_blob_path(value: str, fallback_filename: str) -> str:
         raise HTTPException(400, "Invalid result blob path")
     if not re.match(r"^[A-Za-z0-9._/-]{1,512}\.(?:xml|out)(?:\.gz)?$", blob_path, re.IGNORECASE):
         raise HTTPException(400, "Invalid result blob path")
-    if not blob_path.split("/")[-1].startswith("batch_"):
+    basename = blob_path.split("/")[-1]
+    if not (basename.startswith("batch_") or basename == "merged_results.out.gz"):
         raise HTTPException(400, "Invalid result blob path")
     return blob_path
 

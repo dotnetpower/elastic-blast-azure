@@ -97,6 +97,86 @@ class BlastOptions(BaseModel):
     max_target_seqs: Optional[int] = Field(None, description="Maximum number of hits to return.", examples=[100])
     outfmt: Optional[str] = Field(None, description="Output format string (default: '7').", examples=["7"])
     extra: Optional[str] = Field(None, description="Additional BLAST CLI options as raw string.")
+    web_blast_statistical_context: Optional["WebBlastStatisticalContext"] = Field(
+        None,
+        description=(
+            "Optional measured single-query taxonomy-filtered statistics; "
+            "omit when these reference values are unavailable."
+        ),
+    )
+    result_selection_policy: Literal["native_top_n", "diversity_aware"] = Field(
+        "native_top_n",
+        description=(
+            "Final subject-selection policy. native_top_n reproduces the "
+            "BLAST top-N comparator; diversity_aware reserves lower-score "
+            "subjects when a tied score class fills the result window."
+        ),
+    )
+    db_effective_search_space: Optional[int] = Field(
+        None,
+        ge=1,
+        description=(
+            "Optional explicit scoring search space. Omit for core_nt so the "
+            "server derives it from the active database generation."
+        ),
+    )
+
+
+class WebBlastStatisticalContext(BaseModel):
+    filtered_database_letters: int = Field(..., ge=1)
+    filtered_database_sequences: int = Field(..., ge=1)
+    length_adjustment: int = Field(..., ge=0)
+    effective_search_space: int = Field(..., ge=1)
+    scoring_search_space: int = Field(..., ge=1)
+    result_database_letters: int = Field(..., ge=1)
+
+
+class WebBlastStatisticalContextRequest(BaseModel):
+    rid: str = Field(..., min_length=8, max_length=16, pattern=r"^[A-Z0-9]{8,16}$")
+    query_fasta: str = Field(..., min_length=1, max_length=10_000_000)
+    db: Literal["core_nt"] = "core_nt"
+    taxid: Optional[int] = Field(None, ge=1, le=2_147_483_647)
+    is_inclusive: Optional[bool] = Field(
+        None,
+        description="With taxid, true includes the taxon and false excludes it; omitted defaults to true.",
+    )
+
+
+class WebBlastStatisticalContextResponse(BaseModel):
+    status: Literal["resolved"]
+    rid: str
+    database: Literal["core_nt"]
+    reference_query_id: str
+    submitted_query_id: str
+    query_length: int = Field(..., ge=1)
+    active_source_version: str
+    web_blast_statistical_context: WebBlastStatisticalContext
+    query_effective_search_spaces: list[int]
+    expected_filter: dict[str, Any]
+    evidence: dict[str, Any]
+    warnings: list[str]
+
+
+class JobStatusResponse(BaseModel):
+    model_config = {"extra": "allow"}
+
+    job_id: str
+    status: str
+    phase: Optional[str] = None
+    results_ready: Optional[bool] = None
+    results_ready_at: Optional[str] = None
+    merged_at: Optional[str] = None
+    db_partitions: Optional[int] = Field(None, ge=0)
+    result_selection_policy: Optional[Literal["native_top_n", "diversity_aware"]] = None
+
+
+class JobListResponse(BaseModel):
+    model_config = {"extra": "allow"}
+
+    jobs: list[JobStatusResponse]
+    count: int = Field(..., ge=0)
+    next_cursor: Optional[str] = None
+    has_more: bool = False
 
 
 class ExternalBlastOptions(BaseModel):
@@ -109,6 +189,9 @@ class ExternalBlastOptions(BaseModel):
     outfmt: int = Field(5, description="Fixed to BLAST XML format 5")
     word_size: int = Field(28, ge=1)
     dust: bool = Field(True)
+    soft_masking: bool = Field(False)
+    db_effective_search_space: Optional[int] = Field(None, ge=1)
+    web_blast_statistical_context: Optional[WebBlastStatisticalContext] = None
     evalue: float = Field(10.0, gt=0)
     max_target_seqs: int = Field(500, ge=1)
 

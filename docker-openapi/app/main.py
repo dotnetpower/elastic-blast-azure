@@ -75,12 +75,22 @@ from schemas import (
     ExternalBlastOptions,
     ExternalSubmitRequest,
     JobSubmitRequest,
+    JobListResponse,
+    JobStatusResponse,
+    WebBlastStatisticalContextRequest,
+    WebBlastStatisticalContextResponse,
     _sanitize_passthrough,
 )
 from schemas import (
     DEFAULT_EXTERNAL_SOURCE as _DEFAULT_EXTERNAL_SOURCE,
 )
 from util import run_cancellable, safe_exec
+
+try:
+    import exact_oracle as _exact_oracle
+except Exception:  # pragma: no cover - validated before precise submit
+    _exact_oracle = None
+import reference_context as _reference_context
 
 try:
     import eta as _eta
@@ -209,6 +219,12 @@ SUBMIT_MAX_RETRIES = max(1, int(os.environ.get("ELB_OPENAPI_SUBMIT_MAX_RETRIES",
 # past the window the marker is trusted so a listing that never catches up
 # cannot wedge the job in a non-terminal state forever.
 RESULTS_VISIBILITY_GRACE_SECONDS = max(0, int(os.environ.get("ELB_OPENAPI_RESULTS_VISIBILITY_GRACE_SECONDS", "120")))
+PARTITIONED_RESULT_FINALIZER_DEADLINE_SECONDS = max(
+    1,
+    int(os.environ.get(
+        "ELB_FINALIZER_ACTIVE_DEADLINE_SECONDS", "1800"
+    )),
+)
 BACKGROUND_DISABLED = os.environ.get("ELB_OPENAPI_DISABLE_BACKGROUND", "").lower() in {"1", "true", "yes"}
 
 _BLOB_URL_RE = re.compile(r"^https://[a-z0-9]+\.blob\.core\.windows\.net/[a-z0-9][-a-z0-9]*/.*$")
@@ -1950,10 +1966,84 @@ def get_blast_database(db_name: str, response: StarletteResponse):
             f"Database {db_name!r} not found or metadata unavailable.",
             headers={"X-Cache": cache_status},
         )
+    if safe == "core_nt":
+        try:
+            active_database = _exact_oracle.read_active_database(
+                blob_base=_blob_base(),
+                db_name="core_nt",
+                token=_storage_oauth_token(),
+            )
+        except Exception as exc:
+            raise HTTPException(
+                503,
+                "Active core_nt generation metadata is unavailable",
+            ) from exc
+        meta = {
+            **meta,
+            "snapshot": active_database.source_version,
+            "number_of_sequences": active_database.total_sequences,
+            "number_of_letters": active_database.total_letters,
+        }
     response.headers["X-Cache"] = cache_status
     return meta
 
 # ── Jobs — Submit ──────────────────────────────────────────────────────────
+@v1.post(
+    "/web-blast/statistical-context",
+    tags=["Jobs"],
+    summary="Resolve Web BLAST statistical context from an NCBI RID",
+    response_model=WebBlastStatisticalContextResponse,
+)
+def resolve_web_blast_statistical_context(
+    req: WebBlastStatisticalContextRequest,
+) -> dict[str, Any]:
+    if req.taxid is None and req.is_inclusive is not None:
+        raise HTTPException(422, "is_inclusive requires taxid")
+    if _exact_oracle is None:
+        raise HTTPException(503, "Active database metadata support is unavailable")
+    try:
+        active_database = _exact_oracle.read_active_database(
+            blob_base=_blob_base(),
+            db_name=req.db,
+            token=_storage_oauth_token(),
+        )
+    except Exception as exc:
+        logger.warning(
+            "reference context active database metadata unavailable error_type=%s",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            503,
+            detail={"code": "active_database_unavailable", "message": "Active database generation metadata is unavailable", "retryable": True},
+        ) from exc
+    try:
+        return _reference_context.resolve_reference_context(
+            rid=req.rid,
+            query_fasta=req.query_fasta,
+            active_total_letters=active_database.total_letters,
+            active_total_sequences=active_database.total_sequences,
+            active_source_version=active_database.source_version,
+            taxid=req.taxid,
+            is_inclusive=(True if req.taxid is not None and req.is_inclusive is None else req.is_inclusive),
+        )
+    except _reference_context.ReferenceContextNotReady as exc:
+        raise HTTPException(
+            409,
+            detail={"code": "reference_not_ready", "message": str(exc), "retryable": True},
+            headers={"Retry-After": "30"},
+        ) from exc
+    except _reference_context.ReferenceContextUnavailable as exc:
+        raise HTTPException(
+            503,
+            detail={"code": "reference_unavailable", "message": str(exc), "retryable": True},
+        ) from exc
+    except _reference_context.ReferenceContextError as exc:
+        raise HTTPException(
+            422,
+            detail={"code": "reference_invalid", "message": str(exc), "retryable": False},
+        ) from exc
+
+
 
 def _build_options(opts: BlastOptions | None, taxid: int | None, inclusive: bool | None) -> str:
     parts: list[str] = []
@@ -1962,6 +2052,15 @@ def _build_options(opts: BlastOptions | None, taxid: int | None, inclusive: bool
         if opts.max_target_seqs is not None: parts.append(f"-max_target_seqs {opts.max_target_seqs}")
         if opts.outfmt is not None: parts.append(f"-outfmt {opts.outfmt}")
         if opts.extra: parts.append(opts.extra)
+        if opts.db_effective_search_space is not None:
+            raw_extra = str(opts.extra or "")
+            if re.search(r"(?<!\S)-(?:searchsp|dbsize)(?:\s|=|$)", raw_extra):
+                raise HTTPException(
+                    400,
+                    "blast_options.db_effective_search_space conflicts with "
+                    "blast_options.extra -searchsp/-dbsize",
+                )
+            parts.append("-searchsp " + str(opts.db_effective_search_space))
     if not parts:
         parts.append("-evalue 0.01 -outfmt 7")
     if taxid is not None:
@@ -1979,7 +2078,14 @@ def _build_external_options(opts: ExternalBlastOptions, taxid: int | None, inclu
         f"-evalue {opts.evalue}",
         f"-max_target_seqs {opts.max_target_seqs}",
         "-dust yes" if opts.dust else "-dust no",
+        "-soft_masking true" if opts.soft_masking else "-soft_masking false",
     ]
+    if opts.db_effective_search_space is not None:
+        parts.append(f"-searchsp {opts.db_effective_search_space}")
+    if opts.web_blast_statistical_context is not None:
+        parts.append(
+            f"-dbsize {opts.web_blast_statistical_context.filtered_database_letters}"
+        )
     if taxid is not None:
         option = "-taxids" if inclusive is not False else "-negative_taxids"
         parts.append(f"{option} {taxid}")
@@ -2005,21 +2111,22 @@ def _discover_elb_job_id_from_submit_output(job_id: str, stdout: str) -> str:
     if not stdout:
         return ""
     patterns = (
-        rf"/results/(?:\d{{4}}/\d{{2}}/\d{{2}}/)?{re.escape(job_id)}/(?P<elb_job_id>job-[A-Za-z0-9_-]+)/metadata/",
-        r"\b(?P<elb_job_id>job-[0-9a-f]{32})\b",
+        rf"/results/(?:\d{{4}}/\d{{2}}/\d{{2}}/)?{re.escape(job_id)}/(?P<elb_job_id>job-[0-9a-fA-F]{32})/metadata/",
+        r"\b(?P<elb_job_id>job-[0-9a-fA-F]{32})\b",
     )
     for pattern in patterns:
         match = re.search(pattern, stdout)
         if match:
-            return match.group("elb_job_id")
+            return match.group("elb_job_id").lower()
     return ""
 
 
 def _effective_elb_job_id(job_info: dict[str, Any]) -> str:
     job_id = str(job_info.get("job_id") or "")
     current = str(job_info.get("elb_job_id") or "")
-    if current.startswith("job-"):
-        return current
+    canonical_current = re.fullmatch(r"job-[0-9a-f]{32}", current, re.IGNORECASE)
+    if canonical_current:
+        return canonical_current.group(0).lower()
     discovered = _discover_elb_job_id_from_submit_output(
         job_id,
         "\n".join(
@@ -2030,7 +2137,7 @@ def _effective_elb_job_id(job_info: dict[str, Any]) -> str:
     if discovered:
         _update_job(job_id, elb_job_id=discovered)
         return discovered
-    return current or job_id
+    return job_id
 
 
 def _ensure_elb_scripts_configmap() -> None:
@@ -2038,36 +2145,104 @@ def _ensure_elb_scripts_configmap() -> None:
         "blast-run-aks.sh",
         "elb-finalizer-aks.sh",
         "init-db-download-aks.sh",
+        "init-db-shard-aks.sh",
         "query-download-ssd-aks.sh",
         "results-export-aks.sh",
     }
-    try:
-        existing = safe_exec(["kubectl", "get", "configmap", "elb-scripts", "-o", "json"], timeout=10)
-        data = json.loads(existing.stdout or "{}").get("data", {})
-        if required_scripts.issubset(set(data)):
-            return
-    except Exception:
-        pass
     scripts_dir = files("elastic_blast").joinpath("templates/scripts")
     scripts_path = Path(str(scripts_dir))
-    if not all((scripts_path / name).is_file() for name in required_scripts):
-        missing = sorted(name for name in required_scripts if not (scripts_path / name).is_file())
+    desired_scripts = {
+        script_path.name: script_path.read_text(encoding="utf-8")
+        for script_path in scripts_path.iterdir()
+        if script_path.is_file() and script_path.suffix == ".sh"
+    }
+    desired_size = sum(
+        len(name.encode("utf-8")) + len(content.encode("utf-8"))
+        for name, content in desired_scripts.items()
+    )
+    if desired_size > 900_000:
+        raise RuntimeError(
+            f"Installed ElasticBLAST scripts exceed ConfigMap limit: {desired_size} bytes"
+        )
+    missing = sorted(required_scripts.difference(desired_scripts))
+    if missing:
         raise RuntimeError(f"Installed ElasticBLAST scripts are incomplete: {missing}")
-    # Build the ConfigMap manifest in-process and apply via stdin so we
-    # don't fork a shell. The previous ``sh -lc 'kubectl ... | kubectl ...'``
-    # pattern was vulnerable to a path-with-spaces in ``scripts_dir`` and
-    # added a shell parsing layer to the trusted-input chain.
+
+    existing_data: dict[str, str] = {}
+    try:
+        existing = safe_exec(
+            ["kubectl", "get", "configmap", "elb-scripts", "-o", "json"],
+            timeout=10,
+        )
+        raw_data = json.loads(existing.stdout or "{}").get("data", {})
+        if isinstance(raw_data, dict):
+            existing_data = {
+                str(name): str(content) for name, content in raw_data.items()
+            }
+    except Exception as exc:
+        logger.info(
+            "ELB scripts ConfigMap lookup unavailable; reconciling reason=%s",
+            type(exc).__name__,
+        )
+
+    drifted = sorted(
+        name
+        for name, content in desired_scripts.items()
+        if existing_data.get(name) != content
+    )
+    if not drifted:
+        return
+    logger.info(
+        "ELB scripts ConfigMap drift detected; reconciling scripts=%s",
+        ",".join(drifted),
+    )
     dry_run = subprocess.run(
-        ["kubectl", "create", "configmap", "elb-scripts",
-         f"--from-file={scripts_path}",
-         "--dry-run=client", "-o", "yaml"],
-        capture_output=True, text=True, timeout=30, check=True,
+        [
+            "kubectl",
+            "create",
+            "configmap",
+            "elb-scripts",
+            f"--from-file={scripts_path}",
+            "--dry-run=client",
+            "-o",
+            "yaml",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
     )
     subprocess.run(
         ["kubectl", "apply", "-f", "-"],
-        input=dry_run.stdout, capture_output=True, text=True, timeout=60, check=True,
+        input=dry_run.stdout,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
     )
-
+    try:
+        applied = safe_exec(
+            ["kubectl", "get", "configmap", "elb-scripts", "-o", "json"],
+            timeout=10,
+        )
+        applied_data = json.loads(applied.stdout or "{}").get("data", {})
+    except Exception as exc:
+        raise RuntimeError(
+            "ELB scripts ConfigMap verification failed "
+            f"reason={type(exc).__name__}"
+        ) from None
+    if not isinstance(applied_data, dict):
+        raise RuntimeError("ELB scripts ConfigMap verification returned invalid data")
+    remaining_drift = sorted(
+        name
+        for name, content in desired_scripts.items()
+        if applied_data.get(name) != content
+    )
+    if remaining_drift:
+        raise RuntimeError(
+            "ELB scripts ConfigMap verification found drift scripts="
+            + ",".join(remaining_drift)
+        )
 
 def _run_submit_bg(job_id: str) -> None:
     with _jobs_lock:
@@ -2121,12 +2296,18 @@ def _run_submit_bg(job_id: str) -> None:
             status = "failed"
         else:
             status = "running"
+        correlation_id = str(payload.get("correlation_id") or "")
+        canonical_correlation_id = (
+            correlation_id.lower()
+            if re.fullmatch(r"job-[0-9a-f]{32}", correlation_id, re.IGNORECASE)
+            else ""
+        )
         _update_job(
             job_id,
             status=status,
             phase="submitted" if status == "running" else status,
             elb_job_id=(
-                payload.get("correlation_id")
+                canonical_correlation_id
                 or _discover_elb_job_id_from_submit_output(job_id, result.stdout or "")
                 or job_id
             ),
@@ -2166,7 +2347,7 @@ def _job_marker_phase(results_url: str, elb_job_id: str = "") -> str | None:
         return None
     base = results_url.rstrip("/")
     candidates = [f"{base}/metadata/"]
-    if elb_job_id.startswith("job-"):
+    if re.fullmatch(r"job-[0-9a-f]{32}", elb_job_id, re.IGNORECASE):
         candidates.insert(0, f"{base}/{elb_job_id}/metadata/")
     for marker_url in candidates:
         try:
@@ -2197,6 +2378,7 @@ def _k8s_job_summary(elb_job_id: str) -> dict[str, Any]:
         "active": 0,
         "submit_failed": 0,
         "finalizer_active": 0,
+        "finalizer_failed_terminal": 0,
         "failed_terminal": 0,
         "submit_failed_terminal": 0,
     }
@@ -2231,6 +2413,8 @@ def _k8s_job_summary(elb_job_id: str) -> dict[str, Any]:
                 summary["submit_failed_terminal"] += 1
         elif app_label == "finalizer":
             summary["finalizer_active"] += status.get("active", 0) or 0
+            if job_failed_terminal:
+                summary["finalizer_failed_terminal"] += 1
     return summary
 
 
@@ -2299,6 +2483,9 @@ def _notify_terminal_transition(job_id: str, updates: dict[str, Any]) -> None:
             job_snap = dict(_jobs.get(job_id, {}))
         if job_snap:
             merged = {**job_snap, **updates}
+            runtime_job_id = _effective_elb_job_id(merged)
+            if re.fullmatch(r"job-[0-9a-f]{32}", runtime_job_id, re.IGNORECASE) and runtime_job_id != job_id:
+                payload["elb_job_id"] = runtime_job_id
             started_at = merged.get("started_at") or ""
             terminal_at = (
                 merged.get("completed_at")
@@ -2358,8 +2545,15 @@ def _refresh_job_status(job_id: str) -> dict[str, Any] | None:
     if job.get("status") in _TERMINAL_STATES or job.get("status") == "queued":
         return job
 
+    requires_canonical_merge = _result_partition_count(job) > 1
+
     elb_job_id = _effective_elb_job_id(job)
-    marker = _job_marker_phase(job.get("results", ""), elb_job_id)
+    marker_results_url = str(job.get("results", "")).rstrip("/")
+    marker = None
+    if marker_results_url and re.fullmatch(r"job-[0-9a-f]{32}", elb_job_id, re.IGNORECASE):
+        marker = _job_marker_phase(f"{marker_results_url}/{elb_job_id}")
+    if marker is None:
+        marker = _job_marker_phase(marker_results_url)
     if marker == "failed":
         updates: dict[str, Any] = {
             "status": "failed",
@@ -2406,7 +2600,27 @@ def _refresh_job_status(job_id: str) -> dict[str, Any] | None:
         # non-terminal state forever — past the grace window we trust the
         # marker (the artifacts are durably written per the finalizer contract).
         seen_at = job.get("success_marker_seen_at") or _now_iso()
-        if _age_seconds(seen_at) > RESULTS_VISIBILITY_GRACE_SECONDS:
+        marker_age = _age_seconds(seen_at)
+        if (
+            requires_canonical_merge
+            and marker_age > PARTITIONED_RESULT_FINALIZER_DEADLINE_SECONDS
+        ):
+            updates = {
+                "status": "failed",
+                "phase": "finalizer_failed",
+                "error": "canonical merged result was not published before the finalizer deadline",
+                "last_progress_at": _now_iso(),
+            }
+            summary_snapshot = _snapshot_k8s_summary_for_terminal(job, elb_job_id)
+            if summary_snapshot is not None:
+                updates["k8s_summary"] = summary_snapshot
+            result = _update_job(job_id, **updates)
+            _notify_terminal_transition(job_id, updates)
+            return result
+        if (
+            not requires_canonical_merge
+            and marker_age > RESULTS_VISIBILITY_GRACE_SECONDS
+        ):
             updates = {
                 "status": "completed",
                 "phase": "completed",
@@ -2441,13 +2655,23 @@ def _refresh_job_status(job_id: str) -> dict[str, Any] | None:
         # ``_cancel_job`` already fires the failure webhook -- do not double-notify.
         _cancel_job(job_id, stuck_reason, terminal_status="failed")
         return refreshed
-    if summary.get("submit_failed_terminal"):
+    if summary.get("finalizer_failed_terminal"):
+        updates.update(
+            {
+                "status": "failed",
+                "phase": "finalizer_failed",
+                "error": "result merge finalizer failed or exceeded its deadline",
+            }
+        )
+    elif summary.get("submit_failed_terminal"):
         updates.update({"status": "failed", "phase": "submit_failed", "error": "submit job failed before creating BLAST jobs"})
     elif summary.get("failed_terminal"):
         updates.update({"status": "failed", "phase": "blast_failed", "error": "one or more BLAST jobs failed"})
     elif summary.get("total", 0) > 0:
         if summary.get("succeeded", 0) >= summary.get("total", 0) and summary.get("total", 0) > 0:
-            if _list_result_files(job):
+            if requires_canonical_merge:
+                updates.update({"status": "running", "phase": "finalizing"})
+            elif _list_result_files(job):
                 updates.update({"status": "completed", "phase": "completed", "completed_at": _now_iso()})
             else:
                 updates.update({"status": "running", "phase": "finalizing"})
@@ -2464,7 +2688,7 @@ def _refresh_job_status(job_id: str) -> dict[str, Any] | None:
             # Hold at ``pending`` and re-poll instead of declaring the run dead.
             updates.update({"status": "running", "phase": "pending"})
     else:
-        if _list_result_files(job):
+        if not requires_canonical_merge and _list_result_files(job):
             updates.update({"status": "completed", "phase": "completed", "completed_at": _now_iso()})
         else:
             updates.update({"phase": "submitting"})
@@ -2599,10 +2823,32 @@ def _progress_pct(job_info: dict[str, Any]) -> int:
     return max(1, min(99, int((succeeded / total) * 100)))
 
 
+def _result_partition_count(job_info):
+    exact_oracle = job_info.get("exact_oracle")
+    raw_partitions = (
+        job_info.get("db_partitions")
+        or exact_oracle.get("db_partitions", 0)
+        if isinstance(exact_oracle, dict)
+        else job_info.get("db_partitions", 0)
+    )
+    try:
+        return max(0, int(raw_partitions or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _list_result_files(job_info: dict[str, Any]) -> list[dict[str, Any]]:
+    requires_merged_result = _result_partition_count(job_info) > 1
     existing = job_info.get("result_files")
     if isinstance(existing, list) and existing:
-        return existing
+        if any(item.get("filename") == "merged_results.out.gz" for item in existing):
+            return existing
+        if not requires_merged_result:
+            return existing
+        # A pre-finalizer poll may cache shard `batch_*` intermediates.
+        # A partitioned run is not downloadable until the canonical
+        # merged output appears, so re-list instead of completing on
+        # cached shard files.
     results_url = str(job_info.get("results", ""))
     if not results_url:
         return []
@@ -2619,7 +2865,12 @@ def _list_result_files(job_info: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         blob_path = match.group("name")
         name = blob_path.split("/")[-1]
-        if not name.startswith("batch_"):
+        if name == "merged_results.out.gz":
+            files = []
+            seen = set()
+        elif requires_merged_result or not name.startswith("batch_") or any(
+            item.get("filename") == "merged_results.out.gz" for item in files
+        ):
             continue
         if name in seen:
             continue
@@ -2672,9 +2923,17 @@ def _external_job_payload(job_info: dict[str, Any]) -> dict[str, Any]:
     _pt = job_info.get("passthrough")
     if isinstance(_pt, dict) and _pt:
         payload["passthrough"] = _pt
+    payload["result_selection_policy"] = job_info.get(
+        "result_selection_policy", "native_top_n"
+    )
+    payload["db_partitions"] = int(job_info.get("db_partitions", 0) or 0)
+    for _runtime_key in ("exact_oracle", "web_blast_statistics"):
+        _runtime_value = job_info.get(_runtime_key)
+        if isinstance(_runtime_value, dict) and _runtime_value:
+            payload[_runtime_key] = _runtime_value
     summary = job_info.get("k8s_summary") if isinstance(job_info.get("k8s_summary"), dict) else {}
     effective_elb_job_id = _effective_elb_job_id(job_info)
-    if effective_elb_job_id.startswith("job-") and job_info.get("elb_job_id") != effective_elb_job_id:
+    if re.fullmatch(r"job-[0-9a-f]{32}", effective_elb_job_id, re.IGNORECASE) and job_info.get("elb_job_id") != effective_elb_job_id:
         fresh_summary = _k8s_job_summary(effective_elb_job_id)
         updated = _update_job(
             job_info["job_id"],
@@ -2693,7 +2952,7 @@ def _external_job_payload(job_info: dict[str, Any]) -> dict[str, Any]:
     # GENUINE discovered id: ``_effective_elb_job_id`` falls back to the OpenAPI
     # ``job_id`` when none has been discovered yet, so guard on it differing from
     # ``job_id`` to avoid handing the dashboard a non-existent pod selector.
-    if effective_elb_job_id.startswith("job-") and effective_elb_job_id != str(
+    if re.fullmatch(r"job-[0-9a-f]{32}", effective_elb_job_id, re.IGNORECASE) and effective_elb_job_id != str(
         job_info.get("job_id") or ""
     ):
         payload["elb_job_id"] = effective_elb_job_id
@@ -2732,12 +2991,28 @@ def _external_job_payload(job_info: dict[str, Any]) -> dict[str, Any]:
             if _eta_out:
                 payload["eta"] = _eta_out
     elif public_status == "success":
-        payload["completed_at"] = job_info.get("completed_at") or job_info.get("updated_at", "")
+        ready_at = job_info.get("completed_at") or job_info.get("updated_at", "")
+        payload["completed_at"] = ready_at
         files = _list_result_files(job_info)
         result_payload: dict[str, Any] = {"files": files}
         if "hit_count" in job_info:
             result_payload["hit_count"] = int(job_info.get("hit_count", 0) or 0)
         payload["result"] = result_payload
+        payload["results_ready"] = bool(files)
+        if files:
+            payload["results_ready_at"] = ready_at
+            exact_oracle = job_info.get("exact_oracle")
+            try:
+                result_partitions = int(
+                    job_info.get("db_partitions")
+                    or exact_oracle.get("db_partitions", 0)
+                    if isinstance(exact_oracle, dict)
+                    else job_info.get("db_partitions", 0)
+                )
+            except (TypeError, ValueError):
+                result_partitions = 0
+            if result_partitions > 1:
+                payload["merged_at"] = ready_at
     else:
         payload["failed_at"] = job_info.get("failed_at") or job_info.get("updated_at", "")
         payload["error"] = {
@@ -2897,6 +3172,27 @@ def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] = Head
     else:
         job_id = uuid.uuid4().hex[:12]
     is_b = req.query_fasta is not None
+    web_blast_context = (
+        req.blast_options.web_blast_statistical_context.model_dump()
+        if (
+            req.blast_options is not None
+            and req.blast_options.web_blast_statistical_context is not None
+        )
+        else (req.model_extra or {}).get("web_blast_statistical_context")
+    )
+    selection_policy = (
+        req.blast_options.result_selection_policy
+        if req.blast_options is not None
+        else "native_top_n"
+    )
+    if (
+        selection_policy == "diversity_aware"
+        and web_blast_context not in (None, "")
+    ):
+        raise HTTPException(
+            400,
+            "web_blast_statistical_context requires native_top_n result selection",
+        )
 
     if is_b:
         if not req.query_fasta.strip():
@@ -2973,11 +3269,15 @@ def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] = Head
                 "rebuild elb-openapi with a newer ELB_REF to restore it)."
             )
     config["blast"]["db"] = db_url
+    # Completed warmup Jobs are not node-local cache-presence proofs.
+    # Always let the hardened init path validate and repair every shard.
+    config["cluster"].pop("exp-skip-warmed-ssd-init", None)
     config["blast"]["queries"] = queries_url
     config["blast"]["results"] = results_url
     config["blast"]["options"] = opts
     if req.batch_len is not None:
         config["blast"]["batch-len"] = str(req.batch_len)
+    config["blast"]["result-selection-policy"] = selection_policy
 
     # Dashboard concurrency lever (default-OFF): ELB_OPENAPI_NUM_CPUS pins the
     # elastic-blast [cluster] num-cpus. elastic-blast derives the shard pod CPU
@@ -2998,14 +3298,64 @@ def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] = Head
 
     db_name = _db_name_from_value(req.db)
     profile = str(req.resource_profile or "").strip().lower()
+    web_blast_statistics = None
     if db_name == "core_nt" and profile in {"core_nt_precise", "precise", "core_nt_safe"}:
-        partitions = max(1, min(NUM_NODES, 10))
-        config["blast"]["db-partitions"] = str(partitions)
-        config["blast"]["db-partition-prefix"] = (
-            f"{_blob_base()}/blast-db/{partitions}shards/core_nt_shard_"
-        )
-        if "-searchsp" not in opts and "-dbsize" not in opts:
-            config["blast"]["options"] = f"{opts} -searchsp 32156241807668"
+        if _exact_oracle is None:
+            raise HTTPException(503, "Exact DB-order oracle support is unavailable")
+        opts = _exact_oracle.ensure_tabular_raw_score(opts)
+        config["blast"]["options"] = opts
+        default_partitions = max(1, min(NUM_NODES, 10))
+        one_shard_layout = None
+        try:
+            active_database = _exact_oracle.read_active_database(
+                blob_base=_blob_base(),
+                db_name=db_name,
+                token=_storage_oauth_token(),
+            )
+            opts, web_blast_statistics = _exact_oracle.prepare_web_blast_statistics(
+                context=web_blast_context,
+                query_fasta=str(req.query_fasta or ""),
+                active_database=active_database,
+                options=opts,
+            )
+            partitions = _exact_oracle.select_web_blast_partitions(
+                web_blast_statistics,
+                default_partitions=default_partitions,
+            )
+            if web_blast_statistics is not None and partitions == 1:
+                one_shard_layout = _exact_oracle.read_one_shard_layout(
+                    blob_base=_blob_base(),
+                    db_name=db_name,
+                    active_database=active_database,
+                    token=_storage_oauth_token(),
+                )
+            if web_blast_statistics is None:
+                opts = _exact_oracle.preserve_or_set_search_space(
+                    opts, active_database.search_space
+                )
+            config["blast"]["db-partitions"] = str(partitions)
+            if web_blast_statistics is not None and partitions == 1:
+                config["blast"]["disk-backed-monolithic"] = "true"
+                config["blast"]["mem-request"] = "104Gi"
+                config["blast"]["mem-limit"] = "112Gi"
+            config["blast"]["db"] = (
+                f"{_blob_base()}/blast-db/{active_database.db_prefix}"
+            )
+            config["blast"]["db-partition-prefix"] = (
+                f"{_blob_base()}/blast-db/{active_database.shard_layout_prefix}/"
+                f"{partitions}shards/{db_name}_shard_"
+            )
+            config["blast"]["options"] = opts
+        except Exception as exc:
+            logger.warning(
+                "active DB search-space resolution failed db=%s reason=%s",
+                db_name,
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                503,
+                "Active database statistics are required for precise core_nt sharding",
+            ) from exc
 
     from io import StringIO
     config_buf = StringIO()
@@ -3014,6 +3364,83 @@ def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] = Head
 
     blast_version = _blast_version_detail()
     db_version = _db_version_detail(db_name)
+    exact_oracle_info = None
+    # Keep diversity-aware runs on the same active DB provenance.
+    if db_name == "core_nt" and profile in {"core_nt_precise", "precise", "core_nt_safe"}:
+        db_version = {
+            "version": active_database.source_version,
+            "source": "active_generation",
+            "detail": {
+                "number_of_letters": str(active_database.total_letters),
+                "number_of_sequences": str(active_database.total_sequences),
+            },
+        }
+    if (
+        db_name == "core_nt"
+        and profile in {"core_nt_precise", "precise", "core_nt_safe"}
+        and selection_policy == "native_top_n"
+    ):
+        db_version = {
+            "version": active_database.source_version,
+            "source": "active_generation",
+            "detail": {
+                "number_of_letters": str(active_database.total_letters),
+                "number_of_sequences": str(active_database.total_sequences),
+                "db_prefix": active_database.db_prefix,
+                "shard_layout_prefix": active_database.shard_layout_prefix,
+            },
+        }
+        try:
+            exact_oracle_info = _exact_oracle.attach_db_order_oracle(
+                blob_base=_blob_base(),
+                results_url=results_url,
+                db_name=db_name,
+                expected_source_version=active_database.source_version,
+                token=_storage_oauth_token(),
+            ).as_dict()
+            exact_oracle_info.update(
+                {
+                    "candidate_selection": (
+                        "monolithic_full_database"
+                        if partitions == 1
+                        else "partitioned_shards"
+                    ),
+                    "db_partitions": partitions,
+                    "memory_mode": (
+                        "disk_backed_bounded"
+                        if web_blast_statistics is not None and partitions == 1
+                        else "memory_cached_shards"
+                    ),
+                    "memory_request": "104Gi" if partitions == 1 else None,
+                    "memory_limit": "112Gi" if partitions == 1 else None,
+                }
+            )
+            if one_shard_layout is not None:
+                exact_oracle_info.update(one_shard_layout.as_dict())
+            if web_blast_statistics is not None:
+                exact_oracle_info.update(
+                    _exact_oracle.validate_web_blast_execution_options(
+                        opts, program=req.program
+                    )
+                )
+            if web_blast_statistics is not None:
+                _exact_oracle.attach_web_blast_statistics(
+                    blob_base=_blob_base(),
+                    results_url=results_url,
+                    statistics=web_blast_statistics,
+                    token=_storage_oauth_token(),
+                )
+        except Exception as exc:
+            logger.warning(
+                "exact DB-order oracle attach failed job=%s db=%s reason=%s",
+                job_id,
+                db_name,
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                503,
+                "A ready same-generation DB-order oracle is required for exact sharded results",
+            ) from exc
     job_data = {
         "job_id": job_id, "status": "queued", "mode": "B" if is_b else "A",
         "query_seqs": (_eta.parse_query_features(req.query_fasta)[0] if (_eta is not None and _eta.enabled() and is_b) else 0),
@@ -3034,6 +3461,14 @@ def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] = Head
     }
     if passthrough:
         job_data["passthrough"] = passthrough
+    job_data["result_selection_policy"] = selection_policy
+    job_data["db_partitions"] = int(
+        config["blast"].get("db-partitions", 0) or 0
+    )
+    if exact_oracle_info is not None:
+        job_data["exact_oracle"] = exact_oracle_info
+    if web_blast_statistics is not None:
+        job_data["web_blast_statistics"] = web_blast_statistics.as_dict()
     _save_job(job_id, job_data, require_persist=True)
 
     dispatched = _dispatcher_once()
@@ -3063,7 +3498,12 @@ def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] = Head
 
 # ── Jobs — List ────────────────────────────────────────────────────────────
 
-@v1.get("/jobs", tags=["Jobs"], summary="List all jobs")
+@v1.get(
+    "/jobs",
+    tags=["Jobs"],
+    summary="List all jobs",
+    response_model=JobListResponse,
+)
 async def list_jobs(
     limit: Optional[int] = Query(
         None, ge=1, le=500,
@@ -3152,7 +3592,12 @@ async def list_jobs(
 
 # ── Jobs — Status ──────────────────────────────────────────────────────────
 
-@v1.get("/jobs/{job_id}/status", tags=["Jobs"], summary="Get job status")
+@v1.get(
+    "/jobs/{job_id}/status",
+    tags=["Jobs"],
+    summary="Get job status",
+    response_model=JobStatusResponse,
+)
 async def get_job_status(job_id: str):
     """Get detailed job status by polling Kubernetes jobs and blob storage markers."""
     _ensure_loaded()
@@ -3180,13 +3625,25 @@ async def get_job_status(job_id: str):
         "error": job_info.get("error", ""),
         "kubernetes": {"summary": job_info.get("k8s_summary", {})},
     }
-    if _eta is not None and _eta.enabled() and job_info.get("status") in {"queued", "dispatching", "submitting", "running"}:
-        with _jobs_lock:
-            _eta_jobs = [dict(v) for v in _jobs.values()]
-        _eta_out = _eta.compute_eta(job_info, _eta_jobs, MAX_ACTIVE_SUBMISSIONS)
-        if _eta_out:
-            _status_payload["eta"] = _eta_out
-    return _status_payload
+    if job_info.get("status") == "completed":
+        status_files = _list_result_files(job_info)
+        _status_payload["results_ready"] = bool(status_files)
+        if status_files:
+            ready_at = job_info.get("completed_at") or job_info.get("updated_at", "")
+            _status_payload["results_ready_at"] = ready_at
+            exact_oracle = job_info.get("exact_oracle")
+            try:
+                result_partitions = int(
+                    job_info.get("db_partitions")
+                    or exact_oracle.get("db_partitions", 0)
+                    if isinstance(exact_oracle, dict)
+                    else job_info.get("db_partitions", 0)
+                )
+            except (TypeError, ValueError):
+                result_partitions = 0
+            if result_partitions > 1:
+                _status_payload["merged_at"] = ready_at
+    # Keep status metadata reachable before the single return.
     _pt = job_info.get("passthrough")
     if isinstance(_pt, dict) and _pt:
         _status_payload["passthrough"] = _pt
@@ -3341,7 +3798,12 @@ external_v1 = APIRouter(
 )
 
 
-@external_v1.post("/submit", status_code=202, summary="Submit an external ElasticBLAST job")
+@external_v1.post(
+    "/submit",
+    status_code=202,
+    summary="Submit an external ElasticBLAST job",
+    response_model=JobStatusResponse,
+)
 # Plain ``def`` for the same reason as ``submit_job`` (its only delegate): keep
 # the blocking submit path off the asyncio event loop so a concurrent burst does
 # not serialise or starve readiness (issue #54).
@@ -3357,9 +3819,28 @@ def external_submit(req: ExternalSubmitRequest) -> dict[str, Any]:
         evalue=req.options.evalue,
         max_target_seqs=req.options.max_target_seqs,
         outfmt="5",
-        extra=f"-word_size {req.options.word_size} {'-dust yes' if req.options.dust else '-dust no'}",
+        extra=(
+            f"-word_size {req.options.word_size} "
+            f"{'-dust yes' if req.options.dust else '-dust no'} "
+            f"{'-soft_masking true' if req.options.soft_masking else '-soft_masking false'}"
+            + (
+                f" -searchsp {req.options.db_effective_search_space}"
+                if req.options.db_effective_search_space is not None
+                else ""
+            )
+            + (
+                f" -dbsize {req.options.web_blast_statistical_context.filtered_database_letters}"
+                if req.options.web_blast_statistical_context is not None
+                else ""
+            )
+        ),
     )
     internal = JobSubmitRequest(
+        web_blast_statistical_context=(
+            req.options.web_blast_statistical_context.model_dump()
+            if req.options.web_blast_statistical_context is not None
+            else None
+        ),
         program=req.program,
         db=req.db,
         query_fasta=req.query_fasta,
@@ -3380,7 +3861,11 @@ def external_submit(req: ExternalSubmitRequest) -> dict[str, Any]:
     return payload
 
 
-@external_v1.get("/jobs/{job_id}", summary="Get external ElasticBLAST job status")
+@external_v1.get(
+    "/jobs/{job_id}",
+    summary="Get external ElasticBLAST job status",
+    response_model=JobStatusResponse,
+)
 async def external_job_status(job_id: str) -> dict[str, Any]:
     return _external_job_payload(_get_job_or_404(job_id))
 
