@@ -77,6 +77,18 @@ aligned sequences in an unbounded Python list. The per-group detail list in the
 merge report is capped at 5,000 entries and reports truncation explicitly; this
 observability bound does not truncate the canonical result or aggregate counts.
 
+Local canonical output and report files are completed under a persistent
+advisory lock using same-directory temporary files. A duplicate finalizer waits
+for at most 30 minutes and reuses a fresh completed pair from the lock owner;
+otherwise it performs the merge itself. The shell forwards termination signals
+to the Python merge process, which closes and removes registered SQLite and
+temporary artifacts before releasing the lock. Gzip headers retain the
+canonical filename and atomic replacement preserves the target mode.
+
+The outer finalizer validates the completed gzip stream, validates the XML root
+when applicable, uploads the named output and report, and writes the durable
+success marker last. A local report alone is never completion evidence.
+
 ### Merge report
 
 The additive sequence-diversity report fields are:
@@ -245,7 +257,7 @@ PYTHONPATH=docker-openapi/app \
 python -m pytest -q docker-openapi/tests
 ```
 
-The sequence-diversity source contract passed `185` tests in an isolated
+The sequence-diversity source contract passed `188` tests in an isolated
 environment created from `docker-openapi/app/requirements.txt` and
 `docker-openapi/requirements-dev.txt`. The merge helper also passed shell syntax
 validation, changed Python files passed Ruff, and the runtime modules compiled.

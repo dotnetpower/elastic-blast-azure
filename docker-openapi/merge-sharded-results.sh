@@ -15,18 +15,45 @@ NUM_SHARDS="$4"
 BLAST_PROGRAM="$5"
 BLAST_OPTIONS="$6"
 
-python3 - "$INPUT_TSV" "$OUTPUT_GZ" "$REPORT_JSON" "$NUM_SHARDS" "$BLAST_PROGRAM" "$BLAST_OPTIONS" <<'PY'
+PYTHON_PID=""
+PENDING_SIGNAL=""
+PENDING_EXIT_CODE=""
+
+forward_signal() {
+    local signal_name="$1"
+    local exit_code="$2"
+    if [[ -z "$PYTHON_PID" ]]; then
+        PENDING_SIGNAL="$signal_name"
+        PENDING_EXIT_CODE="$exit_code"
+        return
+    fi
+    trap - TERM INT
+    kill -"$signal_name" "$PYTHON_PID" 2>/dev/null || true
+    wait "$PYTHON_PID" 2>/dev/null || true
+    exit "$exit_code"
+}
+
+trap 'forward_signal TERM 143' TERM
+trap 'forward_signal INT 130' INT
+
+python3 - "$INPUT_TSV" "$OUTPUT_GZ" "$REPORT_JSON" "$NUM_SHARDS" "$BLAST_PROGRAM" "$BLAST_OPTIONS" <<'PY' &
+import contextlib
 import copy
+import fcntl
 import gzip
+import io
 import json
 import os
 import re
+import signal
 import shlex
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -37,6 +64,177 @@ SEQUENCE_IDENTITY_MODE = "aligned_sequence_query_span"
 SEQUENCE_IDENTITY_VERSION = 1
 SEQUENCE_GROUP_REPORT_LIMIT = 5_000
 SEQUENCE_SOURCE_MARKER = "# ELB source-shard:"
+_REGISTERED_SQLITE_STORES = []
+_REGISTERED_TEMP_ARTIFACTS = []
+
+
+def handle_termination_signal(signum, _frame):
+    raise SystemExit(128 + signum)
+
+
+signal.signal(signal.SIGTERM, handle_termination_signal)
+
+
+def register_sqlite_store(connection, database_path):
+    _REGISTERED_SQLITE_STORES.append((connection, database_path))
+
+
+def unlink_sqlite_store(database_path):
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        Path(f"{database_path}{suffix}").unlink(missing_ok=True)
+
+
+def close_sqlite_store(connection, database_path):
+    for index, (registered_connection, _registered_path) in enumerate(
+        _REGISTERED_SQLITE_STORES
+    ):
+        if registered_connection is connection:
+            _REGISTERED_SQLITE_STORES.pop(index)
+            break
+    try:
+        connection.close()
+    finally:
+        unlink_sqlite_store(database_path)
+
+
+def cleanup_registered_sqlite_stores():
+    while _REGISTERED_SQLITE_STORES:
+        connection, database_path = _REGISTERED_SQLITE_STORES[-1]
+        close_sqlite_store(connection, database_path)
+
+
+def temporary_artifact_path(target_path):
+    target = Path(target_path)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+    )
+    temporary_path = Path(temporary_name)
+    _REGISTERED_TEMP_ARTIFACTS.append(temporary_path)
+    try:
+        try:
+            target_mode = stat.S_IMODE(target.stat().st_mode) if target.is_file() else None
+        except OSError:
+            target_mode = None
+        if target_mode is None:
+            current_umask = os.umask(0)
+            os.umask(current_umask)
+            target_mode = 0o666 & ~current_umask
+        os.fchmod(file_descriptor, target_mode)
+        os.close(file_descriptor)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(file_descriptor)
+        temporary_path.unlink(missing_ok=True)
+        _REGISTERED_TEMP_ARTIFACTS.remove(temporary_path)
+        raise
+    return temporary_path
+
+
+def cleanup_registered_temp_artifacts():
+    while _REGISTERED_TEMP_ARTIFACTS:
+        _REGISTERED_TEMP_ARTIFACTS.pop().unlink(missing_ok=True)
+
+
+@contextlib.contextmanager
+def gzip_output_writer(path, canonical_path, *, text):
+    with Path(path).open("wb") as raw_output:
+        with gzip.GzipFile(
+            filename=str(canonical_path), mode="wb", fileobj=raw_output
+        ) as compressed_output:
+            if text:
+                with io.TextIOWrapper(compressed_output) as text_output:
+                    yield text_output
+            else:
+                yield compressed_output
+
+
+def acquire_merge_lock(output_path):
+    # Keep the lock inode in place across runs. Unlinking after unlock can let
+    # a waiter and a new process lock different inodes for the same path.
+    lock_path = Path(f"{output_path}.lock")
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    lock_fd = os.open(lock_path, flags, 0o600)
+    try:
+        os.fchmod(lock_fd, 0o600)
+        lock_handle = os.fdopen(lock_fd, "r+")
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(lock_fd)
+        raise
+    wait_seconds = float(os.environ.get("ELB_MERGE_LOCK_WAIT_SECONDS", "1800"))
+    if not 0 <= wait_seconds <= 1800:
+        lock_handle.close()
+        raise ValueError("ELB_MERGE_LOCK_WAIT_SECONDS must be between 0 and 1800")
+    deadline = time.monotonic() + wait_seconds
+    wait_started_at = time.time()
+    contended = False
+    while True:
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return lock_handle, lock_path, wait_started_at if contended else None
+        except BlockingIOError as exc:
+            contended = True
+            if time.monotonic() >= deadline:
+                lock_handle.close()
+                raise RuntimeError(
+                    f"timed out waiting for the canonical merge lock: {output_path}"
+                ) from exc
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+
+
+def completed_merge_from_owner(output_path, report_path, wait_started_at):
+    if wait_started_at is None or not output_path.is_file() or not report_path.is_file():
+        return None
+    try:
+        if min(output_path.stat().st_mtime, report_path.stat().st_mtime) < wait_started_at:
+            return None
+        report = json.loads(report_path.read_text())
+        total_hits = report["total_output_hits"]
+        query_count = report["queries"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if (
+        isinstance(total_hits, bool)
+        or not isinstance(total_hits, int)
+        or total_hits < 0
+        or isinstance(query_count, bool)
+        or not isinstance(query_count, int)
+        or query_count < 0
+    ):
+        return None
+    return total_hits, query_count
+
+
+def release_merge_lock(lock_handle, lock_path):
+    if lock_handle is None:
+        return
+    try:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_handle.close()
+
+
+def cleanup_merge_resources(
+    lock_handle,
+    lock_path,
+    *,
+    preserve_error,
+):
+    cleanup_errors = []
+    actions = [
+        ("sqlite stores", cleanup_registered_sqlite_stores),
+        ("temporary artifacts", cleanup_registered_temp_artifacts),
+    ]
+    actions.append(("merge lock", lambda: release_merge_lock(lock_handle, lock_path)))
+    for label, action in actions:
+        try:
+            action()
+        except Exception as exc:
+            cleanup_errors.append((label, exc))
+            print(f"Merge cleanup failed for {label}: {type(exc).__name__}", file=sys.stderr)
+    if cleanup_errors and not preserve_error:
+        label, error = cleanup_errors[0]
+        raise RuntimeError(f"Merge cleanup failed for {label}") from error
 
 
 def result_selection_policy():
@@ -853,6 +1051,7 @@ def merge_tabular(
     warnings,
     outfmt="6",
     outfmt_spec="",
+    gzip_header_path=None,
 ):
     selection_policy = result_selection_policy()
     expected_shards = int(num_shards)
@@ -923,7 +1122,12 @@ def merge_tabular(
     )
     os.close(database_fd)
     database_path = Path(database_name)
-    connection = sqlite3.connect(database_path)
+    try:
+        connection = sqlite3.connect(database_path)
+    except BaseException:
+        unlink_sqlite_store(database_path)
+        raise
+    register_sqlite_store(connection, database_path)
     connection.execute("PRAGMA journal_mode=OFF")
     connection.execute("PRAGMA synchronous=OFF")
     connection.execute("PRAGMA temp_store=FILE")
@@ -1028,8 +1232,6 @@ def merge_tabular(
         )
     connection.commit()
     if sequence_columns is not None and unsupported_rows:
-        connection.close()
-        database_path.unlink(missing_ok=True)
         raise ValueError(
             "sequence_diversity cannot group malformed or incomplete HSP rows "
             f"({unsupported_rows} rows)"
@@ -1042,6 +1244,14 @@ def merge_tabular(
         connection.execute(
             "CREATE INDEX tabular_hits_sequence_idx "
             "ON tabular_hits(query_id, normalized_sseq, qstart, qend, ordinal)"
+        )
+        connection.execute(
+            "CREATE INDEX tabular_hits_accession_idx "
+            "ON tabular_hits(query_id, accession)"
+        )
+        connection.execute(
+            "CREATE INDEX tabular_hits_shard_accession_idx "
+            "ON tabular_hits(source_shard, query_id, accession)"
         )
     candidate_accessions = (
         row[0]
@@ -1107,7 +1317,9 @@ def merge_tabular(
     sequence_groups_seen = 0
     sequence_shortfall = False
 
-    with input_path.open("rb") as row_source, gzip.open(output_gz, "wt") as out:
+    with input_path.open("rb") as row_source, gzip_output_writer(
+        output_gz, gzip_header_path or output_gz, text=True
+    ) as out:
         for query_id in query_ids:
             if sequence_columns is not None:
                 observed_for_query = int(
@@ -1368,8 +1580,7 @@ def merge_tabular(
         report["selection_equivalence"] = "observed_candidate_pool"
         report["diversity_reservation_mode"] = "not_applicable"
     Path(report_json).write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
-    connection.close()
-    database_path.unlink(missing_ok=True)
+    close_sqlite_store(connection, database_path)
     return total_output_subjects, len(query_ids)
 
 
@@ -1582,6 +1793,7 @@ def merge_xml(
     warnings,
     blast_program,
     blast_options,
+    gzip_header_path=None,
 ):
     oracle_path = os.environ.get("ELB_TIE_ORDER_FILE", "").strip() or None
     db_order_requested = bool(oracle_path) and tie_order_oracle_source() == "db_order"
@@ -1931,7 +2143,9 @@ def merge_xml(
             "not the strict top max_target_seqs by score"
         )
 
-    with gzip.open(output_gz, "wb") as handle:
+    with gzip_output_writer(
+        output_gz, gzip_header_path or output_gz, text=False
+    ) as handle:
         ET.ElementTree(base_root).write(handle, encoding="utf-8", xml_declaration=True)
 
     report = {
@@ -2007,39 +2221,82 @@ outfmt_spec = parse_outfmt_spec(blast_options)
 selection_policy = result_selection_policy()
 if selection_policy == "sequence_diversity" and outfmt not in ("6", "7"):
     raise ValueError("sequence_diversity supports only tabular BLAST outfmt 6 or 7")
-if outfmt == "5":
-    total_hits, query_count = merge_xml(
-        input_tsv,
-        output_gz,
-        report_json,
-        num_shards,
-        max_hits,
-        candidate_pool_size,
-        warnings,
-        blast_program,
-        blast_options,
-    )
-elif outfmt in ("6", "7"):
-    # outfmt 6/7 share the same tabular data rows (7 only adds comment lines,
-    # which the merge skips and re-emits). The merge resolves its group/rank/
-    # oracle columns by NAME from the full specifier, so reordered + extended
-    # layouts (e.g. `7 sseqid staxids ... evalue bitscore ...`) merge correctly.
-    total_hits, query_count = merge_tabular(
-        input_tsv,
-        output_gz,
-        report_json,
-        num_shards,
-        blast_program,
-        max_hits,
-        candidate_pool_size,
-        warnings,
-        outfmt=outfmt, outfmt_spec=outfmt_spec,
-    )
-else:
+if outfmt not in ("5", "6", "7"):
     raise ValueError(f"Unsupported sharded merge outfmt: {outfmt}")
+
+final_output_path = Path(output_gz)
+final_report_path = Path(report_json)
+temporary_output_path = None
+temporary_report_path = None
+lock_handle = None
+lock_path = None
+try:
+    lock_handle, lock_path, wait_started_at = acquire_merge_lock(final_output_path)
+    completed_by_owner = completed_merge_from_owner(
+        final_output_path, final_report_path, wait_started_at
+    )
+    if completed_by_owner is not None:
+        total_hits, query_count = completed_by_owner
+    else:
+        temporary_output_path = temporary_artifact_path(final_output_path)
+        temporary_report_path = temporary_artifact_path(final_report_path)
+        if outfmt == "5":
+            total_hits, query_count = merge_xml(
+                input_tsv,
+                str(temporary_output_path),
+                str(temporary_report_path),
+                num_shards,
+                max_hits,
+                candidate_pool_size,
+                warnings,
+                blast_program,
+                blast_options,
+                gzip_header_path=final_output_path,
+            )
+        else:
+            # outfmt 6/7 share the same tabular data rows (7 only adds comment lines,
+            # which the merge skips and re-emits). The merge resolves its group/rank/
+            # oracle columns by NAME from the full specifier, so reordered + extended
+            # layouts (e.g. `7 sseqid staxids ... evalue bitscore ...`) merge correctly.
+            total_hits, query_count = merge_tabular(
+                input_tsv,
+                str(temporary_output_path),
+                str(temporary_report_path),
+                num_shards,
+                blast_program,
+                max_hits,
+                candidate_pool_size,
+                warnings,
+                outfmt=outfmt,
+                outfmt_spec=outfmt_spec,
+                gzip_header_path=final_output_path,
+            )
+        # The outer finalizer validates gzip, uploads both named artifacts, and
+        # writes SUCCESS last. Publish the report first so a report failure can
+        # never expose a new readiness-bearing canonical output.
+        os.replace(temporary_report_path, final_report_path)
+        os.replace(temporary_output_path, final_output_path)
+finally:
+    cleanup_merge_resources(
+        lock_handle,
+        lock_path,
+        preserve_error=sys.exc_info()[0] is not None,
+    )
 print(
     f"Merged {total_hits} hits from {query_count} queries "
     f"with outfmt={outfmt} max_target_seqs={max_hits}",
     file=sys.stderr,
 )
 PY
+PYTHON_PID=$!
+if [[ -n "$PENDING_SIGNAL" ]]; then
+    forward_signal "$PENDING_SIGNAL" "$PENDING_EXIT_CODE"
+fi
+if wait "$PYTHON_PID"; then
+    status=0
+else
+    status=$?
+fi
+PYTHON_PID=""
+trap - TERM INT
+exit "$status"

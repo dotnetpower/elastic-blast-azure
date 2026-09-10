@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import fcntl
 import gzip
 import json
 import os
 import resource
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -461,20 +463,160 @@ def test_sequence_diversity_rejects_missing_expected_shard(tmp_path: Path) -> No
     assert proc.returncode != 0
     assert "every expected shard" in proc.stderr
     assert not (tmp_path / "merged.out.gz").exists()
+    assert not (tmp_path / "merge-report.json").exists()
+    assert list(tmp_path.glob("merge-tabular-*.sqlite3*")) == []
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+
+def test_merge_publish_failure_does_not_expose_canonical_output(
+    tmp_path: Path,
+) -> None:
+    input_tsv = tmp_path / "hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_target = tmp_path / "merge-report.json"
+    input_tsv.write_text("# ELB source-shard:00\n" + _row("acc-a", "AAAA") + "\n")
+    report_target.mkdir()
+
+    proc = subprocess.run(  # noqa: S603 -- executes the checked-in merge helper.
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(output_gz),
+            str(report_target),
+            "1",
+            "blastn",
+            "-outfmt 6 qseqid saccver sseq qstart qend evalue bitscore score "
+            "-max_target_seqs 1",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "ELB_RESULT_SELECTION_POLICY": "sequence_diversity",
+            "ELB_REQUESTED_MAX_TARGET_SEQS": "1",
+            "ELB_SUCCEEDED_SHARDS": "1",
+        },
+    )
+
+    assert proc.returncode != 0
+    assert not output_gz.exists()
+    assert report_target.is_dir()
+    assert list(tmp_path.glob("merge-tabular-*.sqlite3*")) == []
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+
+def test_concurrent_merge_owner_is_rejected_without_artifacts(tmp_path: Path) -> None:
+    input_tsv = tmp_path / "hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
+    lock_path = Path(f"{output_gz}.lock")
+    input_tsv.write_text("# ELB source-shard:00\n" + _row("acc-a", "AAAA") + "\n")
+
+    with lock_path.open("a+") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        proc = subprocess.run(  # noqa: S603 -- executes the checked-in merge helper.
+            [
+                "/bin/bash",
+                str(SCRIPT),
+                str(input_tsv),
+                str(output_gz),
+                str(report_json),
+                "1",
+                "blastn",
+                "-outfmt 6 qseqid saccver sseq qstart qend evalue bitscore score "
+                "-max_target_seqs 1",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "ELB_RESULT_SELECTION_POLICY": "sequence_diversity",
+                "ELB_REQUESTED_MAX_TARGET_SEQS": "1",
+                "ELB_SUCCEEDED_SHARDS": "1",
+                "ELB_MERGE_LOCK_WAIT_SECONDS": "0.05",
+            },
+        )
+
+    assert proc.returncode != 0
+    assert "timed out waiting for the canonical merge lock" in proc.stderr
+    assert not output_gz.exists()
+    assert not report_json.exists()
+    assert list(tmp_path.glob("merge-tabular-*.sqlite3*")) == []
+    assert list(tmp_path.glob(".*.tmp")) == []
+    with lock_path.open("r+") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def test_waiting_merge_reuses_fresh_owner_artifacts(tmp_path: Path) -> None:
+    input_tsv = tmp_path / "hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
+    lock_path = Path(f"{output_gz}.lock")
+    input_tsv.write_text("malformed\n")
+
+    with lock_path.open("a+") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        process = subprocess.Popen(  # noqa: S603 -- executes the checked-in helper.
+            [
+                "/bin/bash",
+                str(SCRIPT),
+                str(input_tsv),
+                str(output_gz),
+                str(report_json),
+                "1",
+                "blastn",
+                "-outfmt 6 qseqid saccver sseq qstart qend evalue bitscore score "
+                "-max_target_seqs 1",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={
+                **os.environ,
+                "ELB_RESULT_SELECTION_POLICY": "sequence_diversity",
+                "ELB_REQUESTED_MAX_TARGET_SEQS": "1",
+                "ELB_SUCCEEDED_SHARDS": "1",
+                "ELB_MERGE_LOCK_WAIT_SECONDS": "2",
+            },
+        )
+        time.sleep(0.2)
+        with gzip.open(output_gz, "wt") as output_handle:
+            output_handle.write("owner-result\n")
+        report_json.write_text('{"queries": 1, "total_output_hits": 1}\n')
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+    stdout, stderr = process.communicate(timeout=5)
+
+    assert process.returncode == 0, stderr
+    assert stdout == ""
+    assert "Merged 1 hits from 1 queries" in stderr
+    with gzip.open(output_gz, "rt") as output_handle:
+        assert output_handle.read() == "owner-result\n"
+    assert (lock_path.stat().st_mode & 0o777) == 0o600
 
 
 def test_sequence_diversity_merge_accepts_pool_above_legacy_limit(
     tmp_path: Path,
 ) -> None:
     input_tsv = tmp_path / "hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
     input_tsv.write_text(_row("acc-a", "AAAA") + "\n")
+    output_gz.write_bytes(b"stale")
+    output_gz.chmod(0o640)
+    report_json.write_text("stale\n")
+    report_json.chmod(0o600)
     proc = subprocess.run(  # noqa: S603 -- executes the checked-in merge helper.
         [
             "/bin/bash",
             str(SCRIPT),
             str(input_tsv),
-            str(tmp_path / "merged.out.gz"),
-            str(tmp_path / "merge-report.json"),
+            str(output_gz),
+            str(report_json),
             "1",
             "blastn",
             "-outfmt 6 qseqid saccver sseq qstart qend evalue bitscore score "
@@ -491,9 +633,14 @@ def test_sequence_diversity_merge_accepts_pool_above_legacy_limit(
     )
 
     assert proc.returncode == 0, proc.stderr
-    report = json.loads((tmp_path / "merge-report.json").read_text())
+    report = json.loads(report_json.read_text())
     assert report["candidate_pool_size"] == 5_001
     assert report["returned_sequence_groups"] == 1
+    gzip_bytes = output_gz.read_bytes()
+    assert gzip_bytes[3] & 0x08
+    assert gzip_bytes[10 : gzip_bytes.index(b"\0", 10)] == b"merged.out"
+    assert (output_gz.stat().st_mode & 0o777) == 0o640
+    assert (report_json.stat().st_mode & 0o777) == 0o600
 
 
 def test_sequence_diversity_large_pool_uses_disk_backed_bounded_memory(

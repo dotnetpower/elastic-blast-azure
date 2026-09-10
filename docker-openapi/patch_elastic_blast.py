@@ -769,6 +769,20 @@ def patch_requested_max_target_seqs(root: Path) -> None:
         ),
         "candidate-pool-size-requested must be non-negative",
     )
+    config_text = config_path.read_text()
+    current_guard = "if self.candidate_pool_size_requested < 0:"
+    current_message = "candidate-pool-size-requested must be non-negative"
+    legacy_guard = "if not 0 <= self.candidate_pool_size_requested <= 5000:"
+    legacy_message = "candidate-pool-size-requested must be between 0 and 5000"
+    if (
+        config_text.count(current_guard) != 1
+        or config_text.count(current_message) != 1
+        or legacy_guard in config_text
+        or legacy_message in config_text
+    ):
+        raise RuntimeError(
+            f"candidate pool validation patch mismatch in {config_path}"
+        )
 
 
 def patch_azure_cli_glue(root: Path) -> None:
