@@ -23,5 +23,26 @@ The authenticated reference-context endpoint is:
 POST /v1/web-blast/statistical-context
 ```
 
+Partitioned tabular requests can opt into aligned-sequence grouping:
+
+```json
+{
+	"blast_options": {
+		"outfmt": "7 qseqid saccver sseq qstart qend evalue bitscore",
+		"max_target_seqs": 100,
+		"candidate_pool_size": 2000,
+		"result_selection_policy": "sequence_diversity"
+	},
+	"resource_profile": "core_nt_safe"
+}
+```
+
+The server appends raw `score`, rejects missing semantic fields or XML with
+HTTP 422, and writes one representative HSP per observed sequence signature to
+the canonical merged result. Existing `native_top_n`, `diversity_aware`, and
+`full` / `merged` / `xml` download behavior is unchanged. See the runtime
+contract for signature, count, candidate-pool, and downstream filtering
+semantics.
+
 kubectl create deployment elb-openapi --image=elbacr.azurecr.io/elb-openapi:0.2
 kubectl expose deployment elb-openapi --type=LoadBalancer --port=80 --target-port=8000

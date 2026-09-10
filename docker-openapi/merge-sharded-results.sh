@@ -33,6 +33,31 @@ from pathlib import Path
 
 BLAST_EVALUE_EPSILON = 1.0e-180
 WEB_BLAST_STATISTICS_MAX_BYTES = 16 * 1024
+SEQUENCE_IDENTITY_MODE = "aligned_sequence_query_span"
+SEQUENCE_IDENTITY_VERSION = 1
+SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE = 5_000
+SEQUENCE_GROUP_REPORT_LIMIT = 5_000
+SEQUENCE_SOURCE_MARKER = "# ELB source-shard:"
+
+
+def result_selection_policy():
+    value = os.environ.get("ELB_RESULT_SELECTION_POLICY", "native_top_n").strip()
+    if value not in {"native_top_n", "diversity_aware", "sequence_diversity"}:
+        raise ValueError(f"Unsupported result selection policy: {value}")
+    return value
+
+
+def optional_positive_env(name):
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
 
 
 def load_web_blast_statistics():
@@ -489,6 +514,116 @@ def selected_tabular_row_offsets(connection, query_id, subject_keys):
     return offsets
 
 
+def apply_sequence_tie_ranks(connection, tie_order):
+    if not tie_order:
+        return
+    updates = []
+    for (accession,) in connection.execute(
+        "SELECT DISTINCT accession FROM tabular_hits WHERE accession != ''"
+    ):
+        rank = oracle_rank(tie_order, accession)
+        if rank is not None:
+            updates.append((rank, accession))
+        if len(updates) >= 1000:
+            connection.executemany(
+                "UPDATE tabular_hits SET tie_rank = ? WHERE accession = ?",
+                updates,
+            )
+            updates.clear()
+    if updates:
+        connection.executemany(
+            "UPDATE tabular_hits SET tie_rank = ? WHERE accession = ?",
+            updates,
+        )
+    connection.commit()
+
+
+def sequence_order_sql(tie_order):
+    if tie_order:
+        direction = "DESC" if tie_order_oracle_source() == "db_order" else "ASC"
+        return f"tie_rank IS NULL, tie_rank {direction}, ordinal"
+    if deterministic_tie_order_enabled():
+        return "accession, ordinal"
+    return "ordinal"
+
+
+def sequence_diversity_representatives(connection, query_id, limit, tie_order):
+    tie_sql = sequence_order_sql(tie_order)
+    return list(
+        connection.execute(
+            f"""
+            WITH ranked AS (
+                SELECT *,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY query_id, normalized_sseq, qstart, qend
+                           ORDER BY evalue_key, negative_score, {tie_sql}
+                       ) AS group_rank
+                FROM tabular_hits
+                WHERE query_id = ?
+            ),
+            group_counts AS (
+                SELECT query_id, normalized_sseq, qstart, qend,
+                       COUNT(DISTINCT accession) AS accession_count,
+                       COUNT(*) AS source_row_count
+                FROM tabular_hits
+                WHERE query_id = ?
+                GROUP BY query_id, normalized_sseq, qstart, qend
+            )
+            SELECT ranked.evalue_key, ranked.negative_score, ranked.ordinal,
+                   ranked.accession, ranked.row_offset, ranked.display_evalue,
+                   ranked.display_bitscore, ranked.raw_score,
+                   group_counts.accession_count, group_counts.source_row_count
+            FROM ranked
+            JOIN group_counts USING (query_id, normalized_sseq, qstart, qend)
+            WHERE ranked.group_rank = 1
+            ORDER BY ranked.evalue_key, ranked.negative_score, {tie_sql}
+            LIMIT ?
+            """,
+            (query_id, query_id, limit),
+        )
+    )
+
+
+def observed_sequence_counts(connection):
+    observed_groups = connection.execute(
+        """
+        SELECT COUNT(*) FROM (
+            SELECT 1
+            FROM tabular_hits
+            GROUP BY query_id, normalized_sseq, qstart, qend
+        )
+        """
+    ).fetchone()[0]
+    observed_subjects = connection.execute(
+        """
+        SELECT COUNT(*) FROM (
+            SELECT 1
+            FROM tabular_hits
+            GROUP BY query_id, accession
+        )
+        """
+    ).fetchone()[0]
+    return int(observed_groups), int(observed_subjects)
+
+
+def candidate_pool_saturated_shards(connection, candidate_pool_size):
+    return int(
+        connection.execute(
+            """
+            SELECT COUNT(DISTINCT source_shard)
+            FROM (
+                SELECT source_shard, query_id
+                FROM tabular_hits
+                WHERE source_shard != ''
+                GROUP BY source_shard, query_id
+                HAVING COUNT(DISTINCT accession) >= ?
+            )
+            """,
+            (candidate_pool_size,),
+        ).fetchone()[0]
+    )
+
+
 # Field-aware tabular column resolution. The shard merge historically assumed
 # the BLAST `std` column order (qseqid=0, sseqid=1, evalue=10, bitscore=11). An
 # extended/reordered outfmt such as
@@ -569,6 +704,34 @@ def resolve_tabular_columns(spec, warnings):
             "plus diversity reservation operate on rows instead of subjects"
         )
     return qseqid_idx, evalue_idx, bitscore_idx, score_idx, subject_idx
+
+
+def resolve_sequence_diversity_columns(spec):
+    fields = expand_outfmt_fields(spec)
+
+    def first_index(codes):
+        for index, field in enumerate(fields):
+            if field in codes:
+                return index
+        return None
+
+    resolved = {
+        "query_identity": first_index(_QUERY_FIELD_CODES),
+        "accession": first_index(_SUBJECT_FIELD_CODES),
+        "sseq": first_index({"sseq"}),
+        "qstart": first_index({"qstart"}),
+        "qend": first_index({"qend"}),
+        "evalue": first_index({"evalue"}),
+        "bitscore": first_index({"bitscore"}),
+        "score": first_index({"score"}),
+    }
+    missing = [field for field, index in resolved.items() if index is None]
+    if missing:
+        raise ValueError(
+            "sequence_diversity requires effective tabular fields: "
+            + ", ".join(missing)
+        )
+    return resolved
 
 
 def xml_subject_accession(hit):
@@ -692,6 +855,14 @@ def merge_tabular(
     outfmt="6",
     outfmt_spec="",
 ):
+    selection_policy = result_selection_policy()
+    expected_shards = int(num_shards)
+    succeeded_shards = optional_positive_env("ELB_SUCCEEDED_SHARDS") or expected_shards
+    if selection_policy == "sequence_diversity" and succeeded_shards != expected_shards:
+        raise ValueError(
+            "sequence_diversity requires every expected shard to succeed "
+            f"({succeeded_shards} of {expected_shards})"
+        )
     oracle_path = os.environ.get("ELB_TIE_ORDER_FILE", "").strip() or None
     db_order_requested = bool(oracle_path) and tie_order_oracle_source() == "db_order"
     # Resolve the group / rank / oracle columns BY NAME from the outfmt
@@ -702,6 +873,17 @@ def merge_tabular(
     qseqid_idx, evalue_idx, bitscore_idx, score_idx, subject_idx = resolve_tabular_columns(
         outfmt_spec, warnings
     )
+    sequence_columns = (
+        resolve_sequence_diversity_columns(outfmt_spec)
+        if selection_policy == "sequence_diversity"
+        else None
+    )
+    if sequence_columns is not None:
+        qseqid_idx = sequence_columns["query_identity"]
+        subject_idx = sequence_columns["accession"]
+        evalue_idx = sequence_columns["evalue"]
+        bitscore_idx = sequence_columns["bitscore"]
+        score_idx = sequence_columns["score"]
     # A subject accession column is required for the tie-order oracle and the
     # deterministic accession tie-break; without it, neither can run.
     if subject_idx is None:
@@ -715,11 +897,14 @@ def merge_tabular(
         )
     # Lowest column count a data row must have for every resolved index to be
     # addressable (mirrors the historical `< 12` guard for the std layout).
-    min_required_cols = max(
+    required_indexes = [
         idx
         for idx in (qseqid_idx, evalue_idx, bitscore_idx, score_idx, subject_idx)
         if idx is not None
-    ) + 1
+    ]
+    if sequence_columns is not None:
+        required_indexes.extend(sequence_columns.values())
+    min_required_cols = max(required_indexes) + 1
     unsupported_rows = 0
     total_input_rows = 0
     ordinal = 0
@@ -755,11 +940,18 @@ def merge_tabular(
             display_evalue REAL NOT NULL,
             display_bitscore REAL NOT NULL,
             raw_score REAL,
-            row_offset INTEGER NOT NULL
+            row_offset INTEGER NOT NULL,
+            source_shard TEXT NOT NULL,
+            normalized_sseq TEXT NOT NULL,
+            qstart TEXT NOT NULL,
+            qend TEXT NOT NULL,
+            tie_rank INTEGER
         )
         """
     )
     insert_rows = []
+    source_shard = ""
+    observed_source_shards = set()
     if input_path.exists():
         with input_path.open("rb") as handle:
             while True:
@@ -771,6 +963,11 @@ def merge_tabular(
                 if not line:
                     continue
                 if line.startswith("#"):
+                    if line.startswith(SEQUENCE_SOURCE_MARKER):
+                        source_shard = line[len(SEQUENCE_SOURCE_MARKER) :].strip()
+                        if source_shard:
+                            observed_source_shards.add(source_shard)
+                        continue
                     if captured_fields is None and line.startswith("# Fields:"):
                         candidate = line[len("# Fields:") :].strip()
                         if candidate:
@@ -792,6 +989,13 @@ def merge_tabular(
                 group_key = cols[qseqid_idx] if qseqid_idx is not None else ""
                 accession = cols[subject_idx] if subject_idx is not None else ""
                 subject_key = f"subject:{accession}" if accession else f"row:{ordinal}"
+                normalized_sseq = (
+                    cols[sequence_columns["sseq"]].upper().replace("-", "")
+                    if sequence_columns is not None
+                    else ""
+                )
+                qstart = cols[sequence_columns["qstart"]] if sequence_columns is not None else ""
+                qend = cols[sequence_columns["qend"]] if sequence_columns is not None else ""
                 insert_rows.append(
                     (
                         group_key,
@@ -804,25 +1008,42 @@ def merge_tabular(
                         bitscore,
                         raw_score,
                         row_offset,
+                        source_shard,
+                        normalized_sseq,
+                        qstart,
+                        qend,
+                        None,
                     )
                 )
                 ordinal += 1
                 if len(insert_rows) >= 1000:
                     connection.executemany(
-                        "INSERT INTO tabular_hits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO tabular_hits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         insert_rows,
                     )
                     insert_rows.clear()
     if insert_rows:
         connection.executemany(
-            "INSERT INTO tabular_hits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO tabular_hits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             insert_rows,
         )
     connection.commit()
+    if sequence_columns is not None and unsupported_rows:
+        connection.close()
+        database_path.unlink(missing_ok=True)
+        raise ValueError(
+            "sequence_diversity cannot group malformed or incomplete HSP rows "
+            f"({unsupported_rows} rows)"
+        )
     connection.execute(
         "CREATE INDEX tabular_hits_subject_idx "
         "ON tabular_hits(query_id, subject_key, ordinal)"
     )
+    if sequence_columns is not None:
+        connection.execute(
+            "CREATE INDEX tabular_hits_sequence_idx "
+            "ON tabular_hits(query_id, normalized_sseq, qstart, qend, ordinal)"
+        )
     candidate_accessions = (
         row[0]
         for row in connection.execute(
@@ -835,6 +1056,8 @@ def merge_tabular(
         oracle_unique_accessions,
         oracle_accessions,
     ) = load_tie_order_oracle(warnings, candidate_accessions)
+    if sequence_columns is not None:
+        apply_sequence_tie_ranks(connection, tie_order)
     strict_oracle = bool(tie_order) and strict_oracle_enabled()
     db_order_exact = db_order_requested
     if db_order_exact and total_input_rows and not tie_order:
@@ -881,9 +1104,56 @@ def merge_tabular(
     total_input_subjects = 0
     total_output_subjects = 0
     total_output_rows = 0
+    sequence_group_counts = []
+    sequence_groups_seen = 0
+    sequence_shortfall = False
 
     with input_path.open("rb") as row_source, gzip.open(output_gz, "wt") as out:
         for query_id in query_ids:
+            if sequence_columns is not None:
+                observed_for_query = int(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*) FROM (
+                            SELECT 1 FROM tabular_hits
+                            WHERE query_id = ?
+                            GROUP BY normalized_sseq, qstart, qend
+                        )
+                        """,
+                        (query_id,),
+                    ).fetchone()[0]
+                )
+                selected = sequence_diversity_representatives(
+                    connection, query_id, max_hits, tie_order
+                )
+                sequence_shortfall = sequence_shortfall or observed_for_query < max_hits
+                out.write(f"# {blast_label}\n")
+                out.write(f"# Query: {query_id}\n")
+                out.write(f"# Database: merged from {num_shards} shards\n")
+                out.write(f"# Fields: {fields}\n")
+                out.write(f"# {len(selected)} hits found\n")
+                for hit in selected:
+                    sequence_groups_seen += 1
+                    row_source.seek(hit[4])
+                    row = row_source.readline().decode().rstrip("\n")
+                    out.write(row + "\n")
+                    total_output_rows += 1
+                    if len(sequence_group_counts) < SEQUENCE_GROUP_REPORT_LIMIT:
+                        sequence_group_counts.append(
+                            {
+                                "sequence_group_ordinal": sequence_groups_seen,
+                                "sequence_group_accession_count": int(hit[8]),
+                                "sequence_group_source_row_count": int(hit[9]),
+                            }
+                        )
+                total_input_subjects += int(
+                    connection.execute(
+                        "SELECT COUNT(DISTINCT accession) FROM tabular_hits WHERE query_id = ?",
+                        (query_id,),
+                    ).fetchone()[0]
+                )
+                total_output_subjects += len(selected)
+                continue
             hits = tabular_subject_hits(connection, query_id)
             total_input_subjects += len(hits)
             if db_order_exact:
@@ -1053,7 +1323,51 @@ def merge_tabular(
         ),
         "tie_order_oracle_missing_queries": oracle_missing_queries,
         "warnings": warnings,
+        "result_selection_policy_requested": selection_policy,
+        "result_selection_policy_applied": selection_policy,
     }
+    if sequence_columns is not None:
+        observed_groups, observed_subjects = observed_sequence_counts(connection)
+        saturated_shards = candidate_pool_saturated_shards(
+            connection, candidate_pool_size
+        )
+        shortfall_reasons = []
+        if saturated_shards:
+            shortfall_reasons.append("candidate_pool_saturated")
+        if not ordinal:
+            shortfall_reasons.append("no_candidates_observed")
+        elif sequence_shortfall:
+            shortfall_reasons.append("insufficient_unique_groups_in_observed_pool")
+        report.update(
+            {
+                "sequence_identity_mode": SEQUENCE_IDENTITY_MODE,
+                "sequence_identity_version": SEQUENCE_IDENTITY_VERSION,
+                "requested_sequence_groups": max_hits,
+                "returned_sequence_groups": total_output_subjects,
+                "candidate_pool_size_requested_per_shard": optional_positive_env(
+                    "ELB_CANDIDATE_POOL_SIZE_REQUESTED"
+                ),
+                "candidate_pool_size_applied_per_shard": candidate_pool_size,
+                "observed_candidate_rows": ordinal,
+                "observed_candidate_subjects": observed_subjects,
+                "observed_sequence_groups": observed_groups,
+                "expected_shards": expected_shards,
+                "succeeded_shards": succeeded_shards,
+                "candidate_pool_saturated_shards": saturated_shards,
+                "observed_pool_complete": (
+                    len(observed_source_shards) == expected_shards
+                    and saturated_shards == 0
+                ),
+                "shortfall_reasons": shortfall_reasons,
+                "sequence_group_counts": sequence_group_counts,
+                "sequence_group_counts_truncated": (
+                    total_output_subjects > len(sequence_group_counts)
+                ),
+            }
+        )
+        report["ranking_basis"] = "blast_evalue_raw_score_existing_order_ordinal"
+        report["selection_equivalence"] = "observed_candidate_pool"
+        report["diversity_reservation_mode"] = "not_applicable"
     Path(report_json).write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
     connection.close()
     database_path.unlink(missing_ok=True)
@@ -1671,6 +1985,8 @@ def merge_xml(
             item["missing_count"] for item in oracle_missing_queries
         ),
         "tie_order_oracle_missing_queries": oracle_missing_queries,
+        "result_selection_policy_requested": result_selection_policy(),
+        "result_selection_policy_applied": result_selection_policy(),
         "warnings": warnings,
     }
     Path(report_json).write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
@@ -1689,6 +2005,14 @@ candidate_pool_size, warnings = parse_max_target_seqs(blast_options)
 max_hits = resolve_result_max_target_seqs(candidate_pool_size)
 outfmt = parse_outfmt(blast_options)
 outfmt_spec = parse_outfmt_spec(blast_options)
+selection_policy = result_selection_policy()
+if selection_policy == "sequence_diversity" and outfmt not in ("6", "7"):
+    raise ValueError("sequence_diversity supports only tabular BLAST outfmt 6 or 7")
+if (
+    selection_policy == "sequence_diversity"
+    and candidate_pool_size > SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE
+):
+    raise ValueError("sequence_diversity candidate pool cannot exceed 5000 per shard")
 if outfmt == "5":
     total_hits, query_count = merge_xml(
         input_tsv,

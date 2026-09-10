@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+import configparser
+from io import StringIO
 from types import SimpleNamespace
 from typing import Any
 
@@ -348,3 +350,415 @@ def test_diversity_selection_rejects_reference_context_before_side_effects(
         main_module.submit_job(request)
 
     assert error.value.status_code == 400
+
+
+def test_sequence_diversity_rejects_reference_context_with_typed_422(
+    main_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = main_module.JobSubmitRequest(
+        program="blastn",
+        db="core_nt",
+        query_fasta=">q1\nACGT\n",
+        resource_profile="core_nt_safe",
+        blast_options={
+            "outfmt": "7 qseqid saccver sseq qstart qend evalue bitscore",
+            "result_selection_policy": "sequence_diversity",
+            "web_blast_statistical_context": {
+                "filtered_database_letters": 100,
+                "filtered_database_sequences": 10,
+                "length_adjustment": 0,
+                "effective_search_space": 400,
+                "scoring_search_space": 400,
+                "result_database_letters": 100,
+            },
+        },
+    )
+    monkeypatch.setattr(main_module, "_ensure_loaded", lambda: None)
+    monkeypatch.setattr(
+        main_module,
+        "_upload_fasta",
+        lambda *_args: pytest.fail("selection validation must precede upload"),
+    )
+
+    with pytest.raises(main_module.HTTPException) as error:
+        main_module.submit_job(request)
+
+    assert error.value.status_code == 422
+    assert error.value.detail["code"] == "sequence_diversity_incompatible_context"
+    assert error.value.detail["retryable"] is False
+
+
+@pytest.mark.parametrize(
+    ("blast_options", "expected_code", "expected_missing"),
+    [
+        (
+            {
+                "outfmt": "5",
+                "max_target_seqs": 2,
+                "result_selection_policy": "sequence_diversity",
+            },
+            "sequence_diversity_invalid_outfmt",
+            [],
+        ),
+        (
+            {
+                "outfmt": "7 qseqid saccver qstart qend evalue bitscore",
+                "max_target_seqs": 2,
+                "result_selection_policy": "sequence_diversity",
+            },
+            "sequence_diversity_missing_fields",
+            ["sseq"],
+        ),
+        (
+            {
+                "outfmt": "7 qseqid saccver sseq qstart qend evalue bitscore",
+                "max_target_seqs": 2,
+                "candidate_pool_size": 5001,
+                "result_selection_policy": "sequence_diversity",
+            },
+            "sequence_diversity_invalid_candidate_pool",
+            [],
+        ),
+    ],
+)
+def test_sequence_diversity_rejects_invalid_request_before_side_effects(
+    main_module,
+    monkeypatch: pytest.MonkeyPatch,
+    blast_options: dict[str, Any],
+    expected_code: str,
+    expected_missing: list[str],
+) -> None:
+    request = main_module.JobSubmitRequest(
+        program="blastn",
+        db="core_nt",
+        query_fasta=">q1\nACGT\n",
+        resource_profile="core_nt_safe",
+        blast_options=blast_options,
+    )
+    monkeypatch.setattr(main_module, "_ensure_loaded", lambda: None)
+    monkeypatch.setattr(
+        main_module,
+        "_upload_fasta",
+        lambda *_args: pytest.fail("selection validation must precede upload"),
+    )
+
+    with pytest.raises(main_module.HTTPException) as error:
+        main_module.submit_job(request)
+
+    assert error.value.status_code == 422
+    assert error.value.detail["code"] == expected_code
+    assert error.value.detail.get("missing_fields", []) == expected_missing
+    assert error.value.detail["retryable"] is False
+
+
+def test_sequence_diversity_openapi_schema_exposes_enum_and_pool_bounds(
+    main_module,
+) -> None:
+    schema = TestClient(main_module.app).get("/openapi.json").json()
+    options = schema["components"]["schemas"]["BlastOptions"]["properties"]
+
+    assert options["result_selection_policy"]["enum"] == [
+        "native_top_n",
+        "diversity_aware",
+        "sequence_diversity",
+    ]
+    assert options["candidate_pool_size"]["minimum"] == 1
+    assert options["candidate_pool_size"]["maximum"] == 5000
+
+
+def test_sequence_diversity_http_validation_has_stable_error_shape(
+    main_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module, "_ensure_loaded", lambda: None)
+    monkeypatch.setattr(
+        main_module,
+        "_upload_fasta",
+        lambda *_args: pytest.fail("selection validation must precede upload"),
+    )
+    client = TestClient(main_module.app)
+    base = {
+        "program": "blastn",
+        "db": "core_nt",
+        "query_fasta": ">q1\nACGT\n",
+        "resource_profile": "core_nt_safe",
+    }
+
+    wrong_type = client.post(
+        "/v1/jobs",
+        headers={"X-ELB-API-Token": "test-token"},
+        json={
+            **base,
+            "blast_options": {
+                "outfmt": "7 qseqid saccver sseq qstart qend evalue bitscore",
+                "result_selection_policy": "sequence_diversity",
+                "candidate_pool_size": True,
+            },
+        },
+    )
+    missing_field = client.post(
+        "/v1/jobs",
+        headers={"X-ELB-API-Token": "test-token"},
+        json={
+            **base,
+            "blast_options": {
+                "outfmt": "7 qseqid saccver qstart qend evalue bitscore",
+                "result_selection_policy": "sequence_diversity",
+            },
+        },
+    )
+
+    assert wrong_type.status_code == 422
+    assert wrong_type.json() == {
+        "detail": {
+            "code": "sequence_diversity_invalid_candidate_pool",
+            "message": "candidate_pool_size must be a positive integer",
+            "retryable": False,
+        }
+    }
+    assert missing_field.status_code == 422
+    assert missing_field.json() == {
+        "detail": {
+            "code": "sequence_diversity_missing_fields",
+            "message": (
+                "sequence_diversity requires query identity, accession, sseq, "
+                "qstart, qend, evalue, bitscore, and score in the effective "
+                "tabular outfmt"
+            ),
+            "missing_fields": ["sseq"],
+            "retryable": False,
+        }
+    }
+
+    xml_facade = client.post(
+        "/api/v1/elastic-blast/submit",
+        headers={"X-ELB-API-Token": "test-token"},
+        json={
+            "query_fasta": ">q1\nACGT\n",
+            "db": "core_nt",
+            "blast_options": {
+                "result_selection_policy": "sequence_diversity"
+            },
+        },
+    )
+    assert xml_facade.status_code == 422
+    assert xml_facade.json() == {
+        "detail": {
+            "code": "sequence_diversity_invalid_outfmt",
+            "message": (
+                "sequence_diversity requires tabular outfmt 6 or 7 via /v1/jobs"
+            ),
+            "retryable": False,
+        }
+    }
+
+
+def test_sequence_diversity_submit_separates_group_target_from_shard_pool(
+    main_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved: dict[str, Any] = {}
+    active = SimpleNamespace(
+        source_version="generation-1",
+        db_prefix="core_nt/generations/generation-1/core_nt",
+        shard_layout_prefix="core_nt/generations/generation-1/shards",
+        total_letters=1000,
+        total_sequences=10,
+        search_space=3000,
+    )
+    monkeypatch.setattr(main_module, "_ensure_loaded", lambda: None)
+    monkeypatch.setattr(
+        main_module, "_upload_fasta", lambda *_args: "https://example.invalid/queries/q.fa"
+    )
+    monkeypatch.setattr(main_module, "_azcopy_login", lambda: None)
+    monkeypatch.setattr(main_module, "_blob_base", lambda: "https://example.invalid")
+    monkeypatch.setattr(main_module, "_storage_oauth_token", lambda: "test-token")
+    monkeypatch.setattr(
+        main_module, "_blast_version_detail", lambda: {"version": "2.17.0+"}
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_db_version_detail",
+        lambda _db: {"version": "generation-1", "detail": {}},
+    )
+    monkeypatch.setattr(
+        main_module._exact_oracle, "read_active_database", lambda **_kwargs: active
+    )
+    monkeypatch.setattr(
+        main_module._exact_oracle,
+        "prepare_web_blast_statistics",
+        lambda **kwargs: (kwargs["options"], None),
+    )
+    monkeypatch.setattr(
+        main_module._exact_oracle,
+        "select_web_blast_partitions",
+        lambda _statistics, *, default_partitions: min(2, default_partitions),
+    )
+    monkeypatch.setattr(
+        main_module._exact_oracle,
+        "preserve_or_set_search_space",
+        lambda options, _search_space: options,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_save_job",
+        lambda job_id, data, *, require_persist: saved.update(
+            {"job_id": job_id, "data": data, "require_persist": require_persist}
+        ),
+    )
+    monkeypatch.setattr(main_module, "_dispatcher_once", lambda: False)
+    monkeypatch.setattr(main_module, "_queued_position", lambda _job_id: 1)
+    request = main_module.JobSubmitRequest(
+        program="blastn",
+        db="core_nt",
+        query_fasta=">q1\nACGT\n",
+        resource_profile="core_nt_safe",
+        blast_options={
+            "outfmt": "7 qseqid saccver sseq qstart qend evalue bitscore",
+            "max_target_seqs": 3,
+            "result_selection_policy": "sequence_diversity",
+        },
+    )
+
+    response = main_module.submit_job(request)
+
+    assert response["status"] == "queued"
+    assert saved["require_persist"] is True
+    job_data = saved["data"]
+    config = configparser.ConfigParser()
+    config.read_file(StringIO(job_data["config_ini"]))
+    assert "-max_target_seqs 2000" in config["blast"]["options"]
+    assert config["blast"]["requested-max-target-seqs"] == "3"
+    assert config["blast"]["candidate-pool-size-requested"] == "0"
+    assert config["blast"]["result-selection-policy"] == "sequence_diversity"
+    assert job_data["requested_sequence_groups"] == 3
+    assert job_data["candidate_pool_size_requested_per_shard"] is None
+    assert job_data["candidate_pool_size_applied_per_shard"] == 2000
+
+
+def _sequence_idempotent_request(main_module, *, outfmt: str):
+    return main_module.JobSubmitRequest(
+        program="blastn",
+        db="core_nt",
+        query_fasta=">q1\nACGT\n",
+        resource_profile="core_nt_safe",
+        idempotency_key="sequence-key",
+        blast_options={
+            "outfmt": outfmt,
+            "max_target_seqs": 3,
+            "result_selection_policy": "sequence_diversity",
+        },
+    )
+
+
+def test_sequence_diversity_validation_precedes_idempotency_replay(
+    main_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = main_module._job_id_from_idempotency_key("external_api:sequence-key")
+    monkeypatch.setattr(
+        main_module,
+        "_jobs",
+        {job_id: {"status": "completed", "result_selection_policy": "native_top_n"}},
+    )
+    monkeypatch.setattr(main_module, "_ensure_loaded", lambda: None)
+
+    with pytest.raises(main_module.HTTPException) as error:
+        main_module.submit_job(_sequence_idempotent_request(main_module, outfmt="5"))
+
+    assert error.value.status_code == 422
+    assert error.value.detail["code"] == "sequence_diversity_invalid_outfmt"
+
+
+def test_sequence_diversity_rejects_idempotency_key_bound_to_native_job(
+    main_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = main_module._job_id_from_idempotency_key("external_api:sequence-key")
+    monkeypatch.setattr(
+        main_module,
+        "_jobs",
+        {job_id: {"status": "completed", "result_selection_policy": "native_top_n"}},
+    )
+    monkeypatch.setattr(main_module, "_ensure_loaded", lambda: None)
+    monkeypatch.setattr(
+        main_module,
+        "_upload_fasta",
+        lambda *_args: pytest.fail("idempotency conflict must precede upload"),
+    )
+
+    with pytest.raises(main_module.HTTPException) as error:
+        main_module.submit_job(
+            _sequence_idempotent_request(
+                main_module,
+                outfmt="7 qseqid saccver sseq qstart qend evalue bitscore",
+            )
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail == {
+        "code": "sequence_diversity_idempotency_conflict",
+        "message": "idempotency_key is already bound to different result-selection semantics",
+        "retryable": False,
+    }
+
+
+def test_sequence_diversity_idempotent_replay_returns_matching_job(
+    main_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = main_module._job_id_from_idempotency_key("external_api:sequence-key")
+    monkeypatch.setattr(
+        main_module,
+        "_jobs",
+        {
+            job_id: {
+                "status": "completed",
+                "result_selection_policy": "sequence_diversity",
+                "requested_sequence_groups": 3,
+                "candidate_pool_size_applied_per_shard": 2000,
+            }
+        },
+    )
+    monkeypatch.setattr(main_module, "_ensure_loaded", lambda: None)
+    monkeypatch.setattr(
+        main_module,
+        "_upload_fasta",
+        lambda *_args: pytest.fail("matching replay must not upload"),
+    )
+
+    response = main_module.submit_job(
+        _sequence_idempotent_request(
+            main_module,
+            outfmt="7 qseqid saccver sseq qstart qend evalue bitscore",
+        )
+    )
+
+    assert response["job_id"] == job_id
+    assert response["status"] == "completed"
+    assert response["message"] == "Existing job returned for idempotency_key."
+
+
+def test_sequence_diversity_rejects_top_level_policy_before_side_effects(
+    main_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = main_module.JobSubmitRequest(
+        program="blastn",
+        db="core_nt",
+        query_fasta=">q1\nACGT\n",
+        result_selection_policy="sequence_diversity",
+    )
+    monkeypatch.setattr(main_module, "_ensure_loaded", lambda: None)
+    monkeypatch.setattr(
+        main_module,
+        "_upload_fasta",
+        lambda *_args: pytest.fail("top-level policy rejection must precede upload"),
+    )
+
+    with pytest.raises(main_module.HTTPException) as error:
+        main_module.submit_job(request)
+
+    assert error.value.status_code == 422
+    assert error.value.detail["code"] == "sequence_diversity_requires_structured_options"

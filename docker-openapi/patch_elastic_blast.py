@@ -296,6 +296,18 @@ def patch_azure_py(root: Path) -> None:
     )
     _replace_once_unless_present(
         path,
+        "            'ELB_RESULT_SELECTION_POLICY': cfg.blast.result_selection_policy,\n",
+        (
+            "            'ELB_RESULT_SELECTION_POLICY': cfg.blast.result_selection_policy,\n"
+            "            'ELB_CANDIDATE_POOL_SIZE_REQUESTED': (\n"
+            "                str(cfg.blast.candidate_pool_size_requested)\n"
+            "                if cfg.blast.candidate_pool_size_requested > 0 else ''\n"
+            "            ),\n"
+        ),
+        "'ELB_CANDIDATE_POOL_SIZE_REQUESTED': (",
+    )
+    _replace_once_unless_present(
+        path,
         (
             "        subs = {\n"
             "            'ELB_DOCKER_IMAGE': cfg.azure.elb_docker_image,\n"
@@ -614,6 +626,15 @@ def patch_requested_max_target_seqs(root: Path) -> None:
     )
     _replace_once_unless_present(
         config_path,
+        "    result_selection_policy: str = 'native_top_n'\n\n",
+        (
+            "    result_selection_policy: str = 'native_top_n'\n"
+            "    candidate_pool_size_requested: int = 0\n\n"
+        ),
+        "candidate_pool_size_requested: int = 0",
+    )
+    _replace_once_unless_present(
+        config_path,
         (
             "               'disk_backed_monolithic': "
             "ParamInfo(CFG_BLAST, 'disk-backed-monolithic')}\n"
@@ -639,6 +660,20 @@ def patch_requested_max_target_seqs(root: Path) -> None:
             "ParamInfo(CFG_BLAST, 'result-selection-policy')}\n"
         ),
         "'result_selection_policy': ParamInfo(CFG_BLAST, 'result-selection-policy')",
+    )
+    _replace_once_unless_present(
+        config_path,
+        (
+            "               'result_selection_policy': "
+            "ParamInfo(CFG_BLAST, 'result-selection-policy')}\n"
+        ),
+        (
+            "               'result_selection_policy': "
+            "ParamInfo(CFG_BLAST, 'result-selection-policy'),\n"
+            "               'candidate_pool_size_requested': "
+            "ParamInfo(CFG_BLAST, 'candidate-pool-size-requested')}\n"
+        ),
+        "'candidate_pool_size_requested': ParamInfo(CFG_BLAST, 'candidate-pool-size-requested')",
     )
     _replace_once_unless_present(
         config_path,
@@ -678,7 +713,30 @@ def patch_requested_max_target_seqs(root: Path) -> None:
             "                'result-selection-policy must be native_top_n or diversity_aware'\n"
             "            )\n"
         ),
-        "result-selection-policy must be native_top_n or diversity_aware",
+        "self.result_selection_policy not in",
+    )
+    _replace_once_unless_present(
+        config_path,
+        (
+            "        if self.result_selection_policy not in {'native_top_n', 'diversity_aware'}:\n"
+            "            errors.append(\n"
+            "                'result-selection-policy must be native_top_n or diversity_aware'\n"
+            "            )\n"
+        ),
+        (
+            "        if self.result_selection_policy not in {\n"
+            "            'native_top_n', 'diversity_aware', 'sequence_diversity'\n"
+            "        }:\n"
+            "            errors.append(\n"
+            "                'result-selection-policy must be native_top_n, diversity_aware, '\n"
+            "                'or sequence_diversity'\n"
+            "            )\n"
+            "        if not 0 <= self.candidate_pool_size_requested <= 5000:\n"
+            "            errors.append(\n"
+            "                'candidate-pool-size-requested must be between 0 and 5000'\n"
+            "            )\n"
+        ),
+        "candidate-pool-size-requested must be between 0 and 5000",
     )
 
 
@@ -821,6 +879,20 @@ def patch_finalizer_template(root: Path) -> None:
     )
     _replace_once_unless_present(
         path,
+        (
+            "        - name: ELB_RESULT_SELECTION_POLICY\n"
+            '          value: "${ELB_RESULT_SELECTION_POLICY}"\n'
+        ),
+        (
+            "        - name: ELB_RESULT_SELECTION_POLICY\n"
+            '          value: "${ELB_RESULT_SELECTION_POLICY}"\n'
+            "        - name: ELB_CANDIDATE_POOL_SIZE_REQUESTED\n"
+            '          value: "${ELB_CANDIDATE_POOL_SIZE_REQUESTED}"\n'
+        ),
+        "name: ELB_CANDIDATE_POOL_SIZE_REQUESTED",
+    )
+    _replace_once_unless_present(
+        path,
         "      restartPolicy: Never\n  # The finalizer writes terminal SUCCESS/FAILURE markers",
         (
             "      restartPolicy: Never\n"
@@ -944,6 +1016,32 @@ def patch_finalizer_script(root: Path, merge_script_source: Path) -> None:
     _replace_once_unless_present(
         path,
         (
+            "                    if ! zcat \"$f\" | awk '/^# Fields:/ || !/^#/' "
+            '>> "$MERGE_INPUT"; then\n'
+        ),
+        (
+            '                    if [ "${ELB_RESULT_SELECTION_POLICY:-native_top_n}" = '
+            '"sequence_diversity" ]; then\n'
+            '                        printf \'# ELB source-shard:%s\\n\' "$SHARD" '
+            '>> "$MERGE_INPUT"\n'
+            "                    fi\n"
+            "                    if ! zcat \"$f\" | awk '/^# Fields:/ || !/^#/' "
+            '>> "$MERGE_INPUT"; then\n'
+        ),
+        "# ELB source-shard:%s",
+    )
+    _replace_once_unless_present(
+        path,
+        '        TOTAL_ROWS=$(wc -l < "$MERGE_INPUT" 2>/dev/null || echo 0)\n',
+        (
+            '        export ELB_SUCCEEDED_SHARDS="$DOWNLOAD_SUCCESS_COUNT"\n'
+            '        TOTAL_ROWS=$(wc -l < "$MERGE_INPUT" 2>/dev/null || echo 0)\n'
+        ),
+        'export ELB_SUCCEEDED_SHARDS="$DOWNLOAD_SUCCESS_COUNT"',
+    )
+    _replace_once_unless_present(
+        path,
+        (
             '        TOTAL_ROWS=$(wc -l < "$MERGE_INPUT" 2>/dev/null || echo 0)\n'
             '        echo "Downloaded $SHARD_COUNT shard files, $TOTAL_ROWS tabular rows"\n\n'
             "        if ! /scripts/merge-sharded-results.sh \\\n"
@@ -978,11 +1076,17 @@ def patch_finalizer_script(root: Path, merge_script_source: Path) -> None:
             '            echo "ERROR: -dbsize requires a Web BLAST statistics manifest"\n'
             "            exit 1\n"
             "        fi\n\n"
-            '        if [ "${ELB_RESULT_SELECTION_POLICY:-native_top_n}" = "diversity_aware" ]; then\n'
-            '            export ELB_DIVERSITY_AWARE_CUTOFF="auto"\n'
-            '            ORACLE_SEARCH_BASES=""\n'
-            '            echo "Using diversity-aware proportional result selection"\n'
-            "        fi\n\n"
+            '        case "${ELB_RESULT_SELECTION_POLICY:-native_top_n}" in\n'
+            '            diversity_aware)\n'
+            '                export ELB_DIVERSITY_AWARE_CUTOFF="auto"\n'
+            '                ORACLE_SEARCH_BASES=""\n'
+            '                echo "Using diversity-aware proportional result selection"\n'
+            '                ;;\n'
+            '            sequence_diversity)\n'
+            '                ORACLE_SEARCH_BASES=""\n'
+            '                echo "Using sequence-diversity result selection"\n'
+            '                ;;\n'
+            '        esac\n\n'
             "        for ORACLE_BASE in $ORACLE_SEARCH_BASES; do\n"
             '            [ -n "${ELB_TIE_ORDER_FILE:-}" ] && break\n'
             '            ORACLE_BLOB="${ORACLE_BASE}/${ELB_METADATA_DIR}/tie-order-oracle.txt"\n'
@@ -1056,6 +1160,58 @@ def patch_finalizer_script(root: Path, merge_script_source: Path) -> None:
             "        if ! /scripts/merge-sharded-results.sh \\\n"
         ),
         "ELB_TIE_ORDER_FILE",
+    )
+    _replace_once_unless_present(
+        path,
+        (
+            '        if [ "$ORACLE_PARENT_RESULTS" != "$ELB_RESULTS" ]; then\n'
+            '            ORACLE_SEARCH_BASES="$ORACLE_SEARCH_BASES $ORACLE_PARENT_RESULTS"\n'
+            "        fi\n"
+            "        for ORACLE_BASE in $ORACLE_SEARCH_BASES; do\n"
+        ),
+        (
+            '        if [ "$ORACLE_PARENT_RESULTS" != "$ELB_RESULTS" ]; then\n'
+            '            ORACLE_SEARCH_BASES="$ORACLE_SEARCH_BASES $ORACLE_PARENT_RESULTS"\n'
+            "        fi\n"
+            '        case "${ELB_RESULT_SELECTION_POLICY:-native_top_n}" in\n'
+            '            diversity_aware)\n'
+            '                export ELB_DIVERSITY_AWARE_CUTOFF="auto"\n'
+            '                ORACLE_SEARCH_BASES=""\n'
+            '                echo "Using diversity-aware proportional result selection"\n'
+            '                ;;\n'
+            '            sequence_diversity)\n'
+            '                ORACLE_SEARCH_BASES=""\n'
+            '                echo "Using sequence-diversity result selection"\n'
+            '                ;;\n'
+            '        esac\n'
+            "        for ORACLE_BASE in $ORACLE_SEARCH_BASES; do\n"
+        ),
+        "Using sequence-diversity result selection",
+        allow_absent=True,
+    )
+    _replace_once_unless_present(
+        path,
+        (
+            '        if [ "${ELB_RESULT_SELECTION_POLICY:-native_top_n}" = "diversity_aware" ]; then\n'
+            '            export ELB_DIVERSITY_AWARE_CUTOFF="auto"\n'
+            '            ORACLE_SEARCH_BASES=""\n'
+            '            echo "Using diversity-aware proportional result selection"\n'
+            "        fi\n"
+        ),
+        (
+            '        case "${ELB_RESULT_SELECTION_POLICY:-native_top_n}" in\n'
+            '            diversity_aware)\n'
+            '                export ELB_DIVERSITY_AWARE_CUTOFF="auto"\n'
+            '                ORACLE_SEARCH_BASES=""\n'
+            '                echo "Using diversity-aware proportional result selection"\n'
+            '                ;;\n'
+            '            sequence_diversity)\n'
+            '                ORACLE_SEARCH_BASES=""\n'
+            '                echo "Using sequence-diversity result selection"\n'
+            '                ;;\n'
+            '        esac\n'
+        ),
+        "Using sequence-diversity result selection",
     )
 
     text = path.read_text()

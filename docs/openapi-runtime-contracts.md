@@ -1,11 +1,12 @@
 # OpenAPI Runtime Contracts
 
-This document records the dashboard-compatible OpenAPI behavior incorporated into this repository on 2026-09-10. The source natively includes the behavior validated in the `elb-openapi:4.55` dashboard image, plus source-level validation and input-bound hardening found during publication review. It retains the OpenAPI application version `3.7.6`.
+This document records the dashboard-compatible OpenAPI behavior incorporated into this repository on 2026-09-10. The source natively includes the behavior validated in the deployed `elb-openapi:4.55` dashboard image plus the opt-in sequence-diversity source contract targeted for `elb-openapi:4.56`. Image `4.56` has not been built or deployed. The OpenAPI application version remains `3.7.6`.
 
 The two version identifiers have different scopes:
 
 - `3.7.6` is the sibling OpenAPI application's API version.
-- `4.55` is the immutable image lineage used by `dotnetpower/elb-dashboard`.
+- `4.55` is the immutable image currently deployed by `dotnetpower/elb-dashboard`.
+- `4.56` is the future source target for this contract; it is not runtime evidence.
 
 ## Result readiness
 
@@ -22,14 +23,87 @@ The merge finalizer has a 30-minute active deadline. A partitioned run that does
 
 ## Result selection
 
-`blast_options.result_selection_policy` accepts two values:
+`blast_options.result_selection_policy` accepts three values:
 
 | Value | Contract |
 | --- | --- |
 | `native_top_n` | Default. Uses the BLAST score, raw-score, and database-order comparator. It does not promise representation from lower score classes when one tied class fills the result window. |
 | `diversity_aware` | Reserves a proportional share for distinct lower-score subjects. This is heuristic and does not claim native full-database top-N membership. |
+| `sequence_diversity` | Opt-in for partitioned tabular output only. Groups observed HSP rows by aligned subject sequence and query span, selects one representative row per group with the existing BLAST comparator, then returns at most `max_target_seqs` groups per query. |
 
 The selected policy and effective partition count are retained in job state and returned in public status payloads.
+
+Omitting the policy remains identical to explicit `native_top_n`. The
+`diversity_aware` accession-based algorithm is unchanged. No unsupported
+sequence-diversity request falls back to either existing policy.
+
+### Sequence identity
+
+Sequence-diversity identity is versioned as:
+
+```text
+sequence_identity_mode = aligned_sequence_query_span
+sequence_identity_version = 1
+signature = (query identity, uppercase(sseq with ASCII '-' removed), qstart, qend)
+```
+
+Whitespace and other characters are compared literally. Ambiguity symbols are
+compared literally after uppercasing. The implementation does not reverse
+complement sequences and does not reorder `qstart` and `qend`. Subject accession
+is not part of the signature, so one group may contain several accessions and
+one accession may occur in several groups.
+
+The representative comparator is the existing merger comparator: smaller
+e-value, then higher raw score when available (otherwise higher bit score), then
+existing database/source order or stable input order, with original ordinal as
+the final fallback. Only the representative HSP row is written to the canonical
+merged output for this policy; the existing policies continue to emit every HSP
+row for each selected accession.
+
+### Candidate pool
+
+`blast_options.candidate_pool_size` is a positive integer used only by
+`sequence_diversity`. It is the per-shard BLAST subject cap, separate from the
+final per-query group count in `max_target_seqs`. The server default is `2000`
+and the hard maximum is `5000`, matching the existing bounded 5,000-candidate
+runtime path. Values below `max_target_seqs`, above `5000`, non-integers, and use
+with another policy are rejected instead of clamped.
+
+The merger keeps row bodies in the input spool and ranking/signature metadata
+in a file-backed SQLite database. It does not collect the candidate pool or
+aligned sequences in an unbounded Python list.
+
+### Merge report
+
+The additive sequence-diversity report fields are:
+
+- `result_selection_policy_requested` and `result_selection_policy_applied`
+- `sequence_identity_mode` and `sequence_identity_version`
+- `requested_sequence_groups` and `returned_sequence_groups`
+- `candidate_pool_size_requested_per_shard` and
+	`candidate_pool_size_applied_per_shard`
+- `observed_candidate_rows`, `observed_candidate_subjects`, and
+	`observed_sequence_groups`
+- `expected_shards`, `succeeded_shards`, and
+	`candidate_pool_saturated_shards`
+- `observed_pool_complete` and `shortfall_reasons`
+
+`observed_pool_complete=true` means every expected shard provenance marker was
+observed and no shard/query candidate set reached the configured cap. It does
+not prove that the database was exhausted or that no unobserved candidate
+exists. Supported shortfall reasons are
+`candidate_pool_saturated`, `insufficient_unique_groups_in_observed_pool`, and
+`no_candidates_observed`; the report never claims `database_exhausted`.
+
+Per-group metadata includes `sequence_group_accession_count` and
+`sequence_group_source_row_count`. The current runtime has no stable deduplicated
+exact-HSP identity beyond source-row ordinal, so it deliberately omits
+`sequence_group_hsp_count` rather than inventing one. Group accession counts are
+not globally additive because the same accession can belong to several groups.
+
+The finalizer runs only after every expected shard has produced a readable
+result. Missing or unreadable shards create a terminal failure marker and no
+canonical merged result; partial candidates are never presented as complete.
 
 ## Tabular output fields
 
@@ -44,6 +118,45 @@ For `outfmt 7`, the authoritative `# Fields:` header is preserved. Consumers sho
 5. `score`
 
 Fields already present in the caller's layout are not duplicated or reordered.
+
+For `sequence_diversity`, the caller must supply an effective tabular outfmt 6
+or 7 containing query identity (`qseqid`, `qacc`, `qaccver`, or `qgi`), subject
+accession (`sseqid`, `sacc`, `saccver`, or `sgi`), `sseq`, `qstart`, `qend`,
+`evalue`, and `bitscore`. The server appends `score` before validation. It does
+not silently add the other semantic fields.
+
+Invalid combinations return HTTP 422 with a bounded detail object. Stable codes
+include `sequence_diversity_invalid_outfmt`,
+`sequence_diversity_missing_fields`,
+`sequence_diversity_invalid_candidate_pool`,
+`sequence_diversity_requires_structured_options`,
+`sequence_diversity_requires_sharded_merge`, and
+`sequence_diversity_incompatible_context`. Reusing an idempotency key already
+bound to different policy, final-group, or applied-pool semantics returns HTTP
+409 `sequence_diversity_idempotency_conflict`. These errors set
+`retryable=false`; `missing_fields` is present when applicable. Request or
+sequence content is not included in the error.
+
+## Result downloads
+
+The existing `GET /v1/jobs/{job_id}/results` modes are unchanged:
+
+- `content=full` returns a ZIP containing every shard `*.out.gz` / `*.out`.
+- `content=merged` returns a ZIP containing only `merged_results.out.gz`.
+- `content=xml` gunzips `merged_results.out.gz` and serves `application/xml`.
+
+Sequence diversity does not add a raw download mode and cannot be combined with
+outfmt 5/XML. One job has one policy-applied canonical merged result. Comparing
+native and sequence-diversity output requires two jobs submitted with different
+policies.
+
+## Downstream interpretation
+
+Sequence groups are selected before downstream accession collapse, accession
+union-coverage calculation, and identity/coverage filtering. Consequently,
+`max_target_seqs=N` does not guarantee N surviving accessions after those
+downstream operations. Group counts cannot reconstruct accession-level union
+coverage.
 
 ## Active database and search space
 
@@ -113,6 +226,7 @@ The source also includes the runtime guards used by the validated dashboard imag
 - reader/writer locking for shared database paths
 - finalizer deadlines and terminal failure projection
 - disk-backed shard-result merge and bounded oracle processing
+- disk-backed sequence-signature grouping with a 5,000-candidate per-shard cap
 - a 1,024-entry ceiling for shard-layout volumes and merge shard counts
 
 The Dockerfile asserts that these contracts are present in source, system-Python, and Azure CLI virtual-environment copies before the image can complete its build.
@@ -126,6 +240,12 @@ ELB_OPENAPI_ALLOW_UNAUTHENTICATED=1 \
 PYTHONPATH=docker-openapi/app \
 python -m pytest -q docker-openapi/tests
 ```
+
+The sequence-diversity source contract passed `185` tests in an isolated
+environment created from `docker-openapi/app/requirements.txt` and
+`docker-openapi/requirements-dev.txt`. The merge helper also passed shell syntax
+validation, changed Python files passed Ruff, and the runtime modules compiled.
+This is local source evidence only; no `4.56` image was built or deployed.
 
 The added contract suites cover:
 

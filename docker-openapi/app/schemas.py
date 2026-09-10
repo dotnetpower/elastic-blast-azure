@@ -12,7 +12,10 @@ from __future__ import annotations
 import json
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
+
+from result_selection import SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE
 
 # Default ``submission_source`` for externally submitted jobs. Lives here (a
 # plain literal, not an env-derived value) so the request models can default
@@ -104,14 +107,41 @@ class BlastOptions(BaseModel):
             "omit when these reference values are unavailable."
         ),
     )
-    result_selection_policy: Literal["native_top_n", "diversity_aware"] = Field(
+    result_selection_policy: Literal[
+        "native_top_n", "diversity_aware", "sequence_diversity"
+    ] = Field(
         "native_top_n",
         description=(
             "Final subject-selection policy. native_top_n reproduces the "
             "BLAST top-N comparator; diversity_aware reserves lower-score "
-            "subjects when a tied score class fills the result window."
+            "subjects when a tied score class fills the result window; "
+            "sequence_diversity selects one representative per aligned subject "
+            "sequence and query span for tabular output."
         ),
     )
+    candidate_pool_size: Optional[int] = Field(
+        None,
+        json_schema_extra={
+            "minimum": 1,
+            "maximum": SEQUENCE_DIVERSITY_MAX_CANDIDATE_POOL_SIZE,
+        },
+        description=(
+            "Per-shard BLAST subject candidate cap for sequence_diversity. "
+            "Rejected for other result-selection policies."
+        ),
+    )
+
+    @field_validator("candidate_pool_size", mode="before")
+    @classmethod
+    def validate_candidate_pool_type(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise PydanticCustomError(
+                "sequence_diversity_invalid_candidate_pool",
+                "candidate_pool_size must be a positive integer",
+            )
+        return value
     db_effective_search_space: Optional[int] = Field(
         None,
         ge=1,
@@ -167,7 +197,14 @@ class JobStatusResponse(BaseModel):
     results_ready_at: Optional[str] = None
     merged_at: Optional[str] = None
     db_partitions: Optional[int] = Field(None, ge=0)
-    result_selection_policy: Optional[Literal["native_top_n", "diversity_aware"]] = None
+    result_selection_policy: Optional[
+        Literal["native_top_n", "diversity_aware", "sequence_diversity"]
+    ] = None
+    sequence_identity_mode: Optional[Literal["aligned_sequence_query_span"]] = None
+    sequence_identity_version: Optional[int] = Field(None, ge=1)
+    requested_sequence_groups: Optional[int] = Field(None, ge=1)
+    candidate_pool_size_requested_per_shard: Optional[int] = Field(None, ge=1)
+    candidate_pool_size_applied_per_shard: Optional[int] = Field(None, ge=1)
 
 
 class JobListResponse(BaseModel):
@@ -209,6 +246,31 @@ class ExternalSubmitRequest(BaseModel):
     resource_profile: str = Field("standard")
     submission_source: str = Field(DEFAULT_EXTERNAL_SOURCE)
     external_correlation_id: Optional[str] = Field(None, max_length=128)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_sequence_diversity_on_xml_facade(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        options = value.get("options") if isinstance(value.get("options"), dict) else {}
+        blast_options = (
+            value.get("blast_options")
+            if isinstance(value.get("blast_options"), dict)
+            else {}
+        )
+        if (
+            value.get("result_selection_policy") == "sequence_diversity"
+            or "candidate_pool_size" in value
+            or options.get("result_selection_policy") == "sequence_diversity"
+            or "candidate_pool_size" in options
+            or blast_options.get("result_selection_policy") == "sequence_diversity"
+            or "candidate_pool_size" in blast_options
+        ):
+            raise PydanticCustomError(
+                "sequence_diversity_invalid_outfmt",
+                "sequence_diversity requires tabular outfmt 6 or 7 via /v1/jobs",
+            )
+        return value
 
 _MODE_A_EXAMPLE = {
     "summary": "Mode A — Blob URL (advanced)",

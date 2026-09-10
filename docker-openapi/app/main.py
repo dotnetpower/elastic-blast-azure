@@ -33,6 +33,8 @@ from urllib.parse import urlparse
 
 import uvicorn
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
@@ -91,6 +93,7 @@ try:
 except Exception:  # pragma: no cover - validated before precise submit
     _exact_oracle = None
 import reference_context as _reference_context
+import result_selection as _result_selection
 
 try:
     import eta as _eta
@@ -338,6 +341,30 @@ app = FastAPI(
     openapi_url="/openapi.json",
     openapi_tags=tags_metadata,
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def sequence_diversity_validation_error(
+    request: Request,
+    exc: RequestValidationError,
+):
+    """Return a stable detail object for sequence-diversity request errors."""
+    for error in exc.errors():
+        code = str(error.get("type") or "")
+        if not code.startswith("sequence_diversity_"):
+            continue
+        context = error.get("ctx") if isinstance(error.get("ctx"), dict) else {}
+        missing_raw = str((context or {}).get("missing_fields") or "")
+        detail: dict[str, Any] = {
+            "code": code,
+            "message": str(error.get("msg") or code),
+            "retryable": False,
+        }
+        missing_fields = [field for field in missing_raw.split(",") if field]
+        if missing_fields:
+            detail["missing_fields"] = missing_fields
+        return JSONResponse(status_code=422, content={"detail": detail})
+    return await request_validation_exception_handler(request, exc)
 
 # Security headers middleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -2069,6 +2096,69 @@ def _build_options(opts: BlastOptions | None, taxid: int | None, inclusive: bool
     return " ".join(parts)
 
 
+def _prepare_sequence_diversity_plan(
+    req: JobSubmitRequest,
+    *,
+    is_inline: bool,
+    web_blast_context: Any,
+):
+    opts = req.blast_options
+    if opts is None or opts.result_selection_policy != "sequence_diversity":
+        return None
+    if not is_inline:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "sequence_diversity_requires_structured_options",
+                "message": "sequence_diversity requires Mode B blast_options",
+                "retryable": False,
+            },
+        )
+    if web_blast_context not in (None, ""):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "sequence_diversity_incompatible_context",
+                "message": (
+                    "web_blast_statistical_context requires native_top_n "
+                    "result selection"
+                ),
+                "retryable": False,
+            },
+        )
+    db_name = _db_name_from_value(req.db)
+    profile = str(req.resource_profile or "").strip().lower()
+    if db_name != "core_nt" or profile not in {
+        "core_nt_precise",
+        "precise",
+        "core_nt_safe",
+    }:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "sequence_diversity_requires_sharded_merge",
+                "message": (
+                    "sequence_diversity requires a canonical partitioned "
+                    "core_nt merge profile"
+                ),
+                "retryable": False,
+            },
+        )
+    if _exact_oracle is None:
+        raise HTTPException(503, "Tabular option enrichment is unavailable")
+    effective_options = _exact_oracle.ensure_tabular_raw_score(
+        _build_options(opts, req.taxid, req.is_inclusive)
+    )
+    try:
+        return _result_selection.prepare_sequence_diversity_options(
+            effective_options,
+            max_target_seqs=opts.max_target_seqs,
+            candidate_pool_size=opts.candidate_pool_size,
+        )
+    except _result_selection.ResultSelectionValidationError as exc:
+        raise HTTPException(422, detail=exc.detail()) from exc
+
+
 def _build_external_options(opts: ExternalBlastOptions, taxid: int | None, inclusive: bool | None) -> str:
     if opts.outfmt != 5:
         raise HTTPException(400, "options.outfmt is fixed to 5 because the result pipeline requires BLAST XML")
@@ -2926,6 +3016,16 @@ def _external_job_payload(job_info: dict[str, Any]) -> dict[str, Any]:
     payload["result_selection_policy"] = job_info.get(
         "result_selection_policy", "native_top_n"
     )
+    for _selection_key in (
+        "sequence_identity_mode",
+        "sequence_identity_version",
+        "requested_sequence_groups",
+        "candidate_pool_size_requested_per_shard",
+        "candidate_pool_size_applied_per_shard",
+    ):
+        _selection_value = job_info.get(_selection_key)
+        if _selection_value is not None:
+            payload[_selection_key] = _selection_value
     payload["db_partitions"] = int(job_info.get("db_partitions", 0) or 0)
     for _runtime_key in ("exact_oracle", "web_blast_statistics"):
         _runtime_value = job_info.get(_runtime_key)
@@ -3146,12 +3246,85 @@ def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] = Head
     # Caller-supplied fields beyond the schema (e.g. request_id) — preserved so
     # they can be echoed on status/result for correlation. Bounded for safety.
     passthrough = _sanitize_passthrough(getattr(req, "model_extra", None))
+    model_extra = req.model_extra or {}
+    if model_extra.get("result_selection_policy") == "sequence_diversity" or (
+        "candidate_pool_size" in model_extra
+    ):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "sequence_diversity_requires_structured_options",
+                "message": (
+                    "sequence_diversity and candidate_pool_size must be nested "
+                    "under blast_options"
+                ),
+                "retryable": False,
+            },
+        )
+    is_b = req.query_fasta is not None
+    web_blast_context = (
+        req.blast_options.web_blast_statistical_context.model_dump()
+        if (
+            req.blast_options is not None
+            and req.blast_options.web_blast_statistical_context is not None
+        )
+        else model_extra.get("web_blast_statistical_context")
+    )
+    selection_policy = (
+        req.blast_options.result_selection_policy
+        if req.blast_options is not None
+        else "native_top_n"
+    )
+    candidate_pool_size = (
+        req.blast_options.candidate_pool_size
+        if req.blast_options is not None
+        else None
+    )
+    if candidate_pool_size is not None and selection_policy != "sequence_diversity":
+        raise HTTPException(
+            422,
+            detail={
+                "code": "sequence_diversity_invalid_candidate_pool",
+                "message": "candidate_pool_size is valid only for sequence_diversity",
+                "retryable": False,
+            },
+        )
+    sequence_plan = _prepare_sequence_diversity_plan(
+        req,
+        is_inline=is_b,
+        web_blast_context=web_blast_context,
+    )
 
     if req.idempotency_key:
         job_id = _job_id_from_idempotency_key(f"{submission_source}:{req.idempotency_key}")
         with _jobs_lock:
             existing = _jobs.get(job_id)
         if existing:
+            if sequence_plan is not None:
+                existing_policy = str(
+                    existing.get("result_selection_policy") or "native_top_n"
+                )
+                existing_groups = int(existing.get("requested_sequence_groups") or 0)
+                existing_pool = int(
+                    existing.get("candidate_pool_size_applied_per_shard") or 0
+                )
+                if (
+                    existing_policy != "sequence_diversity"
+                    or existing_groups != sequence_plan.requested_sequence_groups
+                    or existing_pool
+                    != sequence_plan.candidate_pool_size_applied_per_shard
+                ):
+                    raise HTTPException(
+                        409,
+                        detail={
+                            "code": "sequence_diversity_idempotency_conflict",
+                            "message": (
+                                "idempotency_key is already bound to different "
+                                "result-selection semantics"
+                            ),
+                            "retryable": False,
+                        },
+                    )
             replay: dict[str, Any] = {
                 "job_id": job_id,
                 "status": existing.get("status", "unknown"),
@@ -3171,24 +3344,7 @@ def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] = Head
             return replay
     else:
         job_id = uuid.uuid4().hex[:12]
-    is_b = req.query_fasta is not None
-    web_blast_context = (
-        req.blast_options.web_blast_statistical_context.model_dump()
-        if (
-            req.blast_options is not None
-            and req.blast_options.web_blast_statistical_context is not None
-        )
-        else (req.model_extra or {}).get("web_blast_statistical_context")
-    )
-    selection_policy = (
-        req.blast_options.result_selection_policy
-        if req.blast_options is not None
-        else "native_top_n"
-    )
-    if (
-        selection_policy == "diversity_aware"
-        and web_blast_context not in (None, "")
-    ):
+    if selection_policy == "diversity_aware" and web_blast_context not in (None, ""):
         raise HTTPException(
             400,
             "web_blast_statistical_context requires native_top_n result selection",
@@ -3213,7 +3369,11 @@ def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] = Head
         # native date tiering. Empty prefix => legacy flat results/<job_id>/.
         _results_prefix = _validate_results_prefix(getattr(req, "results_prefix", None))
         results_url = f"{_blob_base()}/results/{_results_prefix}{job_id}"
-        opts = _build_options(req.blast_options, req.taxid, req.is_inclusive)
+        opts = (
+            sequence_plan.options
+            if sequence_plan is not None
+            else _build_options(req.blast_options, req.taxid, req.is_inclusive)
+        )
     else:
         if not req.queries or not req.results:
             raise HTTPException(400, "Mode A requires queries and results Blob URLs")
@@ -3356,6 +3516,13 @@ def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] = Head
                 503,
                 "Active database statistics are required for precise core_nt sharding",
             ) from exc
+    if sequence_plan is not None:
+        config["blast"]["requested-max-target-seqs"] = str(
+            sequence_plan.requested_sequence_groups
+        )
+        config["blast"]["candidate-pool-size-requested"] = str(
+            sequence_plan.candidate_pool_size_requested_per_shard or 0
+        )
 
     from io import StringIO
     config_buf = StringIO()
@@ -3462,6 +3629,20 @@ def submit_job(req: JobSubmitRequest, x_elb_internal_token: Optional[str] = Head
     if passthrough:
         job_data["passthrough"] = passthrough
     job_data["result_selection_policy"] = selection_policy
+    if sequence_plan is not None:
+        job_data.update(
+            {
+                "sequence_identity_mode": _result_selection.SEQUENCE_IDENTITY_MODE,
+                "sequence_identity_version": _result_selection.SEQUENCE_IDENTITY_VERSION,
+                "requested_sequence_groups": sequence_plan.requested_sequence_groups,
+                "candidate_pool_size_requested_per_shard": (
+                    sequence_plan.candidate_pool_size_requested_per_shard
+                ),
+                "candidate_pool_size_applied_per_shard": (
+                    sequence_plan.candidate_pool_size_applied_per_shard
+                ),
+            }
+        )
     job_data["db_partitions"] = int(
         config["blast"].get("db-partitions", 0) or 0
     )
@@ -3625,6 +3806,17 @@ async def get_job_status(job_id: str):
         "error": job_info.get("error", ""),
         "kubernetes": {"summary": job_info.get("k8s_summary", {})},
     }
+    for selection_key in (
+        "result_selection_policy",
+        "sequence_identity_mode",
+        "sequence_identity_version",
+        "requested_sequence_groups",
+        "candidate_pool_size_requested_per_shard",
+        "candidate_pool_size_applied_per_shard",
+    ):
+        selection_value = job_info.get(selection_key)
+        if selection_value is not None:
+            _status_payload[selection_key] = selection_value
     if job_info.get("status") == "completed":
         status_files = _list_result_files(job_info)
         _status_payload["results_ready"] = bool(status_files)
