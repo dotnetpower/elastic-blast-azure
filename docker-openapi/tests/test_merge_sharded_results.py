@@ -368,6 +368,33 @@ def test_sequence_diversity_reports_candidate_pool_saturation(
     ]
 
 
+def test_sequence_diversity_bounds_candidate_pool_saturation_details(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        row
+        for shard in range(101)
+        for row in (
+            f"# ELB source-shard:{shard:03d}",
+            _row(f"acc-{shard:03d}", f"AAAA{shard:03d}"),
+        )
+    ]
+
+    _output_rows, report = _run_sequence_diversity_merge(
+        tmp_path,
+        rows,
+        max_target_seqs=1,
+        candidate_pool_size=1,
+        num_shards=101,
+    )
+
+    assert report["candidate_pool_saturated_shards"] == 101
+    assert len(report["candidate_pool_saturation_details"]) == 100
+    assert report["candidate_pool_saturation_details"][0]["source_shard"] == "000"
+    assert report["candidate_pool_saturation_details"][-1]["source_shard"] == "099"
+    assert report["candidate_pool_saturation_details_truncated"] is True
+
+
 def test_sequence_diversity_report_counts_match_observed_rows(tmp_path: Path) -> None:
     rows = [
         _row("acc-a", "AAAA", evalue="1e-30"),
@@ -464,7 +491,7 @@ def test_sequence_diversity_rejects_missing_expected_shard(tmp_path: Path) -> No
     assert "every expected shard" in proc.stderr
     assert not (tmp_path / "merged.out.gz").exists()
     assert not (tmp_path / "merge-report.json").exists()
-    assert list(tmp_path.glob("merge-tabular-*.sqlite3*")) == []
+    assert list(tmp_path.glob(".merged.out.gz.merge-tabular-*.sqlite3*")) == []
     assert list(tmp_path.glob(".*.tmp")) == []
 
 
@@ -503,7 +530,7 @@ def test_merge_publish_failure_does_not_expose_canonical_output(
     assert proc.returncode != 0
     assert not output_gz.exists()
     assert report_target.is_dir()
-    assert list(tmp_path.glob("merge-tabular-*.sqlite3*")) == []
+    assert list(tmp_path.glob(".merged.out.gz.merge-tabular-*.sqlite3*")) == []
     assert list(tmp_path.glob(".*.tmp")) == []
 
 
@@ -544,7 +571,7 @@ def test_concurrent_merge_owner_is_rejected_without_artifacts(tmp_path: Path) ->
     assert "timed out waiting for the canonical merge lock" in proc.stderr
     assert not output_gz.exists()
     assert not report_json.exists()
-    assert list(tmp_path.glob("merge-tabular-*.sqlite3*")) == []
+    assert list(tmp_path.glob(".merged.out.gz.merge-tabular-*.sqlite3*")) == []
     assert list(tmp_path.glob(".*.tmp")) == []
     with lock_path.open("r+") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -587,6 +614,23 @@ def test_waiting_merge_reuses_fresh_owner_artifacts(tmp_path: Path) -> None:
         with gzip.open(output_gz, "wt") as output_handle:
             output_handle.write("owner-result\n")
         report_json.write_text('{"queries": 1, "total_output_hits": 1}\n')
+        os.utime(output_gz, (1, 1))
+        os.utime(report_json, (1, 1))
+        lock_handle.seek(0)
+        json.dump(
+            {
+                "schema_version": 1,
+                "generation": "a" * 32,
+                "output_size": output_gz.stat().st_size,
+                "report_size": report_json.stat().st_size,
+                "total_output_hits": 1,
+                "queries": 1,
+            },
+            lock_handle,
+        )
+        lock_handle.write("\n")
+        lock_handle.truncate()
+        lock_handle.flush()
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
     stdout, stderr = process.communicate(timeout=5)
@@ -597,6 +641,70 @@ def test_waiting_merge_reuses_fresh_owner_artifacts(tmp_path: Path) -> None:
     with gzip.open(output_gz, "rt") as output_handle:
         assert output_handle.read() == "owner-result\n"
     assert (lock_path.stat().st_mode & 0o777) == 0o600
+
+
+def test_invalid_merge_lock_wait_does_not_create_lock_file(tmp_path: Path) -> None:
+    output_gz = tmp_path / "merged.out.gz"
+    proc = subprocess.run(  # noqa: S603 -- executes the checked-in merge helper.
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(tmp_path / "hits.tsv"),
+            str(output_gz),
+            str(tmp_path / "merge-report.json"),
+            "1",
+            "blastn",
+            "-outfmt 6 std score -max_target_seqs 1",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "ELB_MERGE_LOCK_WAIT_SECONDS": "not-a-number"},
+    )
+
+    assert proc.returncode != 0
+    assert "must be a number between 0 and 1800" in proc.stderr
+    assert not Path(f"{output_gz}.lock").exists()
+
+
+def test_merge_rejects_insufficient_dynamic_disk_capacity(tmp_path: Path) -> None:
+    input_tsv = tmp_path / "sparse-hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
+    stat = os.statvfs(tmp_path)
+    available = stat.f_bavail * stat.f_frsize
+    input_tsv.touch()
+    os.truncate(input_tsv, available // 4 + 64 * 1024 * 1024)
+
+    proc = subprocess.run(  # noqa: S603 -- executes the checked-in merge helper.
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(output_gz),
+            str(report_json),
+            "1",
+            "blastn",
+            "-outfmt 6 qseqid saccver sseq qstart qend evalue bitscore score "
+            "-max_target_seqs 1",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "ELB_RESULT_SELECTION_POLICY": "sequence_diversity",
+            "ELB_REQUESTED_MAX_TARGET_SEQS": "1",
+            "ELB_SUCCEEDED_SHARDS": "1",
+        },
+    )
+
+    assert proc.returncode != 0
+    assert "Insufficient merge disk capacity" in proc.stderr
+    assert not output_gz.exists()
+    assert not report_json.exists()
+    assert list(tmp_path.glob(".merged.out.gz.*.tmp")) == []
+    assert list(tmp_path.glob(".merged.out.gz.merge-tabular-*.sqlite3*")) == []
 
 
 def test_sequence_diversity_merge_accepts_pool_above_legacy_limit(
@@ -641,6 +749,11 @@ def test_sequence_diversity_merge_accepts_pool_above_legacy_limit(
     assert gzip_bytes[10 : gzip_bytes.index(b"\0", 10)] == b"merged.out"
     assert (output_gz.stat().st_mode & 0o777) == 0o640
     assert (report_json.stat().st_mode & 0o777) == 0o600
+    completion = json.loads(Path(f"{output_gz}.lock").read_text())
+    assert completion["schema_version"] == 1
+    assert len(completion["generation"]) == 32
+    assert completion["output_size"] == output_gz.stat().st_size
+    assert completion["report_size"] == report_json.stat().st_size
 
 
 def test_sequence_diversity_large_pool_uses_disk_backed_bounded_memory(
@@ -691,6 +804,20 @@ def test_sequence_diversity_large_pool_uses_disk_backed_bounded_memory(
     assert report["returned_sequence_groups"] == 6_000
     assert len(report["sequence_group_counts"]) == 5_000
     assert report["sequence_group_counts_truncated"] is True
+    assert report["candidate_pool_saturated_shards"] == 1
+    assert report["candidate_pool_saturation_details"] == [
+        {
+            "source_shard": "00",
+            "saturated_query_count": 1,
+            "max_observed_subjects": 6_000,
+        }
+    ]
+    assert report["merge_input_bytes"] == input_tsv.stat().st_size
+    assert report["sqlite_temp_bytes"] > 0
+    assert report["merge_disk_available_bytes_before"] > 0
+    assert report["merge_disk_available_bytes_after"] > 0
+    assert report["merge_disk_estimated_required_bytes"] >= 64 * 1024 * 1024
+    assert isinstance(report["merge_disk_pressure_warning"], bool)
 
 
 @pytest.mark.parametrize("num_shards", ["not-an-integer", "0", "1025"])

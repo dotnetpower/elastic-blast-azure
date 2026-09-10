@@ -54,6 +54,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -63,7 +64,11 @@ WEB_BLAST_STATISTICS_MAX_BYTES = 16 * 1024
 SEQUENCE_IDENTITY_MODE = "aligned_sequence_query_span"
 SEQUENCE_IDENTITY_VERSION = 1
 SEQUENCE_GROUP_REPORT_LIMIT = 5_000
+SEQUENCE_SATURATION_REPORT_LIMIT = 100
 SEQUENCE_SOURCE_MARKER = "# ELB source-shard:"
+MERGE_COMPLETION_SCHEMA_VERSION = 1
+MERGE_DISK_MIN_RESERVE_BYTES = 64 * 1024 * 1024
+MERGE_DISK_MAX_RESERVE_BYTES = 512 * 1024 * 1024
 _REGISTERED_SQLITE_STORES = []
 _REGISTERED_TEMP_ARTIFACTS = []
 
@@ -135,6 +140,59 @@ def cleanup_registered_temp_artifacts():
         _REGISTERED_TEMP_ARTIFACTS.pop().unlink(missing_ok=True)
 
 
+def read_merge_completion(lock_handle):
+    try:
+        lock_handle.seek(0)
+        payload = json.loads(lock_handle.read() or "null")
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    generation = payload.get("generation")
+    integer_fields = ("output_size", "report_size", "total_output_hits", "queries")
+    if (
+        payload.get("schema_version") != MERGE_COMPLETION_SCHEMA_VERSION
+        or not isinstance(generation, str)
+        or re.fullmatch(r"[0-9a-f]{32}", generation) is None
+        or any(
+            isinstance(payload.get(field), bool)
+            or not isinstance(payload.get(field), int)
+            or payload[field] < 0
+            for field in integer_fields
+        )
+    ):
+        return None
+    return payload
+
+
+def write_merge_completion(lock_handle, output_path, report_path, total_hits, query_count):
+    payload = {
+        "schema_version": MERGE_COMPLETION_SCHEMA_VERSION,
+        "generation": uuid.uuid4().hex,
+        "output_size": output_path.stat().st_size,
+        "report_size": report_path.stat().st_size,
+        "total_output_hits": total_hits,
+        "queries": query_count,
+    }
+    lock_handle.seek(0)
+    json.dump(payload, lock_handle, sort_keys=True)
+    lock_handle.write("\n")
+    lock_handle.truncate()
+    lock_handle.flush()
+    os.fsync(lock_handle.fileno())
+
+
+def cleanup_scoped_stale_artifacts(output_path, report_path):
+    scoped_patterns = (
+        (output_path.parent, f".{output_path.name}.*.tmp"),
+        (output_path.parent, f".{output_path.name}.merge-tabular-*.sqlite3*"),
+        (report_path.parent, f".{report_path.name}.*.tmp"),
+    )
+    for parent, pattern in scoped_patterns:
+        for stale_path in parent.glob(pattern):
+            stale_path.unlink(missing_ok=True)
+
+
 @contextlib.contextmanager
 def gzip_output_writer(path, canonical_path, *, text):
     with Path(path).open("wb") as raw_output:
@@ -151,6 +209,15 @@ def gzip_output_writer(path, canonical_path, *, text):
 def acquire_merge_lock(output_path):
     # Keep the lock inode in place across runs. Unlinking after unlock can let
     # a waiter and a new process lock different inodes for the same path.
+    raw_wait_seconds = os.environ.get("ELB_MERGE_LOCK_WAIT_SECONDS", "1800")
+    try:
+        wait_seconds = float(raw_wait_seconds)
+    except ValueError as exc:
+        raise ValueError(
+            "ELB_MERGE_LOCK_WAIT_SECONDS must be a number between 0 and 1800"
+        ) from exc
+    if not 0 <= wait_seconds <= 1800:
+        raise ValueError("ELB_MERGE_LOCK_WAIT_SECONDS must be between 0 and 1800")
     lock_path = Path(f"{output_path}.lock")
     flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
     lock_fd = os.open(lock_path, flags, 0o600)
@@ -161,17 +228,13 @@ def acquire_merge_lock(output_path):
         with contextlib.suppress(OSError):
             os.close(lock_fd)
         raise
-    wait_seconds = float(os.environ.get("ELB_MERGE_LOCK_WAIT_SECONDS", "1800"))
-    if not 0 <= wait_seconds <= 1800:
-        lock_handle.close()
-        raise ValueError("ELB_MERGE_LOCK_WAIT_SECONDS must be between 0 and 1800")
+    baseline_completion = read_merge_completion(lock_handle)
     deadline = time.monotonic() + wait_seconds
-    wait_started_at = time.time()
     contended = False
     while True:
         try:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return lock_handle, lock_path, wait_started_at if contended else None
+            return lock_handle, lock_path, baseline_completion, contended
         except BlockingIOError as exc:
             contended = True
             if time.monotonic() >= deadline:
@@ -182,11 +245,25 @@ def acquire_merge_lock(output_path):
             time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
 
-def completed_merge_from_owner(output_path, report_path, wait_started_at):
-    if wait_started_at is None or not output_path.is_file() or not report_path.is_file():
+def completed_merge_from_owner(
+    output_path, report_path, baseline_completion, contended, lock_handle
+):
+    if not contended or not output_path.is_file() or not report_path.is_file():
+        return None
+    current_completion = read_merge_completion(lock_handle)
+    if (
+        current_completion is None
+        or (
+            baseline_completion is not None
+            and current_completion["generation"] == baseline_completion["generation"]
+        )
+    ):
         return None
     try:
-        if min(output_path.stat().st_mtime, report_path.stat().st_mtime) < wait_started_at:
+        if (
+            output_path.stat().st_size != current_completion["output_size"]
+            or report_path.stat().st_size != current_completion["report_size"]
+        ):
             return None
         report = json.loads(report_path.read_text())
         total_hits = report["total_output_hits"]
@@ -200,6 +277,8 @@ def completed_merge_from_owner(output_path, report_path, wait_started_at):
         or isinstance(query_count, bool)
         or not isinstance(query_count, int)
         or query_count < 0
+        or total_hits != current_completion["total_output_hits"]
+        or query_count != current_completion["queries"]
     ):
         return None
     return total_hits, query_count
@@ -803,22 +882,76 @@ def observed_sequence_counts(connection):
     return int(observed_groups), int(observed_subjects)
 
 
-def candidate_pool_saturated_shards(connection, candidate_pool_size):
-    return int(
-        connection.execute(
-            """
-            SELECT COUNT(DISTINCT source_shard)
-            FROM (
-                SELECT source_shard, query_id
-                FROM tabular_hits
-                WHERE source_shard != ''
-                GROUP BY source_shard, query_id
-                HAVING COUNT(DISTINCT accession) >= ?
-            )
-            """,
-            (candidate_pool_size,),
-        ).fetchone()[0]
+def candidate_pool_saturation_summary(connection, candidate_pool_size):
+    rows = connection.execute(
+        """
+        WITH per_query AS (
+            SELECT source_shard, query_id,
+                   COUNT(DISTINCT accession) AS observed_subjects
+            FROM tabular_hits
+            WHERE source_shard != ''
+            GROUP BY source_shard, query_id
+            HAVING observed_subjects >= ?
+        ), per_shard AS (
+            SELECT source_shard, COUNT(*) AS saturated_query_count,
+                   MAX(observed_subjects) AS max_observed_subjects
+            FROM per_query
+            GROUP BY source_shard
+        )
+        SELECT source_shard, saturated_query_count, max_observed_subjects,
+               COUNT(*) OVER () AS saturated_shard_count
+        FROM per_shard
+        ORDER BY source_shard
+        LIMIT ?
+        """,
+        (candidate_pool_size, SEQUENCE_SATURATION_REPORT_LIMIT),
+    ).fetchall()
+    saturated_shards = int(rows[0][3]) if rows else 0
+    details = [
+        {
+            "source_shard": str(row[0]),
+            "saturated_query_count": int(row[1]),
+            "max_observed_subjects": int(row[2]),
+        }
+        for row in rows
+    ]
+    return saturated_shards, details, saturated_shards > len(details)
+
+
+def available_disk_bytes(path):
+    try:
+        return int(shutil.disk_usage(path).free)
+    except OSError:
+        return None
+
+
+def sqlite_store_bytes(database_path):
+    total = 0
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        path = Path(f"{database_path}{suffix}")
+        try:
+            total += path.stat().st_size
+        except FileNotFoundError:
+            continue
+    return total
+
+
+def merge_disk_plan(directory, merge_input_bytes):
+    available = available_disk_bytes(directory)
+    estimated = max(64 * 1024 * 1024, merge_input_bytes * 4)
+    if available is None:
+        return available, estimated, None, False
+    reserve = min(
+        MERGE_DISK_MAX_RESERVE_BYTES,
+        max(MERGE_DISK_MIN_RESERVE_BYTES, available // 10),
     )
+    if available < estimated + reserve:
+        raise ValueError(
+            "Insufficient merge disk capacity: "
+            f"available={available} estimated_working_set={estimated} reserve={reserve}"
+        )
+    pressure_warning = available < estimated * 2 + reserve
+    return available, estimated, reserve, pressure_warning
 
 
 # Field-aware tabular column resolution. The shard merge historically assumed
@@ -1052,6 +1185,7 @@ def merge_tabular(
     outfmt="6",
     outfmt_spec="",
     gzip_header_path=None,
+    sqlite_scope_path=None,
 ):
     selection_policy = result_selection_policy()
     expected_shards = int(num_shards)
@@ -1117,8 +1251,26 @@ def merge_tabular(
     captured_fields = None
 
     input_path = Path(input_tsv)
+    merge_input_bytes = input_path.stat().st_size if input_path.exists() else 0
+    sqlite_scope = Path(sqlite_scope_path or output_gz)
+    (
+        merge_disk_available_before,
+        merge_disk_estimated_required_bytes,
+        merge_disk_reserve_bytes,
+        merge_disk_pressure_warning,
+    ) = merge_disk_plan(
+        sqlite_scope.parent,
+        merge_input_bytes,
+    )
+    if merge_disk_pressure_warning:
+        warnings.append(
+            "Merge disk pressure detected: available space is below the "
+            "estimated temporary working-set size"
+        )
     database_fd, database_name = tempfile.mkstemp(
-        prefix="merge-tabular-", suffix=".sqlite3", dir=input_path.parent
+        prefix=f".{sqlite_scope.name}.merge-tabular-",
+        suffix=".sqlite3",
+        dir=sqlite_scope.parent,
     )
     os.close(database_fd)
     database_path = Path(database_name)
@@ -1128,6 +1280,11 @@ def merge_tabular(
         unlink_sqlite_store(database_path)
         raise
     register_sqlite_store(connection, database_path)
+    if merge_disk_available_before is not None and merge_disk_reserve_bytes is not None:
+        page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+        max_database_bytes = merge_disk_available_before - merge_disk_reserve_bytes
+        max_page_count = max(1, max_database_bytes // page_size)
+        connection.execute(f"PRAGMA max_page_count={max_page_count}")
     connection.execute("PRAGMA journal_mode=OFF")
     connection.execute("PRAGMA synchronous=OFF")
     connection.execute("PRAGMA temp_store=FILE")
@@ -1536,11 +1693,20 @@ def merge_tabular(
         "warnings": warnings,
         "result_selection_policy_requested": selection_policy,
         "result_selection_policy_applied": selection_policy,
+        "merge_input_bytes": merge_input_bytes,
+        "sqlite_temp_bytes": sqlite_store_bytes(database_path),
+        "merge_disk_available_bytes_before": merge_disk_available_before,
+        "merge_disk_available_bytes_after": available_disk_bytes(sqlite_scope.parent),
+        "merge_disk_estimated_required_bytes": merge_disk_estimated_required_bytes,
+        "merge_disk_reserve_bytes": merge_disk_reserve_bytes,
+        "merge_disk_pressure_warning": merge_disk_pressure_warning,
     }
     if sequence_columns is not None:
         observed_groups, observed_subjects = observed_sequence_counts(connection)
-        saturated_shards = candidate_pool_saturated_shards(
+        saturated_shards, saturation_details, saturation_details_truncated = (
+            candidate_pool_saturation_summary(
             connection, candidate_pool_size
+            )
         )
         shortfall_reasons = []
         if saturated_shards:
@@ -1565,6 +1731,10 @@ def merge_tabular(
                 "expected_shards": expected_shards,
                 "succeeded_shards": succeeded_shards,
                 "candidate_pool_saturated_shards": saturated_shards,
+                "candidate_pool_saturation_details": saturation_details,
+                "candidate_pool_saturation_details_truncated": (
+                    saturation_details_truncated
+                ),
                 "observed_pool_complete": (
                     len(observed_source_shards) == expected_shards
                     and saturated_shards == 0
@@ -2231,9 +2401,16 @@ temporary_report_path = None
 lock_handle = None
 lock_path = None
 try:
-    lock_handle, lock_path, wait_started_at = acquire_merge_lock(final_output_path)
+    lock_handle, lock_path, baseline_completion, lock_contended = acquire_merge_lock(
+        final_output_path
+    )
+    cleanup_scoped_stale_artifacts(final_output_path, final_report_path)
     completed_by_owner = completed_merge_from_owner(
-        final_output_path, final_report_path, wait_started_at
+        final_output_path,
+        final_report_path,
+        baseline_completion,
+        lock_contended,
+        lock_handle,
     )
     if completed_by_owner is not None:
         total_hits, query_count = completed_by_owner
@@ -2270,12 +2447,20 @@ try:
                 outfmt=outfmt,
                 outfmt_spec=outfmt_spec,
                 gzip_header_path=final_output_path,
+                sqlite_scope_path=final_output_path,
             )
         # The outer finalizer validates gzip, uploads both named artifacts, and
         # writes SUCCESS last. Publish the report first so a report failure can
         # never expose a new readiness-bearing canonical output.
         os.replace(temporary_report_path, final_report_path)
         os.replace(temporary_output_path, final_output_path)
+        write_merge_completion(
+            lock_handle,
+            final_output_path,
+            final_report_path,
+            total_hits,
+            query_count,
+        )
 finally:
     cleanup_merge_resources(
         lock_handle,
