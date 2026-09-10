@@ -183,14 +183,18 @@ def write_merge_completion(lock_handle, output_path, report_path, total_hits, qu
 
 
 def cleanup_scoped_stale_artifacts(output_path, report_path):
-    scoped_patterns = (
-        (output_path.parent, f".{output_path.name}.*.tmp"),
-        (output_path.parent, f".{output_path.name}.merge-tabular-*.sqlite3*"),
-        (report_path.parent, f".{report_path.name}.*.tmp"),
-    )
-    for parent, pattern in scoped_patterns:
-        for stale_path in parent.glob(pattern):
-            stale_path.unlink(missing_ok=True)
+    temporary_targets = (output_path, report_path)
+    for target in temporary_targets:
+        exact_name = re.compile(
+            rf"\.{re.escape(target.name)}\.[a-z0-9_]{{8}}\.tmp"
+        )
+        for stale_path in target.parent.glob(f".{target.name}.*.tmp"):
+            if exact_name.fullmatch(stale_path.name):
+                stale_path.unlink(missing_ok=True)
+    for stale_path in output_path.parent.glob(
+        f".{output_path.name}.merge-tabular-*.sqlite3*"
+    ):
+        stale_path.unlink(missing_ok=True)
 
 
 @contextlib.contextmanager

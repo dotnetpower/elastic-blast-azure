@@ -534,6 +534,53 @@ def test_merge_publish_failure_does_not_expose_canonical_output(
     assert list(tmp_path.glob(".*.tmp")) == []
 
 
+def test_stale_cleanup_preserves_prefixed_sibling_target(tmp_path: Path) -> None:
+    input_tsv = tmp_path / "hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
+    stale_output_temp = tmp_path / ".merged.out.gz.abcdefgh.tmp"
+    sibling_output_temp = tmp_path / ".merged.out.gz.sibling.abcdefgh.tmp"
+    stale_report_temp = tmp_path / ".merge-report.json.abcdefgh.tmp"
+    sibling_report_temp = tmp_path / ".merge-report.json.sibling.abcdefgh.tmp"
+    input_tsv.write_text("# ELB source-shard:00\n" + _row("acc-a", "AAAA") + "\n")
+    for path in (
+        stale_output_temp,
+        sibling_output_temp,
+        stale_report_temp,
+        sibling_report_temp,
+    ):
+        path.write_text("temporary")
+
+    proc = subprocess.run(  # noqa: S603 -- executes the checked-in merge helper.
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(output_gz),
+            str(report_json),
+            "1",
+            "blastn",
+            "-outfmt 6 qseqid saccver sseq qstart qend evalue bitscore score "
+            "-max_target_seqs 1",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "ELB_RESULT_SELECTION_POLICY": "sequence_diversity",
+            "ELB_REQUESTED_MAX_TARGET_SEQS": "1",
+            "ELB_SUCCEEDED_SHARDS": "1",
+        },
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert not stale_output_temp.exists()
+    assert not stale_report_temp.exists()
+    assert sibling_output_temp.read_text() == "temporary"
+    assert sibling_report_temp.read_text() == "temporary"
+
+
 def test_concurrent_merge_owner_is_rejected_without_artifacts(tmp_path: Path) -> None:
     input_tsv = tmp_path / "hits.tsv"
     output_gz = tmp_path / "merged.out.gz"
